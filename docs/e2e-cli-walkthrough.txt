@@ -1,0 +1,321 @@
+Pretend repo: ~/src/acme-payments
+
+$ cd ~/src/acme-payments
+$ awdit review
+
+awdit> Starting new run...
+[* create run_id: 2026-03-27_160842 *]
+[* create .awdit/runs/2026-03-27_160842/ *]
+[* open sqlite db: .awdit/awdit.db *]
+[* insert runs row: status=starting *]
+[* agent names not configured yet, using slot labels *]
+
+awdit> Repository detected: `acme-payments`
+awdit> What do you want to review?
+awdit>   1. Diff against main
+awdit>   2. Whole repo
+awdit>   3. Single commit
+awdit>   4. Explicit file list
+awdit>   5. GitHub PR
+awdit>   6. Pasted diff/text
+user> 1
+
+awdit> Using base ref: `main`
+awdit> Scope rules decide which tracked files awdit may inspect or pull in as surrounding context.
+awdit> Include globs:
+awdit>   1. `app/**`
+awdit>   2. `tests/**`
+awdit>   3. `migrations/**`
+awdit> Exclude globs:
+awdit>   1. `docs/**`
+awdit>   2. `snapshots/**`
+awdit> Continue? [Y/n]
+user> y
+
+[* resolve git diff against main *]
+[* changed files: app/api/refunds.py, app/auth.py, app/webhooks.py, tests/test_refunds.py *]
+[* expand surrounding context under include/exclude rules and context budget *]
+[* write target snapshot to run.json *]
+
+awdit> Choose a model for each agent slot from config.
+awdit> Hunter 1
+awdit>   1. gpt-5.4
+awdit>   2. gpt-5.4-mini
+user> 1
+
+awdit> Hunter 2
+awdit>   1. gpt-5.4
+awdit>   2. gpt-5.4-mini
+user> 1
+
+awdit> Skeptic 1
+awdit>   1. gpt-5.4
+awdit>   2. gpt-5.4-mini
+user> 1
+
+awdit> Skeptic 2
+awdit>   1. gpt-5.4
+awdit>   2. gpt-5.4-mini
+user> 2
+
+awdit> Referee 1
+awdit>   1. gpt-5.4
+awdit>   2. gpt-5.4-mini
+user> 1
+
+awdit> Referee 2
+awdit>   1. gpt-5.4
+awdit>   2. gpt-5.4-mini
+user> 1
+
+awdit> Solver 1
+awdit>   1. gpt-5.4
+awdit>   2. gpt-5.4-mini
+user> 1
+
+awdit> Solver 2
+awdit>   1. gpt-5.4
+awdit>   2. gpt-5.4-mini
+user> 2
+
+[* snapshot selected models into db and run.json *]
+
+awdit> Do you want to attach external resources or Markdown files for any agent? [y/N]
+user> y
+
+awdit> Select agent slot:
+awdit>   1. Hunter 1
+awdit>   2. Hunter 2
+awdit>   3. Skeptic 1
+awdit>   4. Skeptic 2
+awdit>   5. Referee 1
+awdit>   6. Referee 2
+awdit>   7. Solver 1
+awdit>   8. Solver 2
+awdit>   9. Done
+user> 1
+
+awdit> Enter local file paths, comma-separated:
+user> ~/notes/payment-threat-model.md, ~/notes/auth-review-notes.md
+[* validate file paths exist *]
+[* record resource attachments for Hunter 1 *]
+
+awdit> Select agent slot:
+awdit>   1. Hunter 1
+awdit>   2. Hunter 2
+awdit>   3. Skeptic 1
+awdit>   4. Skeptic 2
+awdit>   5. Referee 1
+awdit>   6. Referee 2
+awdit>   7. Solver 1
+awdit>   8. Solver 2
+awdit>   9. Done
+user> 9
+
+[* render prompts for all agents *]
+[* write exact prompt snapshots to .awdit/runs/2026-03-27_160842/prompts/ *]
+
+awdit> Launching hunters...
+[* Hunter 1 analyzing code and citing exact code lines for every issue *]
+[* Hunter 2 analyzing code and citing exact code lines for every issue *]
+[* Hunter 1 writes raw markdown report *]
+[* Hunter 2 writes raw markdown report *]
+[* insert agent_runs rows for both hunters *]
+
+awdit> Hunters finished.
+awdit> Example hunter findings:
+awdit>   Hunter 1:
+awdit>     - possible auth bypass in `app/auth.py:42-55,88-93`
+awdit>     - missing org scoping in `app/api/refunds.py:71-90`
+awdit>     - retry desync in `app/jobs/retries.py:14-26`
+awdit>   Hunter 2:
+awdit>     - auth bypass in `app/auth.py:44-54,88-92`
+awdit>     - non-constant-time compare in `app/webhooks.py:33-47`
+awdit>     - missing org scoping in `app/api/refunds.py:73-89`
+
+[* parse hunter reports into structured findings with file+line spans *]
+[* dedupe by cited line overlap *]
+[* auth bypass overlap > 2/3, merge into one issue *]
+[* refund scoping overlap > 2/3, merge into one issue *]
+[* no overlap for webhook compare or retry desync, keep separate *]
+[* partial-overlap findings under 2/3 would be preserved and specially tagged for skeptics *]
+[* both hunters are marked as co-originators for shared merged findings *]
+[* create issue ledger: AWD-001 auth bypass, AWD-002 refund scoping, AWD-003 webhook compare, AWD-004 retry desync *]
+[* write per-issue markdown files with code links under .awdit/runs/2026-03-27_160842/issues/ *]
+[* write findings.json and candidate ledger to db *]
+
+awdit> Launching skeptics on the shared hunter issue ledger...
+[* Skeptic 1 reviewing AWD-001..004 *]
+[* Skeptic 2 reviewing AWD-001..004 *]
+[* writing Skeptic 1 report to db and markdown *]
+[* writing Skeptic 2 report to db and markdown *]
+
+awdit> Skeptics finished.
+awdit> Example skeptic outcomes:
+awdit>   Skeptic 1
+awdit>     - AWD-001: ACCEPT
+awdit>     - AWD-002: DISPROVE
+awdit>     - AWD-003: ACCEPT
+awdit>     - AWD-004: DISPROVE
+awdit>   Skeptic 2
+awdit>     - AWD-001: ACCEPT
+awdit>     - AWD-002: DISPROVE
+awdit>     - AWD-003: ACCEPT
+awdit>     - AWD-004: DISPROVE
+
+[* build structured issue packets for referees *]
+[* each packet includes: finding ID, code refs, hunter provenance, skeptic conclusions, confidence, overlap notes, issue md links *]
+[* AWD-002 and AWD-004 now carry 'double skeptic disprove' signal into referee stage *]
+
+awdit> Launching referees...
+[* Referee 1 reviewing all issue packets independently *]
+[* Referee 2 reviewing all issue packets independently *]
+[* writing raw referee reports to db and markdown *]
+
+awdit> Referees finished.
+awdit> Example referee outcomes before merge:
+awdit>   Referee 1
+awdit>     - AWD-001: REAL BUG
+awdit>     - AWD-002: NOT A BUG
+awdit>     - AWD-003: REAL BUG
+awdit>     - AWD-004: NOT A BUG
+awdit>   Referee 2
+awdit>     - AWD-001: REAL BUG
+awdit>     - AWD-002: REAL BUG
+awdit>     - AWD-003: REAL BUG
+awdit>     - AWD-004: NOT A BUG
+
+[* compare referee outputs *]
+[* agreement on AWD-001, AWD-003, AWD-004 *]
+[* disagreement on AWD-002 only *]
+
+awdit> Running short referee rebuttal round for disagreements...
+[* Referee 1 rebuttal on AWD-002: upstream scoping is reachable before query *]
+[* Referee 2 rebuttal on AWD-002: async retry path bypasses upstream scoping *]
+[* write rebuttal artifacts to db and markdown *]
+
+[* coordinator merges referee stage into one merged referee report *]
+[* merged referee outcomes *]
+[* AWD-001: recommended REAL BUG *]
+[* AWD-002: disputed, recommended REAL BUG, include both referee positions *]
+[* AWD-003: recommended REAL BUG *]
+[* AWD-004: recommended NOT A BUG *]
+[* because both skeptics said NOT A BUG and merged referee outcome is NOT A BUG for AWD-004, it is recorded in final referee report but skipped from human truth review *]
+[* write merged_referee_report.md *]
+
+awdit> Merged referee report ready:
+awdit>   `.awdit/runs/2026-03-27_160842/reports/merged_referee_report.md`
+
+awdit> Human truth review
+awdit> Only issues that survived to human review are shown here.
+
+awdit> AWD-001
+awdit> Claim: Public `X-Internal-User` header can bypass auth in `app/auth.py`
+awdit> Merged referee recommendation: REAL BUG
+awdit> Issue report: `.awdit/runs/2026-03-27_160842/issues/AWD-001.md`
+awdit> Code refs: `app/auth.py:42-55`, `app/auth.py:88-93`
+awdit> Truth? [y]es / [n]o / [u]nsure
+user> y
+
+awdit> AWD-002
+awdit> Claim: Refund lookup may be missing org scoping in `app/api/refunds.py`
+awdit> Merged referee recommendation: REAL BUG
+awdit> Referee disagreement note: included in issue report
+awdit> Issue report: `.awdit/runs/2026-03-27_160842/issues/AWD-002.md`
+awdit> Code refs: `app/api/refunds.py:71-90`
+awdit> Truth? [y]es / [n]o / [u]nsure
+user> n
+
+awdit> AWD-003
+awdit> Claim: Webhook signature compare uses non-constant-time equality in `app/webhooks.py`
+awdit> Merged referee recommendation: REAL BUG
+awdit> Issue report: `.awdit/runs/2026-03-27_160842/issues/AWD-003.md`
+awdit> Code refs: `app/webhooks.py:33-47`
+awdit> Truth? [y]es / [n]o / [u]nsure
+user> y
+
+[* update finding truth labels in db *]
+[* AWD-004 remains documented in merged referee report as not-a-bug and was never shown in human truth review *]
+[* hunters receive no penalty for false positives *]
+[* if both hunters found the same confirmed issue, both get the same reward *]
+[* if both hunters found the same rejected issue, both get the same no-penalty outcome *]
+[* if both skeptics reached the same conclusion, both get the same reward or penalty outcome *]
+[* if both referees reached the same conclusion, both get the same reward or penalty outcome *]
+[* write provisional scoring to scores.json *]
+
+awdit> Provisional score summary
+awdit>   Hunter 1: 18
+awdit>   Hunter 2: 18
+awdit>   Skeptic 1: 11
+awdit>   Skeptic 2: 11
+awdit>   Referee 1: 7
+awdit>   Referee 2: 3
+
+awdit> Confirmed bugs: 2
+awdit> Rejected bugs: 1
+awdit> Auto-dismissed without human review: 1
+awdit> Continue to solver stage with confirmed bugs only? [Y/n]
+user> y
+
+[* create worktree for Solver 1: .awdit/worktrees/2026-03-27_160842/solver_1 *]
+[* create worktree for Solver 2: .awdit/worktrees/2026-03-27_160842/solver_2 *]
+[* both start from same clean base ref *]
+
+awdit> Launching solvers from merged referee report...
+[* Solver 1 fixing AWD-001 and AWD-003 independently, one commit per bug *]
+[* Solver 1 writes per-bug markdown solution reports with code links *]
+[* Solver 2 fixing AWD-001 and AWD-003 independently, one commit per bug *]
+[* Solver 2 writes per-bug markdown solution reports with code links *]
+
+awdit> Solvers finished. Running validations now...
+[* run configured validation commands on Solver 1 full branch *]
+[* run configured validation commands on Solver 2 full branch *]
+[* store validation logs in db and artifacts *]
+
+awdit> Referees are scoring solver fixes...
+[* Referee 1 scores Solver 1 and Solver 2 for each confirmed bug *]
+[* Referee 2 scores Solver 1 and Solver 2 for each confirmed bug *]
+[* write solver scores to db and solver_scores.json *]
+
+awdit> Choose the winning fix for each bug
+
+awdit> AWD-001
+awdit> Solver 1 avg: 8.5
+awdit>   Solution report: `.awdit/runs/2026-03-27_160842/solvers/solver_1/AWD-001.md`
+awdit>   Code link: `app/auth.py` in worktree `solver_1`
+awdit> Solver 2 avg: 7.0
+awdit>   Solution report: `.awdit/runs/2026-03-27_160842/solvers/solver_2/AWD-001.md`
+awdit>   Code link: `app/auth.py` in worktree `solver_2`
+awdit> Pick [1/2]
+user> 1
+
+awdit> AWD-003
+awdit> Solver 1 avg: 7.5
+awdit>   Solution report: `.awdit/runs/2026-03-27_160842/solvers/solver_1/AWD-003.md`
+awdit>   Code link: `app/webhooks.py` in worktree `solver_1`
+awdit> Solver 2 avg: 9.0
+awdit>   Solution report: `.awdit/runs/2026-03-27_160842/solvers/solver_2/AWD-003.md`
+awdit>   Code link: `app/webhooks.py` in worktree `solver_2`
+awdit> Pick [1/2]
+user> 2
+
+[* create integration worktree: .awdit/worktrees/2026-03-27_160842/selected *]
+[* cherry-pick selected per-bug commits in finding ID order *]
+[* write final amended report with links to old code and chosen fixed code *]
+[* update run row: status=completed *]
+
+awdit> Audit complete.
+
+awdit> Final run summary
+awdit>   Merged referee report:
+awdit>     `.awdit/runs/2026-03-27_160842/reports/merged_referee_report.md`
+awdit>   Final truth-labeled summary:
+awdit>     `.awdit/runs/2026-03-27_160842/reports/final_truth_labeled_summary.md`
+awdit>   Solver selection summary:
+awdit>     `.awdit/runs/2026-03-27_160842/reports/solver_selection_summary.md`
+
+awdit> Notes
+awdit>   - AWD-004 was recorded as NOT A BUG in the merged referee report
+awdit>   - AWD-004 did not require human truth review
+awdit>   - Hunters received no penalties for rejected findings
+awdit>   - Matching role conclusions shared the same outcome
