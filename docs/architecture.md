@@ -7,6 +7,9 @@ Working architecture draft. This document records the design decisions that are 
 - Build a Python-based interactive CLI for AI-assisted security review and repair.
 - Keep two top-level review shapes: `feature review` and `full repo review`.
 - Preserve the core hunter, skeptic, referee, and solver role families.
+- Keep one visible slot identity per run, with one live session max per slot.
+- Keep sessions warm by default, while allowing coordinator-managed compaction and rehydration when context gets bloated.
+- Allow bounded same-family debate only for skeptics and referees; do not allow a general agent chat mesh.
 - Keep prompt files editable and configurable; exact slot wording remains intentionally `TBD`.
 - Maintain a strict split between immutable run artifacts and evolving repo-scoped security memory.
 - Keep bug-truth validation inside the referee stage and fix-quality validation after solvers finish.
@@ -118,6 +121,9 @@ This area stores:
 
 ## Multi-Agent Architecture
 
+See [docs/agent-isolation-workflow.md](agent-isolation-workflow.md) for the canonical
+Mermaid diagram of slot isolation, bounded debate, and coordinator-owned procedural merges.
+
 ### Agent Slots
 There are 8 fixed agent slots:
 - Hunter 1
@@ -130,6 +136,15 @@ There are 8 fixed agent slots:
 - Solver 2
 
 Custom names may be added later. Slot labels are the public-facing default for now.
+
+### Slot Identity And Live Sessions
+- A slot identity is the stable user-facing role instance for one run, such as `Hunter 1`.
+- Each run keeps one visible slot identity per configured slot.
+- Each slot may have at most one live session at a time.
+- v1 is warm-first: live sessions stay warm across related work whenever context remains intact.
+- If context becomes bloated, the coordinator may compact and rehydrate the same slot identity.
+- Rehydration must be derived from checkpoint artifacts and referenced prior artifacts, not hidden coordinator paraphrase alone.
+- A more ephemeral execution option may still be worth exploring later, but it is not the v1 default.
 
 ### Model Selection
 - Each agent slot can use a different model.
@@ -184,11 +199,13 @@ Custom names may be added later. Slot labels are the public-facing default for n
 ### Hunters
 - Hunters compete independently on the same target.
 - Hunters are recall-first and may overgenerate candidate bugs aggressively.
+- Hunters never chat directly with each other.
 - Every finding must cite exact file paths and code line references.
 - Hunters write raw Markdown and structured JSON artifacts.
 
 ### Shared Candidate Ledger
 - Hunter output is normalized into a shared candidate ledger with stable finding IDs.
+- The coordinator owns dedupe into the shared candidate ledger.
 - Dedupe is driven by hunter-cited code lines.
 - If more than two-thirds of cited code lines overlap for the same issue, treat the findings as the same issue and merge them.
 - If issues overlap but the overlap is less than two-thirds, keep them separate and tag them as partial overlaps.
@@ -199,7 +216,11 @@ Custom names may be added later. Slot labels are the public-facing default for n
 - Skeptics compete independently on the shared hunter issue ledger.
 - Skeptics can challenge or accept existing issues, but they cannot introduce new issues.
 - Skeptic outputs must include their decision, reasoning, confidence, and cited lines when relevant.
+- If the coordinator detects a skeptic disagreement on an issue packet, it may open one short skeptic-to-skeptic debate thread for that packet only.
+- Skeptic debate uses a fixed evidence bundle, is capped at two turns per side, and is stored as an append-only transcript artifact.
+- Each skeptic may read the opposing artifact and the current live rebuttal history for that debate thread.
 - The coordinator uses skeptic outcomes to prioritize packets for referee attention.
+- The coordinator may emit a merged skeptic summary after skeptic outputs and any bounded debate, but it does not make substantive code-truth judgments itself.
 
 ### Issue Packets
 Each issue packet handed to referees should contain:
@@ -226,10 +247,14 @@ Each issue packet handed to referees should contain:
 ### Referee Merge And Rebuttal
 - After the independent referee pass, awdit compares referee outcomes.
 - Agreements are merged directly.
-- Disagreements trigger one short rebuttal round for disputed issues only.
+- Disagreements may trigger one bounded referee-to-referee rebuttal thread for disputed issues only.
+- Referee rebuttal uses a fixed evidence bundle, is capped at two turns per side, and is stored as an append-only transcript artifact.
+- Each referee may read the opposing artifact and the current live rebuttal history for that debate thread.
 - After rebuttals, the coordinator emits one merged referee report.
 - The merged report is the only referee report sent forward to human truth review.
 - Raw referee reports and rebuttal artifacts are still stored for transparency.
+- The coordinator performs the merge procedurally and does not make substantive code-truth judgments on its own.
+- If a rebuttal remains unresolved after the allowed turns, both referee positions are forwarded cleanly and minimally in the merged report.
 
 ### Auto-Dismissed Issues
 - If both skeptics challenge an issue successfully and the merged referee outcome is also `NOT A BUG`, that issue is not sent to human truth review.
@@ -269,6 +294,7 @@ Each issue packet handed to referees should contain:
 - Each referee writes an independent fix-comparison report.
 - The coordinator merges referee fix judgments into the solver comparison summary.
 - The merged solver comparison summary must be a forward-facing Markdown artifact with links back to the compared code and the relevant validation evidence.
+- The coordinator's role here is still procedural rather than substantive; unresolved disagreements should be preserved rather than flattened into false certainty.
 
 ### Human Fix Selection
 - The CLI shows both solver options per confirmed bug only after validation and referee comparison have completed.
@@ -305,9 +331,12 @@ Expected run-scoped areas include:
 - run metadata
 - prompt snapshots
 - derived role digests
+- session checkpoint or compaction artifacts
 - resource manifests and staged resource areas
 - raw agent reports
+- debate transcripts
 - run-local issue Markdown files
+- coordinator merge summaries
 - merged referee report
 - truth-labeled summary
 - solver outputs
@@ -405,6 +434,9 @@ flowchart TB
 - Referees decide bug truth before solver handoff.
 - Referees compare fixes only after shared baseline validation has run.
 - There is no separate pre-solver validator role.
+- Each slot has one visible slot identity per run and at most one live session at a time.
+- v1 uses warm sessions by default.
+- Debate is bounded to skeptic-to-skeptic and referee-to-referee threads only.
 - Run-local artifacts are immutable; repo-scoped memory evolves.
 - Every code-oriented stage must expose a forward-facing Markdown artifact path for human review.
 

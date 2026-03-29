@@ -152,6 +152,8 @@ user> 9
 [* prompt wording remains editable; exact slot wording is not frozen in architecture *]
 [* write exact prompt snapshots to .awdit/runs/2026-03-29_101530/prompts/ *]
 [* write .awdit/runs/2026-03-29_101530/resources/summary.md *]
+[* create one visible slot identity per run and one live session max per slot *]
+[* warm slot sessions are enabled by default for this run *]
 
 awdit> Launching hunters...
 [* Hunter 1 analyzing target scope and surrounding context with recall-first behavior *]
@@ -185,27 +187,40 @@ awdit> Launching skeptics on the shared hunter issue ledger...
 [* Skeptic 2 reviewing AWD-001..004 *]
 [* writing Skeptic 1 report to db and markdown *]
 [* writing Skeptic 2 report to db and markdown *]
-[* write .awdit/runs/2026-03-29_101530/reports/skeptic_summary.md *]
 
-awdit> Skeptics finished.
+awdit> Initial skeptic pass finished.
 awdit> Example skeptic outcomes:
 awdit>   Skeptic 1
 awdit>     - AWD-001: ACCEPT
 awdit>     - AWD-002: DISPROVE
 awdit>     - AWD-003: ACCEPT
-awdit>     - AWD-004: DISPROVE
+awdit>     - AWD-004: ACCEPT
 awdit>   Skeptic 2
 awdit>     - AWD-001: ACCEPT
-awdit>     - AWD-002: DISPROVE
+awdit>     - AWD-002: ACCEPT
 awdit>     - AWD-003: ACCEPT
 awdit>     - AWD-004: DISPROVE
 
+[* compare skeptic outputs *]
+[* agreement on AWD-001 and AWD-003 *]
+[* disagreement on AWD-002 and AWD-004 *]
+[* open skeptic disagreement thread for AWD-002 with fixed evidence bundle *]
+[* Skeptic 1 reads Skeptic 2 artifact and current rebuttal history for AWD-002 *]
+[* Skeptic 2 reads Skeptic 1 artifact and current rebuttal history for AWD-002 *]
+[* skeptic debate is capped at two turns per side and recorded as an append-only transcript artifact *]
+[* coordinator closes the AWD-002 skeptic thread and writes merged skeptic summary without making a code-truth judgment *]
+[* open skeptic disagreement thread for AWD-004 with fixed evidence bundle *]
+[* AWD-004 skeptic debate reaches the turn cap without resolution *]
+[* coordinator forwards both skeptic positions minimally in the skeptic summary *]
+[* write .awdit/runs/2026-03-29_101530/reports/skeptic_summary.md *]
+
 [* build structured issue packets for referees *]
-[* packet contents include case ID, code refs, hunter provenance, skeptic outcomes, attack-path summary, strongest counter-argument, and issue-file links *]
+[* packet contents include case ID, code refs, hunter provenance, skeptic outcomes, skeptic debate links when present, attack-path summary, strongest counter-argument, and issue-file links *]
 [* coordinator assigns packet priority state for referee attention: promote / hold / kill *]
 [* AWD-001 promoted, AWD-002 held for dispute, AWD-003 promoted, AWD-004 kill-candidate *]
 
 awdit> Launching referees...
+[* Skeptic 1 and Skeptic 2 stay warm for this run but do not receive new work in the referee stage *]
 [* Referee 1 independently reviews all packets, prioritizing promoted packets first *]
 [* Referee 1 re-reads nearby code, inspects auth flow, and records validation notes for AWD-001 *]
 [* Referee 2 independently reviews all packets, prioritizing promoted packets first *]
@@ -230,9 +245,13 @@ awdit>     - AWD-004: NOT A BUG
 [* disagreement on AWD-002 only *]
 
 awdit> Running short referee rebuttal round for disagreements...
-[* Referee 1 rebuttal on AWD-002: upstream scoping is reachable before query *]
-[* Referee 2 rebuttal on AWD-002: async retry path bypasses upstream scoping *]
-[* write rebuttal artifacts to db and markdown *]
+[* open referee disagreement thread for AWD-002 with fixed evidence bundle *]
+[* Referee 1 reads Referee 2 artifact and current rebuttal history for AWD-002 *]
+[* Referee 2 reads Referee 1 artifact and current rebuttal history for AWD-002 *]
+[* Referee 1 rebuttal turn 1 on AWD-002: upstream scoping is reachable before query *]
+[* Referee 2 rebuttal turn 1 on AWD-002: async retry path bypasses upstream scoping *]
+[* referee debate is capped at two turns per side and recorded as an append-only transcript artifact *]
+[* write rebuttal transcript artifacts to db and markdown *]
 
 [* coordinator merges referee stage into one merged referee report *]
 [* merged referee outcomes *]
@@ -292,6 +311,7 @@ user> y
 [* create worktree for Solver 1: .awdit/worktrees/2026-03-29_101530/solver_1 *]
 [* create worktree for Solver 2: .awdit/worktrees/2026-03-29_101530/solver_2 *]
 [* both start from the same clean base ref *]
+[* Hunter and skeptic slot sessions remain part of the run record, but only solver slots receive new work here *]
 
 awdit> Launching solvers from the confirmed bug list...
 [* Solver 1 fixing AWD-001 and AWD-003 independently, one commit per bug *]
@@ -348,6 +368,7 @@ user> 2
 [* update .awdit/repos/acme-payments_7f9d1c2a/cases/canonical_index.json with linked findings and truth outcomes *]
 [* append any user comments to .awdit/repos/acme-payments_7f9d1c2a/memory/repo_comments.md *]
 [* update run row: status=completed *]
+[* any slot that exceeded context budget during the run would have been compacted and rehydrated as the same slot identity *]
 
 awdit> Audit complete.
 

@@ -1,6 +1,6 @@
 # awdit
 
-`awdit` is a docs-first project for an AI-assisted security audit workflow that coordinates competing hunter, skeptic, referee, and solver agents around a single interactive CLI. The repository is intentionally architecture-first at this stage, with the current design captured in [docs/architecture.md](docs/architecture.md) and a full pretend end-to-end operator transcript in [docs/e2e-cli-walkthrough.txt](docs/e2e-cli-walkthrough.txt).
+`awdit` is a docs-first project for an AI-assisted security audit workflow that coordinates competing hunter, skeptic, referee, and solver agents around a single interactive CLI. The current design keeps visible persistent slot identities per run, warm-session orchestration by default, bounded skeptic/referee debate only, and coordinator-owned typed merges that stay procedural rather than substantive. The repository is intentionally architecture-first at this stage, with the current design captured in [docs/architecture.md](docs/architecture.md), the canonical slot/session workflow diagram in [docs/agent-isolation-workflow.md](docs/agent-isolation-workflow.md), and a full pretend end-to-end operator transcript in [docs/e2e-cli-walkthrough.txt](docs/e2e-cli-walkthrough.txt).
 
 The current implemented slice is the startup resource flow for `awdit review`:
 - awdit loads the effective config and resource defaults
