@@ -152,14 +152,18 @@ user> 9
 [* prompt wording remains editable; exact slot wording is not frozen in architecture *]
 [* write exact prompt snapshots to .awdit/runs/2026-03-29_101530/prompts/ *]
 [* write .awdit/runs/2026-03-29_101530/resources/summary.md *]
-[* create one visible slot identity per run and one live session max per slot *]
-[* warm slot sessions are enabled by default for this run *]
+[* create one visible slot identity and one initial reserved session epoch marker per slot for this run *]
+[* no slot workers are started yet; each worker will launch lazily on first dispatch *]
+[* warm slot sessions are enabled by default for this run and should stay live as long as possible *]
 
 awdit> Launching hunters...
+[* start Hunter 1 worker on first dispatch *]
+[* start Hunter 2 worker on first dispatch *]
 [* Hunter 1 analyzing target scope and surrounding context with recall-first behavior *]
 [* Hunter 2 analyzing the same scope independently *]
 [* Hunter 1 writes raw markdown report and JSON findings *]
 [* Hunter 2 writes raw markdown report and JSON findings *]
+[* both hunter workers write completed-dispatch checkpoints and remain live but idle *]
 [* insert agent_runs rows for both hunters *]
 
 awdit> Hunters finished.
@@ -174,15 +178,17 @@ awdit>     - non-constant-time compare in `app/webhooks.py:33-47`
 awdit>     - missing org scoping in `app/api/refunds.py:73-89`
 
 [* parse hunter reports into structured findings with exact file and line spans *]
-[* dedupe by cited line overlap into canonical run-local case files *]
-[* auth bypass overlap > 2/3, merge into one issue *]
-[* refund scoping overlap > 2/3, merge into one issue *]
-[* no overlap for webhook compare or retry desync, keep separate *]
+[* cluster overlapping findings conservatively instead of forcing early canonical merges *]
+[* auth bypass findings are linked in one candidate cluster with both hunters credited *]
+[* refund scoping findings are linked in one candidate cluster with both hunters credited *]
+[* webhook compare and retry desync remain standalone findings *]
 [* write case files under .awdit/runs/2026-03-29_101530/issues/ *]
 [* write .awdit/runs/2026-03-29_101530/reports/candidate_ledger.md *]
 [* write candidate ledger and provenance to db *]
 
 awdit> Launching skeptics on the shared hunter issue ledger...
+[* start Skeptic 1 worker on first dispatch *]
+[* start Skeptic 2 worker on first dispatch *]
 [* Skeptic 1 reviewing AWD-001..004 *]
 [* Skeptic 2 reviewing AWD-001..004 *]
 [* writing Skeptic 1 report to db and markdown *]
@@ -204,27 +210,41 @@ awdit>     - AWD-004: DISPROVE
 [* compare skeptic outputs *]
 [* agreement on AWD-001 and AWD-003 *]
 [* disagreement on AWD-002 and AWD-004 *]
-[* open skeptic disagreement thread for AWD-002 with fixed evidence bundle *]
-[* Skeptic 1 reads Skeptic 2 artifact and current rebuttal history for AWD-002 *]
-[* Skeptic 2 reads Skeptic 1 artifact and current rebuttal history for AWD-002 *]
-[* skeptic debate is capped at two turns per side and recorded as an append-only transcript artifact *]
-[* coordinator closes the AWD-002 skeptic thread and writes merged skeptic summary without making a code-truth judgment *]
-[* open skeptic disagreement thread for AWD-004 with fixed evidence bundle *]
+[* open skeptic disagreement thread for AWD-002 revision 1 *]
+[* Skeptic 1 prepares its strongest bundle for AWD-002 revision 1 *]
+[* Skeptic 2 prepares its strongest bundle for AWD-002 revision 1 *]
+[* new log evidence appears while Skeptic 2 is still finishing AWD-002 revision 1; record AWD-002 revision 2 as Skeptic 2's one pending dispatch instead of mutating live context *]
+[* Skeptic 1 finishes AWD-002 revision 1, writes a checkpoint, and receives AWD-002 revision 2 as a fresh dispatch in the same live slot session *]
+[* Skeptic 2 finishes AWD-002 revision 1, writes a checkpoint, and then receives its queued AWD-002 revision 2 dispatch *]
+[* if another AWD-002 revision arrived before that pending dispatch started, the coordinator could choose to replace the pending slot as same-packet supersession; exact approval policy remains TBD *]
+[* Skeptic 1 reads Skeptic 2 artifact and current rebuttal history for AWD-002 revision 2 *]
+[* Skeptic 2 reads Skeptic 1 artifact and current rebuttal history for AWD-002 revision 2 *]
+[* skeptic debate on AWD-002 revision 2 is capped at two turns per side and recorded as an append-only transcript artifact *]
+[* coordinator closes the AWD-002 skeptic thread and writes a citation-preserving skeptic summary without making a code-truth judgment *]
+[* open skeptic disagreement thread for AWD-004 revision 1 *]
+[* Skeptic 1 prepares its strongest bundle for AWD-004 revision 1 *]
+[* Skeptic 2 prepares its strongest bundle for AWD-004 revision 1 *]
+awdit> Skeptic 2 is nearing its live context budget.
+awdit> Current usage is 75%. awdit will compact this slot at the next safe boundary unless the slot finishes comfortably first.
 [* AWD-004 skeptic debate reaches the turn cap without resolution *]
 [* coordinator forwards both skeptic positions minimally in the skeptic summary *]
 [* write .awdit/runs/2026-03-29_101530/reports/skeptic_summary.md *]
 
 [* build structured issue packets for referees *]
-[* packet contents include case ID, code refs, hunter provenance, skeptic outcomes, skeptic debate links when present, attack-path summary, strongest counter-argument, and issue-file links *]
-[* coordinator assigns packet priority state for referee attention: promote / hold / kill *]
-[* AWD-001 promoted, AWD-002 held for dispute, AWD-003 promoted, AWD-004 kill-candidate *]
+[* packet contents include case ID, packet revision, code refs, cluster status, hunter provenance, skeptic outcomes, debate links when present, unresolved questions, and issue-file links *]
+[* packet-level summary wording and exact ownership remain TBD where not directly copied or mechanically derived from cited slot artifacts *]
 
 awdit> Launching referees...
 [* Skeptic 1 and Skeptic 2 stay warm for this run but do not receive new work in the referee stage *]
-[* Referee 1 independently reviews all packets, prioritizing promoted packets first *]
+[* start Referee 1 worker on first dispatch *]
+[* Referee 1 independently reviews all packets in packet ID order *]
 [* Referee 1 re-reads nearby code, inspects auth flow, and records validation notes for AWD-001 *]
-[* Referee 2 independently reviews all packets, prioritizing promoted packets first *]
+[* start Referee 2 worker on first dispatch *]
+[* Referee 2 independently reviews all packets in packet ID order *]
 [* Referee 2 performs additional targeted checks around webhook verification and refund scoping *]
+[* Referee 2 reaches 90% context usage while finishing AWD-003; awdit marks compaction as required at the next safe boundary *]
+[* Referee 2 completes AWD-003, writes a checkpoint, compacts at the safe boundary, and rehydrates the same visible slot identity into session epoch 2 *]
+[* Referee 2 continues with AWD-004 in the new epoch using its slot-authored checkpoint and referenced artifacts *]
 [* writing raw referee reports and validation notes to db and markdown *]
 
 awdit> Referees finished.
@@ -243,23 +263,27 @@ awdit>     - AWD-004: NOT A BUG
 [* compare referee outputs *]
 [* agreement on AWD-001, AWD-003, AWD-004 *]
 [* disagreement on AWD-002 only *]
+[* Referee 1 attached provider handle fails after AWD-002 while the worker remains healthy *]
+[* awdit records the provider-handle loss, writes recovery artifacts, and rehydrates Referee 1 into a new session epoch without changing the visible slot identity *]
 
 awdit> Running short referee rebuttal round for disagreements...
-[* open referee disagreement thread for AWD-002 with fixed evidence bundle *]
-[* Referee 1 reads Referee 2 artifact and current rebuttal history for AWD-002 *]
-[* Referee 2 reads Referee 1 artifact and current rebuttal history for AWD-002 *]
+[* open referee disagreement thread for AWD-002 revision 2 *]
+[* Referee 1 prepares its strongest bundle for AWD-002 revision 2 *]
+[* Referee 2 prepares its strongest bundle for AWD-002 revision 2 *]
+[* Referee 1 reads Referee 2 artifact and current rebuttal history for AWD-002 revision 2 *]
+[* Referee 2 reads Referee 1 artifact and current rebuttal history for AWD-002 revision 2 *]
 [* Referee 1 rebuttal turn 1 on AWD-002: upstream scoping is reachable before query *]
 [* Referee 2 rebuttal turn 1 on AWD-002: async retry path bypasses upstream scoping *]
 [* referee debate is capped at two turns per side and recorded as an append-only transcript artifact *]
 [* write rebuttal transcript artifacts to db and markdown *]
 
-[* coordinator merges referee stage into one merged referee report *]
-[* merged referee outcomes *]
-[* AWD-001: recommended REAL BUG *]
-[* AWD-002: disputed, recommended REAL BUG, include both referee positions *]
-[* AWD-003: recommended REAL BUG *]
-[* AWD-004: recommended NOT A BUG *]
-[* because both skeptics said DISPROVE and merged referee outcome is NOT A BUG for AWD-004, it is recorded in the final referee report but skipped from human truth review *]
+[* coordinator assembles referee stage into one citation-preserving merged referee report *]
+[* merged referee report records agreements directly and forwards unresolved disputes cleanly *]
+[* AWD-001: both referees said REAL BUG *]
+[* AWD-002: disputed, include both referee positions *]
+[* AWD-003: both referees said REAL BUG *]
+[* AWD-004: both referees said NOT A BUG *]
+[* because both skeptics said DISPROVE and both referees said NOT A BUG for AWD-004, it is recorded in the final referee report but skipped from human truth review *]
 [* write merged_referee_report.md *]
 
 awdit> Merged referee report ready:
@@ -270,7 +294,7 @@ awdit> Only issues that survived to human review are shown here.
 
 awdit> AWD-001
 awdit> Claim: Public `X-Internal-User` header can bypass auth in `app/auth.py`
-awdit> Merged referee recommendation: REAL BUG
+awdit> Referee outcome: both referees said REAL BUG
 awdit> Issue report: `.awdit/runs/2026-03-29_101530/issues/AWD-001.md`
 awdit> Code refs: `app/auth.py:42-55`, `app/auth.py:88-93`
 awdit> Truth? [y]es / [n]o / [u]nsure
@@ -278,7 +302,7 @@ user> y
 
 awdit> AWD-002
 awdit> Claim: Refund lookup may be missing org scoping in `app/api/refunds.py`
-awdit> Merged referee recommendation: REAL BUG
+awdit> Referee outcome: disputed
 awdit> Referee disagreement note: included in issue report
 awdit> Issue report: `.awdit/runs/2026-03-29_101530/issues/AWD-002.md`
 awdit> Code refs: `app/api/refunds.py:71-90`
@@ -287,7 +311,7 @@ user> n
 
 awdit> AWD-003
 awdit> Claim: Webhook signature compare uses non-constant-time equality in `app/webhooks.py`
-awdit> Merged referee recommendation: REAL BUG
+awdit> Referee outcome: both referees said REAL BUG
 awdit> Issue report: `.awdit/runs/2026-03-29_101530/issues/AWD-003.md`
 awdit> Code refs: `app/webhooks.py:33-47`
 awdit> Truth? [y]es / [n]o / [u]nsure
@@ -298,9 +322,9 @@ user> y
 [* write provisional role-stage signals to scores.json; exact formulas remain experimental *]
 
 awdit> Provisional role summary
-awdit>   Hunters: 3 promoted cases, 1 later rejected case
+awdit>   Hunters: 3 cases survived to referee review, 1 later rejected case
 awdit>   Skeptics: 2 accepted, 2 disproved
-awdit>   Referees: 2 merged REAL BUG recommendations confirmed by human review
+awdit>   Referees: 2 agreed REAL BUG outcomes confirmed by human review
 
 awdit> Confirmed bugs: 2
 awdit> Rejected bugs: 1
@@ -368,7 +392,7 @@ user> 2
 [* update .awdit/repos/acme-payments_7f9d1c2a/cases/canonical_index.json with linked findings and truth outcomes *]
 [* append any user comments to .awdit/repos/acme-payments_7f9d1c2a/memory/repo_comments.md *]
 [* update run row: status=completed *]
-[* any slot that exceeded context budget during the run would have been compacted and rehydrated as the same slot identity *]
+[* any slot that exceeded context budget during the run would have been compacted and rehydrated as the same slot identity in a new session epoch *]
 
 awdit> Audit complete.
 

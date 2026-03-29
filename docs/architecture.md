@@ -8,7 +8,7 @@ Working architecture draft. This document records the design decisions that are 
 - Keep two top-level review shapes: `feature review` and `full repo review`.
 - Preserve the core hunter, skeptic, referee, and solver role families.
 - Keep one visible slot identity per run, with one live session max per slot.
-- Keep sessions warm by default, while allowing coordinator-managed compaction and rehydration when context gets bloated.
+- Keep one visible slot identity and one initial session epoch per slot per run, with lazy worker start on first dispatch and coordinator-managed compaction or rehydration of the same visible slot identity when context gets bloated or the attached provider handle fails.
 - Allow bounded same-family debate only for skeptics and referees; do not allow a general agent chat mesh.
 - Keep prompt files editable and configurable; exact slot wording remains intentionally `TBD`.
 - Maintain a strict split between immutable run artifacts and evolving repo-scoped security memory.
@@ -34,7 +34,7 @@ flowchart LR
     L --> S1["Skeptic 1"]
     L --> S2["Skeptic 2"]
 
-    S1 --> P["Prioritized issue packets"]
+    S1 --> P["Issue packets"]
     S2 --> P
 
     P --> R1["Referee 1<br/>tool-using bug-truth judgment"]
@@ -122,7 +122,14 @@ This area stores:
 ## Multi-Agent Architecture
 
 See [docs/agent-isolation-workflow.md](agent-isolation-workflow.md) for the canonical
-Mermaid diagram of slot isolation, bounded debate, and coordinator-owned procedural merges.
+Mermaid diagram of slot isolation, bounded debate, and coordinator-owned traceable assembly.
+
+### Coordinator Role
+- The coordinator is a traceable assembler.
+- It may normalize, validate, route, persist, revise packet identifiers, and compile slot-authored material with citations.
+- It may perform mechanical merges and stage transitions when those outputs can be traced back to cited slot-authored artifacts.
+- It must not author new substantive code-truth, exploit-quality, or fix-quality judgments on its own.
+- Coordinator-authored packet-level summary wording that could steer downstream reasoning remains `TBD`.
 
 ### Agent Slots
 There are 8 fixed agent slots:
@@ -138,12 +145,27 @@ There are 8 fixed agent slots:
 Custom names may be added later. Slot labels are the public-facing default for now.
 
 ### Slot Identity And Live Sessions
-- A slot identity is the stable user-facing role instance for one run, such as `Hunter 1`.
-- Each run keeps one visible slot identity per configured slot.
-- Each slot may have at most one live session at a time.
-- v1 is warm-first: live sessions stay warm across related work whenever context remains intact.
-- If context becomes bloated, the coordinator may compact and rehydrate the same slot identity.
-- Rehydration must be derived from checkpoint artifacts and referenced prior artifacts, not hidden coordinator paraphrase alone.
+- `Slot identity`: the stable user-facing role instance for one run, such as `Hunter 1`.
+- `Live slot session`: an awdit-owned runtime for one slot with one lease, one current session epoch, and at most one attached provider handle.
+- `Session epoch`: one concrete incarnation record for a slot session. The initial epoch created at run start is a reserved marker only; it does not become live until the first dispatch starts the slot worker and lease. Compaction or attached-provider failure creates a new epoch for the same visible slot identity.
+- `Dispatch`: one immutable work assignment for a slot with explicit inputs and expected outputs.
+- `Slot checkpoint`: slot-authored semantic checkpoint content plus referenced prior artifacts, validated and persisted by the coordinator.
+- `Provider handle`: disposable warm provider-side conversation or runtime state attached to the current slot epoch. It is not the slot identity.
+- `Safe boundary`: the point between dispatches where normal compaction may occur without interrupting active work.
+- Each run keeps one visible slot identity per configured slot and creates one initial reserved session epoch marker for each slot at run start.
+- No slot workers are started eagerly at run launch. A slot worker starts only when the coordinator dispatches work to that slot for the first time.
+- Each slot may have at most one live session at a time, one active dispatch, and one pending dispatch.
+- An epoch that has never received a dispatch is not live yet, has no lease or heartbeat, and cannot be compacted or rehydrated.
+- v1 is warm-first: the slot session should stay alive as long as possible within the run.
+- Worker heartbeats are the canonical liveness signal for a live slot session. Attached provider activity is secondary metadata only.
+- If context becomes bloated or the attached provider handle fails, the coordinator may compact and rehydrate the same slot identity into a new session epoch.
+- Rehydration must be derived from evidence-addressed, slot-authored checkpoint artifacts and referenced prior artifacts, not hidden coordinator paraphrase alone.
+- A completed dispatch writes a fresh slot checkpoint. Compaction and failure recovery also write checkpoint or recovery artifacts before the next epoch starts.
+- Packet revisions inside the run are fresh dispatches to the same slot identity, not silent mutations of an open debate or packet context.
+- Unrelated work may not displace a pending dispatch. Same-packet supersession may replace the pending dispatch slot, but the exact coordinator judgment and operator-approval policy remains `TBD`.
+- A slot that reaches 75% context usage triggers an advisory CLI warning. A slot that reaches 90% context usage must compact at the next safe boundary.
+- Normal compaction happens only at safe boundaries. Mid-dispatch compaction is recovery behavior for hard failure, not the normal path.
+- Prompts, models, review targets, and operator-selected startup resources are fixed for the run. If the operator wants to change them, the current run should end and a new run should begin.
 - A more ephemeral execution option may still be worth exploring later, but it is not the v1 default.
 
 ### Model Selection
@@ -205,10 +227,10 @@ Custom names may be added later. Slot labels are the public-facing default for n
 
 ### Shared Candidate Ledger
 - Hunter output is normalized into a shared candidate ledger with stable finding IDs.
-- The coordinator owns dedupe into the shared candidate ledger.
-- Dedupe is driven by hunter-cited code lines.
-- If more than two-thirds of cited code lines overlap for the same issue, treat the findings as the same issue and merge them.
-- If issues overlap but the overlap is less than two-thirds, keep them separate and tag them as partial overlaps.
+- The coordinator owns cluster-first normalization into the shared candidate ledger as traceable assembly.
+- Overlapping findings should first be linked as candidate clusters rather than aggressively collapsed into one canonical issue.
+- Provenance and overlap rationale must remain visible when findings are clustered.
+- The exact canonicalization policy for converting clusters into later issue packets remains `TBD`.
 - Provenance must record which hunters originated each issue.
 - Each run writes one run-local case file per finding under `.awdit/runs/<run_id>/issues/`.
 
@@ -217,24 +239,27 @@ Custom names may be added later. Slot labels are the public-facing default for n
 - Skeptics can challenge or accept existing issues, but they cannot introduce new issues.
 - Skeptic outputs must include their decision, reasoning, confidence, and cited lines when relevant.
 - If the coordinator detects a skeptic disagreement on an issue packet, it may open one short skeptic-to-skeptic debate thread for that packet only.
-- Skeptic debate uses a fixed evidence bundle, is capped at two turns per side, and is stored as an append-only transcript artifact.
+- Skeptic debate is scoped to one issue packet revision.
+- Each skeptic prepares its own strongest bundle for that packet revision.
+- Debate is capped at two turns per side and is stored as an append-only transcript artifact.
+- The exact downstream referee handling for unresolved skeptic disagreement without redundant re-investigation remains `TBD`.
 - Each skeptic may read the opposing artifact and the current live rebuttal history for that debate thread.
-- The coordinator uses skeptic outcomes to prioritize packets for referee attention.
-- The coordinator may emit a merged skeptic summary after skeptic outputs and any bounded debate, but it does not make substantive code-truth judgments itself.
+- If substantive new evidence appears after debate opens, the coordinator must create a new issue packet revision rather than mutating the open debate bundle.
+- The coordinator may emit a citation-preserving skeptic summary after skeptic outputs and any bounded debate, but it does not make substantive code-truth judgments itself.
 
 ### Issue Packets
 Each issue packet handed to referees should contain:
 - stable finding ID
+- issue packet revision
 - file paths and exact cited code lines
-- merged vs partial-overlap status
+- cluster and overlap status
 - hunter provenance
 - hunter claim summaries
 - skeptic decisions, confidence, reasoning, and cited lines
-- exploit or attack-path summary
-- strongest counter-argument
 - unresolved questions
 - links to the run-local case file and linked code references
 - links to human-reviewable stage artifacts when they exist
+- packet-level summaries or counter-argument fields that may still be useful downstream remain `TBD`, including exact wording and ownership
 
 ### Referees
 - Referees are the final arbiters of `REAL BUG / NOT A BUG`.
@@ -248,16 +273,19 @@ Each issue packet handed to referees should contain:
 - After the independent referee pass, awdit compares referee outcomes.
 - Agreements are merged directly.
 - Disagreements may trigger one bounded referee-to-referee rebuttal thread for disputed issues only.
-- Referee rebuttal uses a fixed evidence bundle, is capped at two turns per side, and is stored as an append-only transcript artifact.
+- Referee rebuttal is scoped to one issue packet revision.
+- Each referee prepares its own strongest bundle for that packet revision.
+- Rebuttal is capped at two turns per side and is stored as an append-only transcript artifact.
 - Each referee may read the opposing artifact and the current live rebuttal history for that debate thread.
-- After rebuttals, the coordinator emits one merged referee report.
+- If substantive new evidence appears after rebuttal opens, the coordinator must create a new issue packet revision rather than mutating the open rebuttal bundle.
+- After rebuttals, the coordinator emits one citation-preserving merged referee report.
 - The merged report is the only referee report sent forward to human truth review.
 - Raw referee reports and rebuttal artifacts are still stored for transparency.
-- The coordinator performs the merge procedurally and does not make substantive code-truth judgments on its own.
+- The coordinator performs the merge through traceable assembly and does not make substantive code-truth judgments on its own.
 - If a rebuttal remains unresolved after the allowed turns, both referee positions are forwarded cleanly and minimally in the merged report.
 
 ### Auto-Dismissed Issues
-- If both skeptics challenge an issue successfully and the merged referee outcome is also `NOT A BUG`, that issue is not sent to human truth review.
+- If both skeptics challenge an issue successfully and the merged referee report records an undisputed `NOT A BUG` outcome, that issue is not sent to human truth review.
 - The issue still appears in the final merged referee report and run artifacts for transparency and debugging.
 
 ### Human Truth Review
@@ -292,7 +320,7 @@ Each issue packet handed to referees should contain:
 - Each referee receives the same shared baseline facts.
 - Each referee may run optional targeted follow-up checks if shared baseline validation is insufficient.
 - Each referee writes an independent fix-comparison report.
-- The coordinator merges referee fix judgments into the solver comparison summary.
+- The coordinator assembles referee fix judgments into the solver comparison summary.
 - The merged solver comparison summary must be a forward-facing Markdown artifact with links back to the compared code and the relevant validation evidence.
 - The coordinator's role here is still procedural rather than substantive; unresolved disagreements should be preserved rather than flattened into false certainty.
 
@@ -435,7 +463,13 @@ flowchart TB
 - Referees compare fixes only after shared baseline validation has run.
 - There is no separate pre-solver validator role.
 - Each slot has one visible slot identity per run and at most one live session at a time.
-- v1 uses warm sessions by default.
+- v1 uses orchestrator-owned warm slot sessions with lazy worker start on first dispatch.
+- Each slot keeps at most one active dispatch and one pending dispatch.
+- Compaction and attached-provider failure are the only forced fresh-session events inside a run.
+- Provider-handle loss creates a new session epoch for the same visible slot identity.
+- Worker heartbeat is the canonical liveness signal.
+- 75% context usage is advisory; 90% forces compaction at the next safe boundary.
+- New evidence causes issue packet revision, not silent mutation of an open debate or rebuttal context.
 - Debate is bounded to skeptic-to-skeptic and referee-to-referee threads only.
 - Run-local artifacts are immutable; repo-scoped memory evolves.
 - Every code-oriented stage must expose a forward-facing Markdown artifact path for human review.
@@ -455,3 +489,12 @@ The following are intentionally still open:
 - exact artifact naming conventions
 - exact worktree cleanup policy
 - exact repo-memory summarization and pruning policy
+- exact `dispatch envelope` schema
+- exact `slot checkpoint` schema
+- exact `issue packet revision` schema and acknowledgment format
+- exact `coordinator action log` schema
+- exact policy for converting candidate clusters into canonical issue packets
+- exact coordinator policy for replacing an already-pending dispatch during same-packet supersession
+- exact way referees consume unresolved skeptic disagreement without redundant re-investigation
+- exact wording and ownership of any packet-level summaries that may still be useful downstream
+- exact provider-specific cache behavior and performance tradeoffs for attached warm handles

@@ -89,6 +89,20 @@ Run-scoped immutable artifacts
         baseline/
       solvers/
 
+session_state/ design notes
+---------------------------
+- session_state/ is the run-local home for slot-session control-plane artifacts, not a hidden source of truth outside the run record
+- it should be able to explain, after the fact, which visible slot identity was on which session epoch and why an epoch changed
+- expected artifact families under session_state/ include:
+  - session epoch records for each slot identity
+  - dispatch records, including fresh packet-revision dispatches
+  - heartbeat and other lifecycle metadata owned by the awdit worker layer
+  - checkpoint references for completed dispatches
+  - compaction and rehydration artifacts, including recovery records after attached-provider failure
+- heartbeat and lifecycle data should preserve run immutability through append-only events plus occasional immutable snapshots rather than in-place mutable state
+- exact filenames, table schemas, and indexing details remain intentionally open
+- provider handles may be referenced from this area, but they are attached warm state only and not the canonical slot identity
+
 
 Config behavior
 ---------------
