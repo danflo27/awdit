@@ -1,0 +1,297 @@
+from __future__ import annotations
+
+import tempfile
+import textwrap
+import unittest
+from pathlib import Path
+
+from awdit.config import (
+    ConfigError,
+    apply_runtime_overrides_with_env,
+    load_effective_config,
+    save_repo_overrides,
+)
+
+
+ALL_SLOTS = (
+    "hunter_1",
+    "hunter_2",
+    "skeptic_1",
+    "skeptic_2",
+    "referee_1",
+    "referee_2",
+    "solver_1",
+    "solver_2",
+)
+
+
+def _write(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(textwrap.dedent(content).strip() + "\n", encoding="utf-8")
+
+
+def _write_prompt_tree(base: Path, prefix: str = "") -> None:
+    prompt_dir = base / "prompts"
+    prompt_dir.mkdir(parents=True, exist_ok=True)
+    for slot in ALL_SLOTS:
+        (prompt_dir / f"{prefix}{slot}.md").write_text(f"# {slot}\n", encoding="utf-8")
+
+
+def _user_config_text() -> str:
+    slot_blocks = []
+    for slot in ALL_SLOTS:
+        default_model = "gpt-5.4-mini" if slot in {"skeptic_2", "solver_2"} else "gpt-5.4"
+        slot_blocks.append(
+            f"""
+            [slots.{slot}]
+            default_model = "{default_model}"
+            prompt_file = "prompts/{slot}.md"
+            """
+        )
+    return (
+        """
+        active_provider = "openai"
+
+        [providers.openai]
+        api_key_env = "OPENAI_API_KEY"
+        base_url = "https://api.openai.com/v1"
+        allowed_models = ["gpt-5.4", "gpt-5.4-mini"]
+
+        [scope]
+        include = ["app/**", "tests/**"]
+        exclude = ["docs/**"]
+
+        [[validation.checks]]
+        name = "pytest"
+        command = "pytest -q"
+        timeout_seconds = 600
+
+        [[validation.checks]]
+        name = "ruff"
+        command = "ruff check ."
+        timeout_seconds = 300
+
+        [github]
+        prefer_gh = true
+        """
+        + "\n".join(slot_blocks)
+    )
+
+
+class ConfigTests(unittest.TestCase):
+    def test_load_order_and_list_replacement(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            home_dir = root / "home" / ".awdit"
+            repo_dir = root / "repo"
+            user_config = home_dir / "config.toml"
+            repo_config = repo_dir / "config" / "config.toml"
+
+            _write_prompt_tree(home_dir)
+            _write(user_config, _user_config_text())
+
+            repo_prompt_dir = repo_dir / "config" / "repo_prompts"
+            repo_prompt_dir.mkdir(parents=True, exist_ok=True)
+            (repo_prompt_dir / "hunter-1.md").write_text("# hunter override\n", encoding="utf-8")
+            _write(
+                repo_config,
+                """
+                [slots.hunter_1]
+                default_model = "gpt-5.4-mini"
+                prompt_file = "repo_prompts/hunter-1.md"
+
+                [scope]
+                include = ["src/**"]
+                exclude = ["fixtures/**"]
+
+                [[validation.checks]]
+                name = "unit"
+                command = "pytest -q"
+                timeout_seconds = 120
+                """,
+            )
+
+            loaded = load_effective_config(
+                cwd=repo_dir,
+                user_config_path=user_config,
+                repo_config_path=repo_config,
+                env={"OPENAI_API_KEY": "token"},
+            )
+
+            self.assertEqual(
+                ("gpt-5.4", "gpt-5.4-mini"),
+                loaded.effective.providers["openai"].allowed_models,
+            )
+            self.assertEqual("gpt-5.4-mini", loaded.effective.slots["hunter_1"].default_model)
+            self.assertEqual(
+                (repo_prompt_dir / "hunter-1.md").resolve(),
+                loaded.effective.slots["hunter_1"].prompt_file,
+            )
+            self.assertEqual("repo config", loaded.source_label("slots", "hunter_1", "prompt_file"))
+            self.assertEqual("user config", loaded.source_label("slots", "hunter_2", "prompt_file"))
+            self.assertEqual(("src/**",), loaded.effective.scope.include)
+            self.assertEqual(("fixtures/**",), loaded.effective.scope.exclude)
+            self.assertEqual(1, len(loaded.effective.validation_checks))
+            self.assertEqual("unit", loaded.effective.validation_checks[0].name)
+            self.assertEqual("pytest -q", loaded.effective.validation_checks[0].command)
+
+    def test_inactive_provider_does_not_require_env(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            home_dir = root / "home" / ".awdit"
+            repo_dir = root / "repo"
+            user_config = home_dir / "config.toml"
+
+            _write_prompt_tree(home_dir)
+            _write(
+                user_config,
+                _user_config_text()
+                + """
+
+                [providers.openrouter]
+                api_key_env = "OPENROUTER_API_KEY"
+                base_url = "https://openrouter.ai/api/v1"
+                allowed_models = ["gpt-5.4", "gpt-5.4-mini"]
+                """,
+            )
+
+            loaded = load_effective_config(
+                cwd=repo_dir,
+                user_config_path=user_config,
+                repo_config_path=repo_dir / "config" / "config.toml",
+                env={"OPENAI_API_KEY": "token"},
+            )
+
+            self.assertIn("openrouter", loaded.effective.providers)
+
+    def test_active_provider_requires_env(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            home_dir = root / "home" / ".awdit"
+            repo_dir = root / "repo"
+            user_config = home_dir / "config.toml"
+
+            _write_prompt_tree(home_dir)
+            _write(user_config, _user_config_text())
+
+            with self.assertRaises(ConfigError) as ctx:
+                load_effective_config(
+                    cwd=repo_dir,
+                    user_config_path=user_config,
+                    repo_config_path=repo_dir / "config" / "config.toml",
+                    env={},
+                )
+
+            self.assertIn("OPENAI_API_KEY", str(ctx.exception))
+
+    def test_missing_user_config_raises(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            with self.assertRaises(ConfigError):
+                load_effective_config(
+                    cwd=root / "repo",
+                    user_config_path=root / "missing.toml",
+                    repo_config_path=root / "repo" / "config" / "config.toml",
+                    env={"OPENAI_API_KEY": "token"},
+                )
+
+    def test_invalid_default_model_raises(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            home_dir = root / "home" / ".awdit"
+            repo_dir = root / "repo"
+            user_config = home_dir / "config.toml"
+            _write_prompt_tree(home_dir)
+            _write(
+                user_config,
+                _user_config_text().replace('default_model = "gpt-5.4"', 'default_model = "bad-model"', 1),
+            )
+
+            with self.assertRaises(ConfigError):
+                load_effective_config(
+                    cwd=repo_dir,
+                    user_config_path=user_config,
+                    repo_config_path=repo_dir / "config" / "config.toml",
+                    env={"OPENAI_API_KEY": "token"},
+                )
+
+    def test_missing_prompt_file_raises(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            home_dir = root / "home" / ".awdit"
+            repo_dir = root / "repo"
+            user_config = home_dir / "config.toml"
+            _write_prompt_tree(home_dir)
+            (home_dir / "prompts" / "hunter_1.md").unlink()
+            _write(user_config, _user_config_text())
+
+            with self.assertRaises(ConfigError):
+                load_effective_config(
+                    cwd=repo_dir,
+                    user_config_path=user_config,
+                    repo_config_path=repo_dir / "config" / "config.toml",
+                    env={"OPENAI_API_KEY": "token"},
+                )
+
+    def test_runtime_override_sources_and_save_back(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            home_dir = root / "home" / ".awdit"
+            repo_dir = root / "repo"
+            user_config = home_dir / "config.toml"
+            repo_config = repo_dir / "config" / "config.toml"
+
+            _write_prompt_tree(home_dir)
+            _write(user_config, _user_config_text())
+
+            loaded = load_effective_config(
+                cwd=repo_dir,
+                user_config_path=user_config,
+                repo_config_path=repo_config,
+                env={"OPENAI_API_KEY": "token"},
+            )
+            overridden = apply_runtime_overrides_with_env(
+                loaded,
+                {
+                    "slots": {"solver_2": {"default_model": "gpt-5.4"}},
+                    "validation": {
+                        "checks": [
+                            {
+                                "name": "lint",
+                                "command": "ruff check .",
+                                "timeout_seconds": 30,
+                            }
+                        ]
+                    },
+                },
+                env={"OPENAI_API_KEY": "token"},
+            )
+
+            self.assertEqual(
+                "runtime override",
+                overridden.source_label("slots", "solver_2", "default_model"),
+            )
+            save_repo_overrides(
+                repo_config,
+                {
+                    "slots": {"solver_2": {"default_model": "gpt-5.4"}},
+                    "validation": {
+                        "checks": [
+                            {
+                                "name": "lint",
+                                "command": "ruff check .",
+                                "timeout_seconds": 30,
+                            }
+                        ]
+                    },
+                },
+            )
+
+            saved = repo_config.read_text(encoding="utf-8")
+            self.assertIn("[slots.solver_2]", saved)
+            self.assertIn('default_model = "gpt-5.4"', saved)
+            self.assertIn("[[validation.checks]]", saved)
+
+
+if __name__ == "__main__":
+    unittest.main()
