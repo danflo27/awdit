@@ -1,0 +1,92 @@
+Proposed awdit resource and artifact structure
+=============================================
+
+Goal
+----
+Keep the storage model simple:
+- config/ contains human-managed defaults
+- .awdit/repos/<repo_key>/ contains evolving repo intelligence only
+- .awdit/runs/<run_id>/ contains the exact immutable resources and artifacts used for one run
+
+
+Human-managed defaults
+----------------------
+config/
+  config.toml
+  repo_prompts/
+    hunter_1.md
+    hunter_2.md
+    skeptic_1.md
+    skeptic_2.md
+    referee_1.md
+    referee_2.md
+    solver_1.md
+    solver_2.md
+  resources/
+    PROPOSED_FILE_STRUCTURE.txt
+    shared/
+      <drop shared notes/files here>
+    slots/
+      hunter_1/
+        <drop Hunter 1 defaults here>
+      hunter_2/
+      skeptic_1/
+      skeptic_2/
+      referee_1/
+      referee_2/
+      solver_1/
+      solver_2/
+
+
+Repo-scoped living intelligence
+-------------------------------
+.awdit/
+  repos/
+    <repo_key>/
+      danger_map.md
+      danger_map.json
+      memory/
+        repo_comments.md
+      cases/
+        canonical_index.json
+
+
+Run-scoped immutable artifacts
+------------------------------
+.awdit/
+  runs/
+    <run_id>/
+      run.json
+      prompts/
+      derived_context/
+      resources/
+        shared/
+          manifest.md
+          staged/
+        slots/
+          hunter_1/
+            manifest.md
+            staged/
+          hunter_2/
+          skeptic_1/
+          skeptic_2/
+          referee_1/
+          referee_2/
+          solver_1/
+          solver_2/
+      issues/
+      reports/
+      validation/
+        baseline/
+      solvers/
+
+
+Config behavior
+---------------
+- config/resources/shared/ is the obvious place for durable shared local files
+- config/resources/slots/<slot>/ is the obvious place for durable slot-specific local files
+- config.toml can add extra resources outside these folders, including URLs and out-of-tree paths
+- exclude rules can hide files from the discovered shared or slot folders without deleting them
+- the CLI should show the effective resource list for the run and offer [Y/e/n]
+- if the user chooses e, they replace the exact list for that run
+- the final chosen resources are recorded only under .awdit/runs/<run_id>/resources/

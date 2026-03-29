@@ -4,24 +4,59 @@ $ cd ~/src/acme-payments
 $ awdit review
 
 awdit> Starting new run...
-[* create run_id: 2026-03-27_160842 *]
-[* create .awdit/runs/2026-03-27_160842/ *]
+[* create run_id: 2026-03-29_101530 *]
+[* create .awdit/runs/2026-03-29_101530/ *]
 [* open sqlite db: .awdit/awdit.db *]
 [* insert runs row: status=starting *]
 [* agent names not configured yet, using slot labels *]
 
 awdit> Repository detected: `acme-payments`
-awdit> What do you want to review?
+awdit> No repo danger map exists for this repository yet.
+awdit> Generating repo memory bootstrap before review...
+[* create repo key: acme-payments_7f9d1c2a *]
+[* create .awdit/repos/acme-payments_7f9d1c2a/ *]
+[* inspect tracked files, configs, tests, migrations, docs, and git metadata *]
+[* write .awdit/repos/acme-payments_7f9d1c2a/danger_map.md *]
+[* write .awdit/repos/acme-payments_7f9d1c2a/danger_map.json *]
+[* write .awdit/repos/acme-payments_7f9d1c2a/memory/repo_comments.md *]
+[* write .awdit/repos/acme-payments_7f9d1c2a/cases/canonical_index.json *]
+
+awdit> Repo danger map ready:
+awdit>   `.awdit/repos/acme-payments_7f9d1c2a/danger_map.md`
+awdit> Review the map, then choose:
+awdit>   y. Accept it and continue
+awdit>   e. Enter corrections or guidance, then regenerate it
+awdit>   n. Regenerate it without extra guidance
+awdit> Accept / edit / regenerate? [Y/e/n]
+user> e
+
+awdit> Enter corrections or guidance for danger-map regeneration:
+user> focus on webhook replay boundaries and org scoping assumptions
+[* append startup guidance to .awdit/repos/acme-payments_7f9d1c2a/memory/repo_comments.md *]
+[* regenerate danger map using prior scan plus new user guidance *]
+[* rewrite .awdit/repos/acme-payments_7f9d1c2a/danger_map.md *]
+[* rewrite .awdit/repos/acme-payments_7f9d1c2a/danger_map.json *]
+
+awdit> Updated repo danger map ready:
+awdit>   `.awdit/repos/acme-payments_7f9d1c2a/danger_map.md`
+awdit> Accept / edit / regenerate? [Y/e/n]
+user> y
+
+awdit> What kind of review do you want to run?
+awdit>   1. Feature review
+awdit>   2. Full repo review
+user> 1
+
+awdit> Feature review target:
 awdit>   1. Diff against main
-awdit>   2. Whole repo
-awdit>   3. Single commit
-awdit>   4. Explicit file list
-awdit>   5. GitHub PR
-awdit>   6. Pasted diff/text
+awdit>   2. Single commit
+awdit>   3. Explicit file list
+awdit>   4. GitHub PR
+awdit>   5. Pasted diff/text
 user> 1
 
 awdit> Using base ref: `main`
-awdit> Scope rules decide which tracked files awdit may inspect or pull in as surrounding context.
+awdit> Scope rules decide which tracked files awdit may inspect directly and which surrounding files it may pull in as context.
 awdit> Include globs:
 awdit>   1. `app/**`
 awdit>   2. `tests/**`
@@ -35,52 +70,44 @@ user> y
 [* resolve git diff against main *]
 [* changed files: app/api/refunds.py, app/auth.py, app/webhooks.py, tests/test_refunds.py *]
 [* expand surrounding context under include/exclude rules and context budget *]
-[* write target snapshot to run.json *]
+[* derive run-local role digests from repo danger map and truth-labeled memory *]
+[* write target snapshot to .awdit/runs/2026-03-29_101530/run.json *]
+[* write derived role digests to .awdit/runs/2026-03-29_101530/derived_context/ *]
 
-awdit> Choose a model for each agent slot from config.
-awdit> Hunter 1
-awdit>   1. gpt-5.4
-awdit>   2. gpt-5.4-mini
-user> 1
+awdit> Proposed model lineup from config:
+awdit>   Hunter 1  -> gpt-5.4
+awdit>   Hunter 2  -> gpt-5.4
+awdit>   Skeptic 1 -> gpt-5.4
+awdit>   Skeptic 2 -> gpt-5.4-mini
+awdit>   Referee 1 -> gpt-5.4
+awdit>   Referee 2 -> gpt-5.4
+awdit>   Solver 1  -> gpt-5.4
+awdit>   Solver 2  -> gpt-5.4-mini
+awdit> Approve this lineup? [Y/n]
+user> y
 
-awdit> Hunter 2
-awdit>   1. gpt-5.4
-awdit>   2. gpt-5.4-mini
-user> 1
+[* snapshot approved lineup into db and run.json *]
 
-awdit> Skeptic 1
-awdit>   1. gpt-5.4
-awdit>   2. gpt-5.4-mini
-user> 1
+awdit> Do you want to attach shared external resources for the repo map or all agents? [y/N]
+awdit> These same attachments can also be declared entirely in repo config.
+awdit> This prompt is only for runtime additions or overrides.
+user> y
 
-awdit> Skeptic 2
-awdit>   1. gpt-5.4
-awdit>   2. gpt-5.4-mini
-user> 2
+awdit> You can attach:
+awdit>   - local files or folders
+awdit>   - Markdown notes
+awdit>   - code files or whole repo folders
+awdit>   - web URLs
+awdit> awdit will stage local inputs and write human-readable manifests so every referenced resource is reviewable later.
+awdit> Enter shared local paths or URLs, comma-separated:
+user> ~/notes/payment-threat-model.md, https://internal.example/wiki/refund-trust-boundaries
+[* validate local paths exist *]
+[* write .awdit/repos/acme-payments_7f9d1c2a/resources/shared/manifest.md *]
+[* stage local copies or resolved references for shared resources *]
 
-awdit> Referee 1
-awdit>   1. gpt-5.4
-awdit>   2. gpt-5.4-mini
-user> 1
-
-awdit> Referee 2
-awdit>   1. gpt-5.4
-awdit>   2. gpt-5.4-mini
-user> 1
-
-awdit> Solver 1
-awdit>   1. gpt-5.4
-awdit>   2. gpt-5.4-mini
-user> 1
-
-awdit> Solver 2
-awdit>   1. gpt-5.4
-awdit>   2. gpt-5.4-mini
-user> 2
-
-[* snapshot selected models into db and run.json *]
-
-awdit> Do you want to attach external resources or Markdown files for any agent? [y/N]
+awdit> Do you want to attach external resources or Markdown files for a specific agent? [y/N]
+awdit> Per-agent attachments can also be supplied entirely through config.
+awdit> Use this prompt only if you want to add or override resources for this run.
 user> y
 
 awdit> Select agent slot:
@@ -95,10 +122,14 @@ awdit>   8. Solver 2
 awdit>   9. Done
 user> 1
 
-awdit> Enter local file paths, comma-separated:
-user> ~/notes/payment-threat-model.md, ~/notes/auth-review-notes.md
-[* validate file paths exist *]
-[* record resource attachments for Hunter 1 *]
+awdit> Attach local paths or URLs for Hunter 1, comma-separated:
+awdit> Place them anywhere convenient on disk, then point awdit at them here.
+awdit> awdit will stage local inputs and write a per-agent manifest for later review.
+awdit> If Hunter 1 resources were already declared in config, those defaults would already be attached here unless you override them.
+user> ~/notes/payment-threat-model.md, ~/notes/auth-review-notes.md, ~/src/acme-payments/docs/auth/, https://owasp.org/Top10/A01_2021-Broken_Access_Control/
+[* validate local paths exist *]
+[* write .awdit/runs/2026-03-29_101530/resources/agents/hunter_1/manifest.md *]
+[* stage local copies or resolved references for Hunter 1 resources *]
 
 awdit> Select agent slot:
 awdit>   1. Hunter 1
@@ -112,14 +143,16 @@ awdit>   8. Solver 2
 awdit>   9. Done
 user> 9
 
-[* render prompts for all agents *]
-[* write exact prompt snapshots to .awdit/runs/2026-03-27_160842/prompts/ *]
+[* render prompts for all agents from configured prompt files *]
+[* prompt wording remains editable; exact slot wording is not frozen in architecture *]
+[* write exact prompt snapshots to .awdit/runs/2026-03-29_101530/prompts/ *]
+[* write .awdit/runs/2026-03-29_101530/resources/summary.md *]
 
 awdit> Launching hunters...
-[* Hunter 1 analyzing code and citing exact code lines for every issue *]
-[* Hunter 2 analyzing code and citing exact code lines for every issue *]
-[* Hunter 1 writes raw markdown report *]
-[* Hunter 2 writes raw markdown report *]
+[* Hunter 1 analyzing target scope and surrounding context with recall-first behavior *]
+[* Hunter 2 analyzing the same scope independently *]
+[* Hunter 1 writes raw markdown report and JSON findings *]
+[* Hunter 2 writes raw markdown report and JSON findings *]
 [* insert agent_runs rows for both hunters *]
 
 awdit> Hunters finished.
@@ -133,22 +166,21 @@ awdit>     - auth bypass in `app/auth.py:44-54,88-92`
 awdit>     - non-constant-time compare in `app/webhooks.py:33-47`
 awdit>     - missing org scoping in `app/api/refunds.py:73-89`
 
-[* parse hunter reports into structured findings with file+line spans *]
-[* dedupe by cited line overlap *]
+[* parse hunter reports into structured findings with exact file and line spans *]
+[* dedupe by cited line overlap into canonical run-local case files *]
 [* auth bypass overlap > 2/3, merge into one issue *]
 [* refund scoping overlap > 2/3, merge into one issue *]
 [* no overlap for webhook compare or retry desync, keep separate *]
-[* partial-overlap findings under 2/3 would be preserved and specially tagged for skeptics *]
-[* both hunters are marked as co-originators for shared merged findings *]
-[* create issue ledger: AWD-001 auth bypass, AWD-002 refund scoping, AWD-003 webhook compare, AWD-004 retry desync *]
-[* write per-issue markdown files with code links under .awdit/runs/2026-03-27_160842/issues/ *]
-[* write findings.json and candidate ledger to db *]
+[* write case files under .awdit/runs/2026-03-29_101530/issues/ *]
+[* write .awdit/runs/2026-03-29_101530/reports/candidate_ledger.md *]
+[* write candidate ledger and provenance to db *]
 
 awdit> Launching skeptics on the shared hunter issue ledger...
 [* Skeptic 1 reviewing AWD-001..004 *]
 [* Skeptic 2 reviewing AWD-001..004 *]
 [* writing Skeptic 1 report to db and markdown *]
 [* writing Skeptic 2 report to db and markdown *]
+[* write .awdit/runs/2026-03-29_101530/reports/skeptic_summary.md *]
 
 awdit> Skeptics finished.
 awdit> Example skeptic outcomes:
@@ -164,13 +196,16 @@ awdit>     - AWD-003: ACCEPT
 awdit>     - AWD-004: DISPROVE
 
 [* build structured issue packets for referees *]
-[* each packet includes: finding ID, code refs, hunter provenance, skeptic conclusions, confidence, overlap notes, issue md links *]
-[* AWD-002 and AWD-004 now carry 'double skeptic disprove' signal into referee stage *]
+[* packet contents include case ID, code refs, hunter provenance, skeptic outcomes, attack-path summary, strongest counter-argument, and issue-file links *]
+[* coordinator assigns packet priority state for referee attention: promote / hold / kill *]
+[* AWD-001 promoted, AWD-002 held for dispute, AWD-003 promoted, AWD-004 kill-candidate *]
 
 awdit> Launching referees...
-[* Referee 1 reviewing all issue packets independently *]
-[* Referee 2 reviewing all issue packets independently *]
-[* writing raw referee reports to db and markdown *]
+[* Referee 1 independently reviews all packets, prioritizing promoted packets first *]
+[* Referee 1 re-reads nearby code, inspects auth flow, and records validation notes for AWD-001 *]
+[* Referee 2 independently reviews all packets, prioritizing promoted packets first *]
+[* Referee 2 performs additional targeted checks around webhook verification and refund scoping *]
+[* writing raw referee reports and validation notes to db and markdown *]
 
 awdit> Referees finished.
 awdit> Example referee outcomes before merge:
@@ -200,11 +235,11 @@ awdit> Running short referee rebuttal round for disagreements...
 [* AWD-002: disputed, recommended REAL BUG, include both referee positions *]
 [* AWD-003: recommended REAL BUG *]
 [* AWD-004: recommended NOT A BUG *]
-[* because both skeptics said NOT A BUG and merged referee outcome is NOT A BUG for AWD-004, it is recorded in final referee report but skipped from human truth review *]
+[* because both skeptics said DISPROVE and merged referee outcome is NOT A BUG for AWD-004, it is recorded in the final referee report but skipped from human truth review *]
 [* write merged_referee_report.md *]
 
 awdit> Merged referee report ready:
-awdit>   `.awdit/runs/2026-03-27_160842/reports/merged_referee_report.md`
+awdit>   `.awdit/runs/2026-03-29_101530/reports/merged_referee_report.md`
 
 awdit> Human truth review
 awdit> Only issues that survived to human review are shown here.
@@ -212,7 +247,7 @@ awdit> Only issues that survived to human review are shown here.
 awdit> AWD-001
 awdit> Claim: Public `X-Internal-User` header can bypass auth in `app/auth.py`
 awdit> Merged referee recommendation: REAL BUG
-awdit> Issue report: `.awdit/runs/2026-03-27_160842/issues/AWD-001.md`
+awdit> Issue report: `.awdit/runs/2026-03-29_101530/issues/AWD-001.md`
 awdit> Code refs: `app/auth.py:42-55`, `app/auth.py:88-93`
 awdit> Truth? [y]es / [n]o / [u]nsure
 user> y
@@ -221,7 +256,7 @@ awdit> AWD-002
 awdit> Claim: Refund lookup may be missing org scoping in `app/api/refunds.py`
 awdit> Merged referee recommendation: REAL BUG
 awdit> Referee disagreement note: included in issue report
-awdit> Issue report: `.awdit/runs/2026-03-27_160842/issues/AWD-002.md`
+awdit> Issue report: `.awdit/runs/2026-03-29_101530/issues/AWD-002.md`
 awdit> Code refs: `app/api/refunds.py:71-90`
 awdit> Truth? [y]es / [n]o / [u]nsure
 user> n
@@ -229,27 +264,19 @@ user> n
 awdit> AWD-003
 awdit> Claim: Webhook signature compare uses non-constant-time equality in `app/webhooks.py`
 awdit> Merged referee recommendation: REAL BUG
-awdit> Issue report: `.awdit/runs/2026-03-27_160842/issues/AWD-003.md`
+awdit> Issue report: `.awdit/runs/2026-03-29_101530/issues/AWD-003.md`
 awdit> Code refs: `app/webhooks.py:33-47`
 awdit> Truth? [y]es / [n]o / [u]nsure
 user> y
 
-[* update finding truth labels in db *]
-[* AWD-004 remains documented in merged referee report as not-a-bug and was never shown in human truth review *]
-[* hunters receive no penalty for false positives *]
-[* if both hunters found the same confirmed issue, both get the same reward *]
-[* if both hunters found the same rejected issue, both get the same no-penalty outcome *]
-[* if both skeptics reached the same conclusion, both get the same reward or penalty outcome *]
-[* if both referees reached the same conclusion, both get the same reward or penalty outcome *]
-[* write provisional scoring to scores.json *]
+[* update truth labels in db and run artifacts *]
+[* AWD-004 remains documented in merged referee report as NOT A BUG and was never shown in human truth review *]
+[* write provisional role-stage signals to scores.json; exact formulas remain experimental *]
 
-awdit> Provisional score summary
-awdit>   Hunter 1: 18
-awdit>   Hunter 2: 18
-awdit>   Skeptic 1: 11
-awdit>   Skeptic 2: 11
-awdit>   Referee 1: 7
-awdit>   Referee 2: 3
+awdit> Provisional role summary
+awdit>   Hunters: 3 promoted cases, 1 later rejected case
+awdit>   Skeptics: 2 accepted, 2 disproved
+awdit>   Referees: 2 merged REAL BUG recommendations confirmed by human review
 
 awdit> Confirmed bugs: 2
 awdit> Rejected bugs: 1
@@ -257,65 +284,105 @@ awdit> Auto-dismissed without human review: 1
 awdit> Continue to solver stage with confirmed bugs only? [Y/n]
 user> y
 
-[* create worktree for Solver 1: .awdit/worktrees/2026-03-27_160842/solver_1 *]
-[* create worktree for Solver 2: .awdit/worktrees/2026-03-27_160842/solver_2 *]
-[* both start from same clean base ref *]
+[* create worktree for Solver 1: .awdit/worktrees/2026-03-29_101530/solver_1 *]
+[* create worktree for Solver 2: .awdit/worktrees/2026-03-29_101530/solver_2 *]
+[* both start from the same clean base ref *]
 
-awdit> Launching solvers from merged referee report...
+awdit> Launching solvers from the confirmed bug list...
 [* Solver 1 fixing AWD-001 and AWD-003 independently, one commit per bug *]
 [* Solver 1 writes per-bug markdown solution reports with code links *]
 [* Solver 2 fixing AWD-001 and AWD-003 independently, one commit per bug *]
 [* Solver 2 writes per-bug markdown solution reports with code links *]
 
-awdit> Solvers finished. Running validations now...
-[* run configured validation commands on Solver 1 full branch *]
-[* run configured validation commands on Solver 2 full branch *]
-[* store validation logs in db and artifacts *]
+awdit> Solvers finished. Running shared baseline validation...
+[* run configured validation checks on Solver 1 full branch *]
+[* run configured validation checks on Solver 2 full branch *]
+[* replay configured exploit probes where available *]
+[* run static re-analysis and a basic nearby variant scan *]
+[* store shared baseline facts in .awdit/runs/2026-03-29_101530/validation/baseline/ *]
+[* write .awdit/runs/2026-03-29_101530/validation/baseline/summary.md *]
 
-awdit> Referees are scoring solver fixes...
-[* Referee 1 scores Solver 1 and Solver 2 for each confirmed bug *]
-[* Referee 2 scores Solver 1 and Solver 2 for each confirmed bug *]
-[* write solver scores to db and solver_scores.json *]
+awdit> Referees are comparing validated fixes...
+[* Referee 1 reviews shared baseline facts for Solver 1 and Solver 2 *]
+[* Referee 1 runs one extra targeted check for AWD-001 before final comparison *]
+[* Referee 1 writes fix comparison report to .awdit/runs/2026-03-29_101530/reports/referee_1_fix_review.md *]
+[* Referee 2 reviews shared baseline facts for Solver 1 and Solver 2 *]
+[* Referee 2 accepts shared baseline facts without extra follow-up for AWD-003 *]
+[* Referee 2 writes fix comparison report to .awdit/runs/2026-03-29_101530/reports/referee_2_fix_review.md *]
+[* merge referee fix judgments into solver comparison summary *]
+[* write .awdit/runs/2026-03-29_101530/reports/solver_comparison_summary.md *]
 
-awdit> Choose the winning fix for each bug
+awdit> Choose the winning fix for each confirmed bug
 
 awdit> AWD-001
 awdit> Solver 1 avg: 8.5
-awdit>   Solution report: `.awdit/runs/2026-03-27_160842/solvers/solver_1/AWD-001.md`
-awdit>   Code link: `app/auth.py` in worktree `solver_1`
+awdit>   Shared baseline validation: `.awdit/runs/2026-03-29_101530/validation/baseline/AWD-001.md`
+awdit>   Referee comparison notes: `.awdit/runs/2026-03-29_101530/reports/referee_1_fix_review.md`, `.awdit/runs/2026-03-29_101530/reports/referee_2_fix_review.md`
+awdit>   Solution report: `.awdit/runs/2026-03-29_101530/solvers/solver_1/AWD-001.md`
 awdit> Solver 2 avg: 7.0
-awdit>   Solution report: `.awdit/runs/2026-03-27_160842/solvers/solver_2/AWD-001.md`
-awdit>   Code link: `app/auth.py` in worktree `solver_2`
+awdit>   Shared baseline validation: `.awdit/runs/2026-03-29_101530/validation/baseline/AWD-001.md`
+awdit>   Solution report: `.awdit/runs/2026-03-29_101530/solvers/solver_2/AWD-001.md`
 awdit> Pick [1/2]
 user> 1
 
 awdit> AWD-003
 awdit> Solver 1 avg: 7.5
-awdit>   Solution report: `.awdit/runs/2026-03-27_160842/solvers/solver_1/AWD-003.md`
-awdit>   Code link: `app/webhooks.py` in worktree `solver_1`
+awdit>   Shared baseline validation: `.awdit/runs/2026-03-29_101530/validation/baseline/AWD-003.md`
+awdit>   Solution report: `.awdit/runs/2026-03-29_101530/solvers/solver_1/AWD-003.md`
 awdit> Solver 2 avg: 9.0
-awdit>   Solution report: `.awdit/runs/2026-03-27_160842/solvers/solver_2/AWD-003.md`
-awdit>   Code link: `app/webhooks.py` in worktree `solver_2`
+awdit>   Shared baseline validation: `.awdit/runs/2026-03-29_101530/validation/baseline/AWD-003.md`
+awdit>   Referee comparison notes: `.awdit/runs/2026-03-29_101530/reports/referee_1_fix_review.md`, `.awdit/runs/2026-03-29_101530/reports/referee_2_fix_review.md`
+awdit>   Solution report: `.awdit/runs/2026-03-29_101530/solvers/solver_2/AWD-003.md`
 awdit> Pick [1/2]
 user> 2
 
-[* create integration worktree: .awdit/worktrees/2026-03-27_160842/selected *]
+[* create integration worktree: .awdit/worktrees/2026-03-29_101530/selected *]
 [* cherry-pick selected per-bug commits in finding ID order *]
 [* write final amended report with links to old code and chosen fixed code *]
+[* update repo-wide danger map and truth-labeled memory from this run *]
+[* update .awdit/repos/acme-payments_7f9d1c2a/cases/canonical_index.json with linked findings and truth outcomes *]
+[* append any user comments to .awdit/repos/acme-payments_7f9d1c2a/memory/repo_comments.md *]
 [* update run row: status=completed *]
 
 awdit> Audit complete.
 
 awdit> Final run summary
+awdit>   Repo danger map:
+awdit>     `.awdit/repos/acme-payments_7f9d1c2a/danger_map.md`
+awdit>   Shared resource manifest:
+awdit>     `.awdit/repos/acme-payments_7f9d1c2a/resources/shared/manifest.md`
 awdit>   Merged referee report:
-awdit>     `.awdit/runs/2026-03-27_160842/reports/merged_referee_report.md`
+awdit>     `.awdit/runs/2026-03-29_101530/reports/merged_referee_report.md`
 awdit>   Final truth-labeled summary:
-awdit>     `.awdit/runs/2026-03-27_160842/reports/final_truth_labeled_summary.md`
+awdit>     `.awdit/runs/2026-03-29_101530/reports/final_truth_labeled_summary.md`
+awdit>   Solver comparison summary:
+awdit>     `.awdit/runs/2026-03-29_101530/reports/solver_comparison_summary.md`
 awdit>   Solver selection summary:
-awdit>     `.awdit/runs/2026-03-27_160842/reports/solver_selection_summary.md`
+awdit>     `.awdit/runs/2026-03-29_101530/reports/solver_selection_summary.md`
 
 awdit> Notes
 awdit>   - AWD-004 was recorded as NOT A BUG in the merged referee report
 awdit>   - AWD-004 did not require human truth review
-awdit>   - Hunters received no penalties for rejected findings
-awdit>   - Matching role conclusions shared the same outcome
+awdit>   - Exact scoring formulas remain experimental
+awdit>   - Run-local issue files are immutable snapshots; repo-wide memory continues to evolve
+
+Later-run startup example
+------------------------
+
+$ awdit review
+
+awdit> Starting new run...
+[* create run_id: 2026-04-02_090104 *]
+
+awdit> Repository detected: `acme-payments`
+awdit> Existing repo danger map found:
+awdit>   `.awdit/repos/acme-payments_7f9d1c2a/danger_map.md`
+awdit> Last updated by run `2026-03-29_101530` at `2026-03-29 10:42:11`
+awdit> Refresh repo danger map before this review? [Y/n]
+user> y
+
+awdit> Optional repo comments to fold into this run?
+user> focus on webhook replay paths and org scoping regressions
+
+[* refresh relevant danger-map sections before target selection *]
+[* record startup comments in repo memory *]
