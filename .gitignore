@@ -2,3 +2,9 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 .env
+.awdit/
+.venv/
+build/
+dist/
+src/*.egg-info/
+.DS_Store
