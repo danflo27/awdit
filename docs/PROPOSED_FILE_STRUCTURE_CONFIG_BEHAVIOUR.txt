@@ -1,12 +1,19 @@
 Proposed awdit resource and artifact structure
 =============================================
 
+Reference note
+--------------
+This file lives under docs/ as a design reference.
+It is not itself part of the proposed config/resources/ tree below.
+
 Goal
 ----
 Keep the storage model simple:
 - config/ contains human-managed defaults
 - .awdit/repos/<repo_key>/ contains evolving repo intelligence only
 - .awdit/runs/<run_id>/ contains the exact immutable resources and artifacts used for one run
+
+This document lives under docs/ as a design note and is not itself part of the proposed runtime layout.
 
 
 Human-managed defaults
@@ -23,7 +30,6 @@ config/
     solver_1.md
     solver_2.md
   resources/
-    PROPOSED_FILE_STRUCTURE.txt
     shared/
       <drop shared notes/files here>
     slots/
@@ -85,8 +91,19 @@ Config behavior
 ---------------
 - config/resources/shared/ is the obvious place for durable shared local files
 - config/resources/slots/<slot>/ is the obvious place for durable slot-specific local files
-- config.toml can add extra resources outside these folders, including URLs and out-of-tree paths
+- awdit includes all discovered files under those folders by default
+- config.toml usually only needs simple exclude controls:
+  - [resources.shared] exclude = []
+  - [resources.slots.<slot>] exclude = []
+- include remains optional for explicit URLs and out-of-tree paths:
+  - [resources.shared] include = []
+  - [resources.slots.<slot>] include = []
 - exclude rules can hide files from the discovered shared or slot folders without deleting them
 - the CLI should show the effective resource list for the run and offer [Y/e/n]
+- the CLI should say explicitly that those folder contents are included by default unless excluded
+- y means use the list as shown
 - if the user chooses e, they replace the exact list for that run
+- if the user chooses n, awdit exits the review wizard before launch
 - the final chosen resources are recorded only under .awdit/runs/<run_id>/resources/
+- the current runtime implementation stages local files and folders into staged/
+- the current runtime implementation records URLs in the manifests without fetching them

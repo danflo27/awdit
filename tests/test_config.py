@@ -8,7 +8,11 @@ from pathlib import Path
 from awdit.config import (
     ConfigError,
     apply_runtime_overrides_with_env,
+    default_shared_resources_path,
+    default_slot_resources_path,
+    discover_resource_files,
     load_effective_config,
+    resolve_resource_section_items,
     save_repo_overrides,
 )
 
@@ -71,6 +75,18 @@ def _user_config_text() -> str:
         command = "ruff check ."
         timeout_seconds = 300
 
+        [repo_memory]
+        enabled = true
+        require_danger_map_approval = true
+        confirm_refresh_on_startup = true
+        auto_update_on_completion = true
+
+        [resources.shared]
+        exclude = ["drafts/**"]
+
+        [resources.slots.hunter_1]
+        exclude = ["archive/**"]
+
         [github]
         prefer_gh = true
         """
@@ -104,6 +120,12 @@ class ConfigTests(unittest.TestCase):
                 include = ["src/**"]
                 exclude = ["fixtures/**"]
 
+                [resources.shared]
+                exclude = ["legacy/**"]
+
+                [resources.slots.hunter_1]
+                exclude = ["old/**"]
+
                 [[validation.checks]]
                 name = "unit"
                 command = "pytest -q"
@@ -131,6 +153,16 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual("user config", loaded.source_label("slots", "hunter_2", "prompt_file"))
             self.assertEqual(("src/**",), loaded.effective.scope.include)
             self.assertEqual(("fixtures/**",), loaded.effective.scope.exclude)
+            self.assertEqual(
+                (),
+                loaded.effective.resources.shared.include,
+            )
+            self.assertEqual(("legacy/**",), loaded.effective.resources.shared.exclude)
+            self.assertEqual(
+                (),
+                loaded.effective.resources.slots["hunter_1"].include,
+            )
+            self.assertEqual(("old/**",), loaded.effective.resources.slots["hunter_1"].exclude)
             self.assertEqual(1, len(loaded.effective.validation_checks))
             self.assertEqual("unit", loaded.effective.validation_checks[0].name)
             self.assertEqual("pytest -q", loaded.effective.validation_checks[0].command)
@@ -263,6 +295,12 @@ class ConfigTests(unittest.TestCase):
                             }
                         ]
                     },
+                    "resources": {
+                        "shared": {
+                            "include": ["https://example.com/runtime"],
+                            "exclude": ["scratch/**"],
+                        }
+                    },
                 },
                 env={"OPENAI_API_KEY": "token"},
             )
@@ -271,6 +309,11 @@ class ConfigTests(unittest.TestCase):
                 "runtime override",
                 overridden.source_label("slots", "solver_2", "default_model"),
             )
+            self.assertEqual(
+                ("https://example.com/runtime",),
+                overridden.effective.resources.shared.include,
+            )
+            self.assertEqual(("scratch/**",), overridden.effective.resources.shared.exclude)
             save_repo_overrides(
                 repo_config,
                 {
@@ -284,6 +327,12 @@ class ConfigTests(unittest.TestCase):
                             }
                         ]
                     },
+                    "resources": {
+                        "shared": {
+                            "include": ["https://example.com/runtime"],
+                            "exclude": ["scratch/**"],
+                        }
+                    },
                 },
             )
 
@@ -291,6 +340,61 @@ class ConfigTests(unittest.TestCase):
             self.assertIn("[slots.solver_2]", saved)
             self.assertIn('default_model = "gpt-5.4"', saved)
             self.assertIn("[[validation.checks]]", saved)
+            self.assertIn("[resources.shared]", saved)
+            self.assertIn('include = ["https://example.com/runtime"]', saved)
+            self.assertIn('exclude = ["scratch/**"]', saved)
+
+    def test_resource_folder_defaults_are_auto_discovered(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            home_dir = root / "home" / ".awdit"
+            repo_dir = root / "repo"
+            user_config = home_dir / "config.toml"
+            repo_config = repo_dir / "config" / "config.toml"
+
+            _write_prompt_tree(home_dir)
+            _write(user_config, _user_config_text())
+            _write(
+                repo_config,
+                """
+                [resources.shared]
+                exclude = ["drafts/**"]
+
+                [resources.slots.hunter_1]
+                exclude = ["old/**"]
+                """,
+            )
+
+            shared_dir = default_shared_resources_path(repo_dir)
+            slot_dir = default_slot_resources_path("hunter_1", repo_dir)
+            _write(shared_dir / "refund-boundaries.md", "shared note")
+            _write(shared_dir / "drafts" / "ignored.md", "ignore me")
+            _write(shared_dir / ".gitkeep", "")
+            _write(slot_dir / "auth-review-notes.md", "slot note")
+            _write(slot_dir / "old" / "ignored.md", "ignore me")
+
+            loaded = load_effective_config(
+                cwd=repo_dir,
+                user_config_path=user_config,
+                repo_config_path=repo_config,
+                env={"OPENAI_API_KEY": "token"},
+            )
+
+            self.assertEqual(
+                ((shared_dir / "refund-boundaries.md").resolve(),),
+                discover_resource_files(shared_dir, exclude=loaded.effective.resources.shared.exclude),
+            )
+            self.assertEqual(
+                (str((shared_dir / "refund-boundaries.md").resolve()),),
+                resolve_resource_section_items(shared_dir, loaded.effective.resources.shared),
+            )
+            self.assertEqual(
+                (str((slot_dir / "auth-review-notes.md").resolve()),),
+                resolve_resource_section_items(
+                    slot_dir,
+                    loaded.effective.resources.slots["hunter_1"],
+                ),
+            )
 
 
 if __name__ == "__main__":

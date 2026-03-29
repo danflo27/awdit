@@ -4,7 +4,7 @@ import copy
 import json
 import os
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Mapping
 import tomllib
 
@@ -41,8 +41,17 @@ BUILTIN_DEFAULTS: dict[str, Any] = {
         "auto_update_on_completion": True,
     },
     "resources": {
-        "shared": [],
-        "slots": {slot_name: [] for slot_name in SLOT_NAMES},
+        "shared": {
+            "include": [],
+            "exclude": [],
+        },
+        "slots": {
+            slot_name: {
+                "include": [],
+                "exclude": [],
+            }
+            for slot_name in SLOT_NAMES
+        },
     },
     "github": {
         "prefer_gh": True,
@@ -103,9 +112,15 @@ class RepoMemoryConfig:
 
 
 @dataclass(frozen=True)
+class ResourceSectionConfig:
+    include: tuple[str, ...]
+    exclude: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class ResourcesConfig:
-    shared: tuple[str, ...]
-    slots: dict[str, tuple[str, ...]]
+    shared: ResourceSectionConfig
+    slots: dict[str, ResourceSectionConfig]
 
 
 @dataclass(frozen=True)
@@ -140,6 +155,18 @@ def default_user_config_path() -> Path:
 def default_repo_config_path(cwd: Path | None = None) -> Path:
     base = cwd or Path.cwd()
     return base / "config" / "config.toml"
+
+
+def default_shared_resources_path(cwd: Path | None = None) -> Path:
+    base = cwd or Path.cwd()
+    return (base / "config" / "resources" / "shared").resolve()
+
+
+def default_slot_resources_path(slot_name: str, cwd: Path | None = None) -> Path:
+    if slot_name not in SLOT_NAMES:
+        raise ConfigError(f"Unknown slot name for resources: {slot_name!r}")
+    base = cwd or Path.cwd()
+    return (base / "config" / "resources" / "slots" / slot_name).resolve()
 
 
 def load_effective_config(
@@ -184,6 +211,34 @@ def load_effective_config(
 
 def apply_runtime_overrides(loaded: LoadedConfig, overrides: dict[str, Any]) -> LoadedConfig:
     return apply_runtime_overrides_with_env(loaded, overrides, env=os.environ)
+
+
+def discover_resource_files(
+    base_dir: Path,
+    *,
+    exclude: tuple[str, ...] = (),
+) -> tuple[Path, ...]:
+    if not base_dir.exists():
+        return ()
+    discovered: list[Path] = []
+    for path in sorted(base_dir.rglob("*")):
+        if not path.is_file():
+            continue
+        relative = path.relative_to(base_dir)
+        if _is_hidden_resource_path(relative):
+            continue
+        if _matches_any_glob(relative, exclude):
+            continue
+        discovered.append(path.resolve())
+    return tuple(discovered)
+
+
+def resolve_resource_section_items(
+    base_dir: Path,
+    config: ResourceSectionConfig,
+) -> tuple[str, ...]:
+    discovered = [str(path) for path in discover_resource_files(base_dir, exclude=config.exclude)]
+    return tuple(discovered + list(config.include))
 
 
 def apply_runtime_overrides_with_env(
@@ -275,6 +330,21 @@ def summarize_config(loaded: LoadedConfig) -> list[tuple[str, str, str]]:
                     for check in loaded.effective.validation_checks
                 ),
                 loaded.source_label("validation", "checks"),
+            ),
+            (
+                "Repo memory",
+                "enabled" if loaded.effective.repo_memory.enabled else "disabled",
+                loaded.source_label("repo_memory", "enabled"),
+            ),
+            (
+                "Shared resource includes",
+                ", ".join(loaded.effective.resources.shared.include) or "(none)",
+                loaded.source_label("resources", "shared", "include"),
+            ),
+            (
+                "Shared resource excludes",
+                ", ".join(loaded.effective.resources.shared.exclude) or "(none)",
+                loaded.source_label("resources", "shared", "exclude"),
             ),
             (
                 "Prefer gh",
@@ -430,6 +500,42 @@ def _normalize_and_validate(
             ValidationCheck(name=name, command=command, timeout_seconds=timeout_seconds)
         )
 
+    repo_memory_raw = _require_table(raw, ("repo_memory",))
+    repo_memory = RepoMemoryConfig(
+        enabled=_require_bool(repo_memory_raw, ("repo_memory", "enabled")),
+        require_danger_map_approval=_require_bool(
+            repo_memory_raw,
+            ("repo_memory", "require_danger_map_approval"),
+        ),
+        confirm_refresh_on_startup=_require_bool(
+            repo_memory_raw,
+            ("repo_memory", "confirm_refresh_on_startup"),
+        ),
+        auto_update_on_completion=_require_bool(
+            repo_memory_raw,
+            ("repo_memory", "auto_update_on_completion"),
+        ),
+    )
+
+    resources_raw = _require_table(raw, ("resources",))
+    shared_resources_raw = _require_table(resources_raw, ("shared",))
+    shared_resources = ResourceSectionConfig(
+        include=tuple(_require_string_list(shared_resources_raw, ("resources", "shared", "include"))),
+        exclude=tuple(_require_string_list(shared_resources_raw, ("resources", "shared", "exclude"))),
+    )
+    slots_resources_raw = _require_table(resources_raw, ("slots",))
+    slot_resources: dict[str, ResourceSectionConfig] = {}
+    for slot_name in SLOT_NAMES:
+        slot_raw = _require_table(slots_resources_raw, (slot_name,))
+        slot_resources[slot_name] = ResourceSectionConfig(
+            include=tuple(
+                _require_string_list(slot_raw, ("resources", "slots", slot_name, "include"))
+            ),
+            exclude=tuple(
+                _require_string_list(slot_raw, ("resources", "slots", slot_name, "exclude"))
+            ),
+        )
+
     github_raw = raw.get("github", {})
     if not isinstance(github_raw, dict):
         raise ConfigError("github must be a table.")
@@ -443,6 +549,8 @@ def _normalize_and_validate(
         slots=slots,
         scope=scope,
         validation_checks=tuple(checks),
+        repo_memory=repo_memory,
+        resources=ResourcesConfig(shared=shared_resources, slots=slot_resources),
         github=GithubConfig(prefer_gh=prefer_gh),
     )
 
@@ -489,6 +597,23 @@ def _require_positive_int(container: dict[str, Any], path: PathKey) -> int:
     if not isinstance(value, int) or value <= 0:
         raise ConfigError(f"Missing or invalid positive integer for {dotted}.")
     return value
+
+
+def _require_bool(container: dict[str, Any], path: PathKey) -> bool:
+    dotted = ".".join(path)
+    value = container.get(path[-1])
+    if not isinstance(value, bool):
+        raise ConfigError(f"Missing or invalid boolean for {dotted}.")
+    return value
+
+
+def _matches_any_glob(relative_path: Path, patterns: tuple[str, ...]) -> bool:
+    posix_path = PurePosixPath(relative_path.as_posix())
+    return any(posix_path.match(pattern) for pattern in patterns)
+
+
+def _is_hidden_resource_path(relative_path: Path) -> bool:
+    return any(part.startswith(".") for part in relative_path.parts)
 
 
 def _resolve_declared_path(value: str, source_info: SourceInfo) -> Path:
@@ -551,6 +676,38 @@ def _dump_known_schema_toml(data: dict[str, Any]) -> str:
                 for key in ("name", "command", "timeout_seconds"):
                     if key in check:
                         lines.append(f"{key} = {_format_toml_value(check[key])}")
+
+    repo_memory = data.get("repo_memory", {})
+    if isinstance(repo_memory, dict) and repo_memory:
+        lines.extend(["", "[repo_memory]"])
+        for key in (
+            "enabled",
+            "require_danger_map_approval",
+            "confirm_refresh_on_startup",
+            "auto_update_on_completion",
+        ):
+            if key in repo_memory:
+                lines.append(f"{key} = {_format_toml_value(repo_memory[key])}")
+
+    resources = data.get("resources", {})
+    if isinstance(resources, dict):
+        shared = resources.get("shared")
+        if isinstance(shared, dict):
+            lines.extend(["", "[resources.shared]"])
+            for key in ("include", "exclude"):
+                if key in shared:
+                    lines.append(f"{key} = {_format_toml_value(shared[key])}")
+
+        slots_resources = resources.get("slots", {})
+        if isinstance(slots_resources, dict):
+            for slot_name in SLOT_NAMES:
+                slot_resource = slots_resources.get(slot_name)
+                if not isinstance(slot_resource, dict):
+                    continue
+                lines.extend(["", f"[resources.slots.{slot_name}]"])
+                for key in ("include", "exclude"):
+                    if key in slot_resource:
+                        lines.append(f"{key} = {_format_toml_value(slot_resource[key])}")
 
     github = data.get("github", {})
     if isinstance(github, dict) and github:

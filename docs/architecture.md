@@ -149,19 +149,34 @@ Custom names may be added later. Slot labels are the public-facing default for n
 - Shared and slot-specific external resources should be attachable either:
   - entirely through config, or
   - interactively at runtime through the CLI
-- Runtime prompts act as additions or overrides for the current run, not the only supported path.
-- Before launching hunters, the CLI first asks whether the user wants to attach shared external resources for the repo map or all agents.
-- The CLI then asks whether the user wants to attach external resources to any specific slot.
+- Durable local resource defaults should live under:
+  - `config/resources/shared/`
+  - `config/resources/slots/<slot_name>/`
+- By default, awdit includes all discovered files under those folders.
+- In the common case, `config.toml` only needs exclude controls:
+  - `[resources.shared] exclude = []`
+  - `[resources.slots.<slot_name>] exclude = []`
+- `include` remains an optional escape hatch for explicit URLs or out-of-tree paths when those should be attached by default.
+- Folder discovery is the obvious local-file path and the primary happy path.
+- `exclude` hides matching files from the discovered shared or slot folder without deleting them.
+- Before launching hunters, awdit computes the effective resource list for the run from the config folders plus configured include/exclude rules.
+- The CLI first shows the effective shared resource list for the run and offers:
+  - `y` to use the list as shown
+  - `e` to replace the exact list for the current run
+  - `n` to exit the review wizard before launch
+- The CLI should say explicitly that everything under the resource folders is included by default unless excluded in repo config.
+- The CLI can then show effective slot-specific resource lists for any selected slot using the same `y / e / n` flow.
 - Supported attachment inputs should include:
   - local files
   - local folders
   - Markdown notes
   - code files or whole repo folders
   - explicit web URLs
-- Shared repo-level resources should be persisted under the repo-scoped area.
-- Slot-specific resources should be persisted under the run-scoped area in per-agent folders or manifests.
+- The final chosen shared and slot-specific resources for a run should be persisted only under the run-scoped area.
+- Repo-scoped memory should not store external resource selections.
 - The exact staging mechanism for local copies vs referenced paths vs fetched URL snapshots remains `TBD`, but every attachment must be recorded in a human-reviewable Markdown manifest.
-- The exact config schema for resource attachments remains `TBD`, but it must support fully config-driven shared resources and fully config-driven slot-specific resources without requiring interactive prompts.
+- The current v1 implementation stages local files and folders into the run folder and records URLs in manifests without fetching them.
+- The exact persisted per-resource metadata remains `TBD`, but the config surface should stay simple and skimmable.
 - Resource attachment prompts should explain to the user that they can keep files wherever convenient locally and point awdit at them during the run.
 
 ## Audit Pipeline
@@ -304,8 +319,8 @@ Expected run-scoped areas include:
 - The terminal should surface clickable Markdown paths at each major stage.
 - Expected forward-facing Markdown artifacts include:
   - repo danger map
-  - shared resource manifest
-  - per-agent resource manifests when attachments exist
+  - shared resource manifest for the run
+  - per-slot resource manifests when attachments exist
   - candidate ledger summary
   - run-local issue files
   - skeptic summaries or raw skeptic reports
@@ -329,6 +344,7 @@ flowchart TB
         RJ["run.json"]
         DG["derived_context/"]
         PR["prompts/"]
+        RE["resources/"]
         IS["issues/"]
         RP["reports/"]
         SV["solvers/"]
@@ -359,9 +375,11 @@ flowchart TB
 - `scope` defines include and exclude globs.
 - `validation.checks` defines the shared baseline post-solver validation suite.
 - `repo_memory` defines repo-memory behavior such as enablement, approval, refresh confirmation, and end-of-run updates.
-- Runtime attachment handling must support both shared repo resources and slot-specific resources.
-- Config must also support both shared repo resources and slot-specific resources so a full run can be predeclared without interactive attachment prompts.
-- The exact persisted config/schema details for resource attachment storage remain `TBD`.
+- `config/resources/shared/` and `config/resources/slots/<slot_name>/` define the default local resource folders.
+- `[resources.shared]` normally only needs `exclude`; `include` is optional for explicit extras.
+- `[resources.slots.<slot_name>]` normally only needs `exclude`; `include` is optional for explicit extras.
+- Runtime resource review must support accepting the effective list, replacing it for the run, or exiting the wizard before launch.
+- The exact persisted per-resource metadata remains `TBD`; the approved v1 surface stays folder-first and list-based.
 - `github.prefer_gh` keeps local git refs as the default path when both local and GitHub inputs are possible.
 
 ## Scoring

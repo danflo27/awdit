@@ -88,26 +88,26 @@ user> y
 
 [* snapshot approved lineup into db and run.json *]
 
-awdit> Do you want to attach shared external resources for the repo map or all agents? [y/N]
-awdit> These same attachments can also be declared entirely in repo config.
-awdit> This prompt is only for runtime additions or overrides.
-user> y
+awdit> Shared resources available for this run:
+awdit>   Everything under `config/resources/shared/` is included by default.
+awdit>   Repo config usually only needs `[resources.shared] exclude = [...]`.
+awdit>   Use `[resources.shared] include = [...]` only for explicit URLs or out-of-tree paths.
+awdit>   1. `config/resources/shared/refund-boundaries.md`
+awdit> Use / edit / exit? [Y/e/n]
+user> e
 
-awdit> You can attach:
-awdit>   - local files or folders
-awdit>   - Markdown notes
-awdit>   - code files or whole repo folders
-awdit>   - web URLs
-awdit> awdit will stage local inputs and write human-readable manifests so every referenced resource is reviewable later.
-awdit> Enter shared local paths or URLs, comma-separated:
+awdit> Enter the exact shared resource list for this run, comma-separated:
+awdit> You can use files from `config/resources/`, any other local path, folders, or URLs.
 user> ~/notes/payment-threat-model.md, https://internal.example/wiki/refund-trust-boundaries
 [* validate local paths exist *]
-[* write .awdit/repos/acme-payments_7f9d1c2a/resources/shared/manifest.md *]
-[* stage local copies or resolved references for shared resources *]
+[* write .awdit/runs/2026-03-29_101530/resources/shared/manifest.md *]
+[* stage local files and folders for shared resources *]
+[* record URL resources in the shared manifest without fetching them *]
 
-awdit> Do you want to attach external resources or Markdown files for a specific agent? [y/N]
-awdit> Per-agent attachments can also be supplied entirely through config.
-awdit> Use this prompt only if you want to add or override resources for this run.
+awdit> Do you want to review slot-specific resources before launch? [y/N]
+awdit> Everything under `config/resources/slots/<slot>/` is included by default.
+awdit> Repo config usually only needs `[resources.slots.<slot>] exclude = [...]`.
+awdit> Use `[resources.slots.<slot>] include = [...]` only for explicit URLs or out-of-tree paths.
 user> y
 
 awdit> Select agent slot:
@@ -122,14 +122,19 @@ awdit>   8. Solver 2
 awdit>   9. Done
 user> 1
 
-awdit> Attach local paths or URLs for Hunter 1, comma-separated:
-awdit> Place them anywhere convenient on disk, then point awdit at them here.
-awdit> awdit will stage local inputs and write a per-agent manifest for later review.
-awdit> If Hunter 1 resources were already declared in config, those defaults would already be attached here unless you override them.
+awdit> Hunter 1 resources available for this run:
+awdit>   1. `config/resources/slots/hunter_1/auth-review-notes.md`
+awdit> Use / edit / exit? [Y/e/n]
+user> e
+
+awdit> Enter the exact resource list for Hunter 1, comma-separated:
+awdit> Place files anywhere convenient on disk, then point awdit at them here.
+awdit> awdit will stage local inputs and write a per-slot manifest for later review.
 user> ~/notes/payment-threat-model.md, ~/notes/auth-review-notes.md, ~/src/acme-payments/docs/auth/, https://owasp.org/Top10/A01_2021-Broken_Access_Control/
 [* validate local paths exist *]
-[* write .awdit/runs/2026-03-29_101530/resources/agents/hunter_1/manifest.md *]
-[* stage local copies or resolved references for Hunter 1 resources *]
+[* write .awdit/runs/2026-03-29_101530/resources/slots/hunter_1/manifest.md *]
+[* stage local files and folders for Hunter 1 resources *]
+[* record URL resources in the Hunter 1 manifest without fetching them *]
 
 awdit> Select agent slot:
 awdit>   1. Hunter 1
@@ -350,7 +355,7 @@ awdit> Final run summary
 awdit>   Repo danger map:
 awdit>     `.awdit/repos/acme-payments_7f9d1c2a/danger_map.md`
 awdit>   Shared resource manifest:
-awdit>     `.awdit/repos/acme-payments_7f9d1c2a/resources/shared/manifest.md`
+awdit>     `.awdit/runs/2026-03-29_101530/resources/shared/manifest.md`
 awdit>   Merged referee report:
 awdit>     `.awdit/runs/2026-03-29_101530/reports/merged_referee_report.md`
 awdit>   Final truth-labeled summary:

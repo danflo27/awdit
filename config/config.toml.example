@@ -1,0 +1,36 @@
+# Example repo-scoped awdit config.
+# Durable local resource defaults live under:
+#   - config/resources/shared/
+#   - config/resources/slots/<slot>/
+# awdit includes everything under those folders by default.
+# In the common case, this config only needs exclude rules.
+# Use include only for explicit URLs or out-of-tree paths.
+
+[scope]
+include = ["app/**", "tests/**", "migrations/**"]
+exclude = ["docs/**", "snapshots/**"]
+
+[repo_memory]
+enabled = true
+require_danger_map_approval = true
+confirm_refresh_on_startup = true
+auto_update_on_completion = true
+
+[resources.shared]
+exclude = ["drafts/**"]
+
+[resources.slots.hunter_1]
+exclude = ["archive/**"]
+
+[resources.slots.referee_1]
+exclude = []
+
+# Optional advanced examples:
+# [resources.shared]
+# include = ["https://internal.example/wiki/refund-trust-boundaries"]
+#
+# [resources.slots.referee_1]
+# include = ["~/notes/webhook-checklist.md"]
+
+[github]
+prefer_gh = true
