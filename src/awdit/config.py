@@ -143,6 +143,7 @@ class LoadedConfig:
     user_config_path: Path
     repo_config_path: Path
     repo_config_exists: bool
+    resolved_env: dict[str, str]
 
     def source_label(self, *path: str) -> str:
         return self.sources[tuple(path)].label
@@ -155,6 +156,11 @@ def default_user_config_path() -> Path:
 def default_repo_config_path(cwd: Path | None = None) -> Path:
     base = cwd or Path.cwd()
     return base / "config" / "config.toml"
+
+
+def default_repo_env_path(cwd: Path | None = None) -> Path:
+    base = cwd or Path.cwd()
+    return base / ".env"
 
 
 def default_shared_resources_path(cwd: Path | None = None) -> Path:
@@ -179,7 +185,7 @@ def load_effective_config(
     cwd = cwd or Path.cwd()
     user_config_path = user_config_path or default_user_config_path()
     repo_config_path = repo_config_path or default_repo_config_path(cwd)
-    environ = env if env is not None else os.environ
+    environ = _resolve_runtime_env(cwd=cwd, env=env)
 
     if not user_config_path.exists():
         raise ConfigError(
@@ -206,6 +212,7 @@ def load_effective_config(
         user_config_path=user_config_path,
         repo_config_path=repo_config_path,
         repo_config_exists=repo_exists,
+        resolved_env=dict(environ),
     )
 
 
@@ -263,7 +270,45 @@ def apply_runtime_overrides_with_env(
         user_config_path=loaded.user_config_path,
         repo_config_path=loaded.repo_config_path,
         repo_config_exists=loaded.repo_config_exists or loaded.repo_config_path.exists(),
+        resolved_env=dict(env),
     )
+
+
+def _resolve_runtime_env(
+    *,
+    cwd: Path,
+    env: Mapping[str, str] | None,
+) -> dict[str, str]:
+    base_env = dict(_load_dotenv_file(default_repo_env_path(cwd)))
+    if env is None:
+        base_env.update(os.environ)
+    else:
+        base_env.update(env)
+    return base_env
+
+
+def _load_dotenv_file(path: Path) -> dict[str, str]:
+    if not path.exists():
+        return {}
+
+    loaded: dict[str, str] = {}
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export ") :].strip()
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+        if not key:
+            continue
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
+            value = value[1:-1]
+        loaded[key] = value
+    return loaded
 
 
 def merge_patch_dicts(base: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:

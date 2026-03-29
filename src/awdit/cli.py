@@ -26,6 +26,7 @@ from awdit.config import (
     merge_patch_dicts,
     summarize_config,
 )
+from awdit.runtime import OneSlotRuntime
 
 
 @dataclass(frozen=True)
@@ -118,9 +119,40 @@ def _handle_review(_: argparse.Namespace) -> int:
         )
 
     print("")
+    if _confirm("Enter one-slot runtime prototype mode?", default=False):
+        return _run_one_slot_runtime(cwd, current, snapshot)
+
+    print("")
     print("Startup resource review complete.")
     print("Full audit pipeline beyond startup resource staging is not implemented yet.")
     return 0
+
+
+def _run_one_slot_runtime(cwd: Path, loaded, snapshot: RunResourceSnapshot) -> int:
+    print("Prototype runtime setup")
+    default_mode = _prompt_dispatch_mode(default="background")
+    runtime = OneSlotRuntime(
+        cwd=cwd,
+        loaded=loaded,
+        run_dir=snapshot.run_dir,
+        default_mode=default_mode,
+    )
+    return runtime.interactive_loop()
+
+
+def _prompt_dispatch_mode(*, default: str) -> str:
+    print("Choose the default dispatch mode for this prototype session.")
+    print("  1. Foreground")
+    print("  2. Background")
+    while True:
+        raw = input("> ").strip().lower()
+        if not raw:
+            return default
+        if raw in {"1", "foreground", "f"}:
+            return "foreground"
+        if raw in {"2", "background", "b"}:
+            return "background"
+        print("Invalid choice. Pick 1 or 2.")
 
 
 def _run_config_override_menu(loaded):

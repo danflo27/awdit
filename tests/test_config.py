@@ -8,6 +8,7 @@ from pathlib import Path
 from awdit.config import (
     ConfigError,
     apply_runtime_overrides_with_env,
+    default_repo_env_path,
     default_shared_resources_path,
     default_slot_resources_path,
     discover_resource_files,
@@ -215,6 +216,46 @@ class ConfigTests(unittest.TestCase):
                 )
 
             self.assertIn("OPENAI_API_KEY", str(ctx.exception))
+
+    def test_repo_dotenv_supplies_active_provider_env(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            home_dir = root / "home" / ".awdit"
+            repo_dir = root / "repo"
+            user_config = home_dir / "config.toml"
+
+            _write_prompt_tree(home_dir)
+            _write(user_config, _user_config_text())
+            _write(default_repo_env_path(repo_dir), 'OPENAI_API_KEY="dotenv-token"')
+
+            loaded = load_effective_config(
+                cwd=repo_dir,
+                user_config_path=user_config,
+                repo_config_path=repo_dir / "config" / "config.toml",
+                env={},
+            )
+
+            self.assertEqual("dotenv-token", loaded.resolved_env["OPENAI_API_KEY"])
+
+    def test_explicit_env_overrides_repo_dotenv(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            home_dir = root / "home" / ".awdit"
+            repo_dir = root / "repo"
+            user_config = home_dir / "config.toml"
+
+            _write_prompt_tree(home_dir)
+            _write(user_config, _user_config_text())
+            _write(default_repo_env_path(repo_dir), "OPENAI_API_KEY=dotenv-token")
+
+            loaded = load_effective_config(
+                cwd=repo_dir,
+                user_config_path=user_config,
+                repo_config_path=repo_dir / "config" / "config.toml",
+                env={"OPENAI_API_KEY": "shell-token"},
+            )
+
+            self.assertEqual("shell-token", loaded.resolved_env["OPENAI_API_KEY"])
 
     def test_missing_user_config_raises(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

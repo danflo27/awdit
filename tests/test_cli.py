@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import time
 import textwrap
 import tempfile
 import unittest
@@ -9,6 +10,7 @@ from unittest import mock
 
 from awdit.cli import main
 from awdit.config import SLOT_NAMES, load_effective_config
+from awdit.provider_openai import BackgroundPollResult, ProviderBackgroundHandle, ProviderTurnResult
 
 
 def _write(path: Path, content: str) -> None:
@@ -66,6 +68,22 @@ def _user_config_text() -> str:
 
 
 class ReviewCliTests(unittest.TestCase):
+    def _input_mock(self, inputs: list[str], stdout: io.StringIO):
+        remaining = list(inputs)
+
+        def _fake_input(prompt: str = "") -> str:
+            stdout.write(prompt)
+            if not remaining:
+                if prompt.startswith("runtime> "):
+                    time.sleep(0.02)
+                    return "quit"
+                raise AssertionError("No more test inputs available.")
+            if prompt.startswith("runtime> "):
+                time.sleep(0.02)
+            return remaining.pop(0)
+
+        return _fake_input
+
     def _loaded_config(self, repo_dir: Path):
         home_dir = repo_dir.parent / "home" / ".awdit"
         user_config = home_dir / "config.toml"
@@ -95,15 +113,177 @@ class ReviewCliTests(unittest.TestCase):
 
     def _run_review(self, repo_dir: Path, loaded, inputs: list[str]) -> tuple[int, str]:
         stdout = io.StringIO()
+        inputs = [*inputs, "n"]
         with (
             mock.patch("awdit.cli.Path.cwd", return_value=repo_dir),
             mock.patch("awdit.cli.load_effective_config", return_value=loaded),
             mock.patch("awdit.cli._make_run_id", return_value="2026-03-29_101530"),
-            mock.patch("builtins.input", side_effect=inputs),
+            mock.patch("builtins.input", side_effect=self._input_mock(inputs, stdout)),
             mock.patch("sys.stdout", stdout),
         ):
             result = main(["review"])
         return result, stdout.getvalue()
+
+    def test_review_offers_runtime_prompt_after_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_dir = Path(tmp_dir) / "repo"
+            _write(repo_dir / "config" / "resources" / "shared" / "refund-boundaries.md", "shared")
+            loaded = self._loaded_config(repo_dir)
+
+            result, output = self._run_review(repo_dir, loaded, ["n", "y", "n"])
+
+            self.assertEqual(0, result)
+            self.assertIn("Run-scoped resource snapshot", output)
+            self.assertIn("Enter one-slot runtime prototype mode?", output)
+            self.assertLess(output.index("Run-scoped resource snapshot"), output.index("Enter one-slot runtime prototype mode?"))
+
+    def test_review_can_enter_runtime_and_run_foreground_dispatch(self) -> None:
+        class FakeProvider:
+            def start_foreground_turn(self, **kwargs):
+                return ProviderTurnResult(
+                    response_id="resp_1",
+                    final_text="foreground result",
+                    tool_traces=(),
+                    status="completed",
+                    model=kwargs["model"],
+                )
+
+            def start_background_turn(self, **kwargs):
+                return ProviderBackgroundHandle(response_id="bg_1")
+
+            def poll_background_turn(self, **kwargs):
+                return BackgroundPollResult(
+                    status="completed",
+                    response_id="bg_1",
+                    final_text="background result",
+                    tool_traces=(),
+                )
+
+            def classify_provider_failure(self, value):
+                return None
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_dir = Path(tmp_dir) / "repo"
+            _write(repo_dir / "config" / "resources" / "shared" / "refund-boundaries.md", "shared")
+            loaded = self._loaded_config(repo_dir)
+
+            stdout = io.StringIO()
+            with (
+                mock.patch("awdit.cli.Path.cwd", return_value=repo_dir),
+                mock.patch("awdit.cli.load_effective_config", return_value=loaded),
+                mock.patch("awdit.cli._make_run_id", return_value="2026-03-29_101530"),
+                mock.patch(
+                    "awdit.runtime.OpenAIResponsesProvider.from_loaded_config",
+                    return_value=FakeProvider(),
+                ),
+                mock.patch(
+                    "builtins.input",
+                    side_effect=self._input_mock(
+                        [
+                            "n",
+                            "y",
+                            "n",
+                            "y",
+                            "1",
+                            "dispatch",
+                            "Foreground task",
+                            "runtime/fg",
+                            "inline",
+                            "Please respond",
+                            "",
+                            "quit",
+                        ],
+                        stdout,
+                    ),
+                ),
+                mock.patch("sys.stdout", stdout),
+            ):
+                result = main(["review"])
+
+            self.assertEqual(0, result)
+            run_dir = repo_dir / ".awdit" / "runs" / "2026-03-29_101530"
+            artifacts_dir = run_dir / "session_state" / "artifacts" / "hunter_1"
+            response_files = list(artifacts_dir.glob("*/response.txt"))
+            self.assertTrue(response_files)
+            self.assertIn("One-slot runtime prototype mode", stdout.getvalue())
+
+    def test_review_can_run_background_dispatch_and_keep_status_available(self) -> None:
+        class FakeBackgroundProvider:
+            def __init__(self) -> None:
+                self.poll_calls = 0
+
+            def start_foreground_turn(self, **kwargs):
+                raise AssertionError("foreground should not be used")
+
+            def start_background_turn(self, **kwargs):
+                return ProviderBackgroundHandle(response_id="bg_1")
+
+            def poll_background_turn(self, **kwargs):
+                self.poll_calls += 1
+                if self.poll_calls == 1:
+                    return BackgroundPollResult(
+                        status="running",
+                        response_id="bg_1",
+                        final_text="",
+                        tool_traces=(),
+                    )
+                return BackgroundPollResult(
+                    status="completed",
+                    response_id="bg_2",
+                    final_text="background result",
+                    tool_traces=(),
+                )
+
+            def classify_provider_failure(self, value):
+                return None
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_dir = Path(tmp_dir) / "repo"
+            _write(repo_dir / "config" / "resources" / "shared" / "refund-boundaries.md", "shared")
+            loaded = self._loaded_config(repo_dir)
+            provider = FakeBackgroundProvider()
+            stdout = io.StringIO()
+            with (
+                mock.patch("awdit.cli.Path.cwd", return_value=repo_dir),
+                mock.patch("awdit.cli.load_effective_config", return_value=loaded),
+                mock.patch("awdit.cli._make_run_id", return_value="2026-03-29_101530"),
+                mock.patch(
+                    "awdit.runtime.OpenAIResponsesProvider.from_loaded_config",
+                    return_value=provider,
+                ),
+                mock.patch(
+                    "builtins.input",
+                    side_effect=self._input_mock(
+                        [
+                            "n",
+                            "y",
+                            "n",
+                            "y",
+                            "2",
+                            "dispatch",
+                            "Background task",
+                            "runtime/bg",
+                            "inline",
+                            "Please respond later",
+                            "",
+                            "status",
+                            "events",
+                            "status",
+                            "events",
+                            "quit",
+                            "quit",
+                            "quit",
+                        ],
+                        stdout,
+                    ),
+                ),
+                mock.patch("sys.stdout", stdout),
+            ):
+                result = main(["review"])
+
+            self.assertEqual(0, result)
+            self.assertIn("Runtime status", stdout.getvalue())
+            self.assertIn("Recent events", stdout.getvalue())
 
     def test_review_accepts_defaults_and_writes_run_scoped_manifests(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
