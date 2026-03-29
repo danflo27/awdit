@@ -26,6 +26,7 @@ from awdit.config import (
     merge_patch_dicts,
     summarize_config,
 )
+from awdit.provider_openai import OpenAIResponsesProvider
 from awdit.runtime import OneSlotRuntime
 
 
@@ -54,6 +55,12 @@ def main(argv: list[str] | None = None) -> int:
         help="Review config defaults, resolve run resources, and write run-scoped manifests.",
     )
     review_parser.set_defaults(handler=_handle_review)
+
+    list_models_parser = subparsers.add_parser(
+        "list-models",
+        help="Fetch and list available models for the active provider.",
+    )
+    list_models_parser.set_defaults(handler=_handle_list_models)
 
     args = parser.parse_args(argv)
     if not getattr(args, "command", None):
@@ -125,6 +132,35 @@ def _handle_review(_: argparse.Namespace) -> int:
     print("")
     print("Startup resource review complete.")
     print("Full audit pipeline beyond startup resource staging is not implemented yet.")
+    return 0
+
+
+def _handle_list_models(_: argparse.Namespace) -> int:
+    cwd = Path.cwd()
+    try:
+        loaded = load_effective_config(cwd=cwd)
+    except ConfigError as exc:
+        print(f"Config error: {exc}")
+        return 1
+
+    provider_name = loaded.effective.active_provider
+    if provider_name != "openai":
+        print(f"Provider {provider_name!r} does not support live model listing yet.")
+        return 1
+
+    try:
+        provider = OpenAIResponsesProvider.from_loaded_config(loaded)
+        model_ids = provider.list_model_ids()
+    except Exception as exc:
+        print(f"Failed to fetch models: {exc}")
+        return 1
+
+    print(f"Available {provider_name} models for this account:")
+    if not model_ids:
+        print("- (none returned)")
+        return 0
+    for model_id in model_ids:
+        print(f"- {model_id}")
     return 0
 
 

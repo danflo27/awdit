@@ -8,3 +8,20 @@ The current implemented slice is the startup resource flow for `awdit review`:
 - the operator can accept, replace, or exit with the `y / e / n` review flow
 - the final selected resources are frozen under `.awdit/runs/<run_id>/resources/`
 - local files and folders are staged into the run folder, while URLs are currently recorded in manifests without being fetched
+
+## Development
+
+Use `uv` for local development and project commands.
+
+- Create or refresh the project environment with `uv sync`
+- Run tests with `uv run pytest -q`
+- Run the CLI from the repo with `uv run awdit --help`
+- List live OpenAI models for the active config with `uv run awdit list-models`
+
+Dependency resolution is intentionally conservative: [pyproject.toml](pyproject.toml) sets
+`[tool.uv] exclude-newer = "2026-03-15T00:00:00Z"` which reflects a 14-day buffer as of
+2026-03-29. Refresh that timestamp deliberately and periodically if the project needs to keep
+the same rolling dependency-cooldown policy.
+
+See [docs/development.md](docs/development.md) for the UV-first workflow, including uninstalling
+an older editable `pip` install and using `awdit` from other repositories.

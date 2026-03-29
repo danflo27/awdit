@@ -159,6 +159,29 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual("completed", poll_two.status)
         self.assertEqual("done", poll_two.final_text)
 
+    def test_list_model_ids_returns_sorted_model_ids(self) -> None:
+        responses = FakeResponses()
+        responses_models = SimpleNamespace(
+            list=lambda: SimpleNamespace(
+                data=[
+                    SimpleNamespace(id="gpt-5.4-mini"),
+                    SimpleNamespace(id="gpt-5.4"),
+                    SimpleNamespace(id="gpt-5.4-mini"),
+                ]
+            )
+        )
+        client = FakeClient(responses)
+        client.models = responses_models
+        provider = OpenAIResponsesProvider(
+            base_url="https://api.openai.com/v1",
+            api_key="token",
+            client=client,
+        )
+
+        model_ids = provider.list_model_ids()
+
+        self.assertEqual(("gpt-5.4", "gpt-5.4-mini"), model_ids)
+
     def test_classify_provider_failure_normalizes_exception_and_failed_response(self) -> None:
         provider = OpenAIResponsesProvider(
             base_url="https://api.openai.com/v1",

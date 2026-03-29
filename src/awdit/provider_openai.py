@@ -130,6 +130,18 @@ class OpenAIResponsesProvider:
             current_instructions = None
             current_previous_response_id = response_id
 
+    def list_model_ids(self) -> tuple[str, ...]:
+        response = self._client.models.list()
+        items = getattr(response, "data", response)
+        model_ids = sorted(
+            {
+                str(getattr(item, "id", "")).strip()
+                for item in items
+                if str(getattr(item, "id", "")).strip()
+            }
+        )
+        return tuple(model_ids)
+
     def start_background_turn(
         self,
         *,
