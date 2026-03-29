@@ -1,0 +1,67 @@
+# Development
+
+## Package Manager
+
+Use `uv` for local development and execution.
+
+The project pins a conservative resolver policy in [pyproject.toml](/Users/df/projects/awdit/pyproject.toml):
+
+```toml
+[tool.uv]
+exclude-newer = "2026-03-15T00:00:00Z"
+```
+
+That timestamp represents a 14-day buffer as of 2026-03-29. Update it deliberately and
+periodically if you want to preserve the same rolling dependency-cooldown policy.
+
+## First-Time Setup
+
+From the project root:
+
+```bash
+cd /Users/df/projects/awdit
+uv sync
+```
+
+This creates or refreshes the local virtual environment using the project dependencies.
+
+## Running Commands
+
+From the project root:
+
+```bash
+uv run pytest -q
+uv run awdit --help
+uv run awdit list-models
+uv run awdit review
+```
+
+## Using `awdit` From Another Repo
+
+If you want to inspect a different repository without installing a global binary, point `uv run`
+at this project explicitly:
+
+```bash
+cd /path/to/target-repo
+uv run --project /Users/df/projects/awdit awdit review
+```
+
+That runs the `awdit` project environment while keeping the target repository as the current
+working tree for the review.
+
+## Undoing An Older Editable `pip` Install
+
+If you previously ran:
+
+```bash
+cd /Users/df/projects/awdit
+python -m pip install -e .
+```
+
+remove it with:
+
+```bash
+python -m pip uninstall awdit
+```
+
+Then use `uv sync` and `uv run ...` going forward.

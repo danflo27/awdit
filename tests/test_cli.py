@@ -285,6 +285,32 @@ class ReviewCliTests(unittest.TestCase):
             self.assertIn("Runtime status", stdout.getvalue())
             self.assertIn("Recent events", stdout.getvalue())
 
+    def test_list_models_prints_available_openai_models(self) -> None:
+        class FakeProvider:
+            def list_model_ids(self):
+                return ("gpt-5.4", "gpt-5.4-mini")
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_dir = Path(tmp_dir) / "repo"
+            loaded = self._loaded_config(repo_dir)
+            stdout = io.StringIO()
+            with (
+                mock.patch("awdit.cli.Path.cwd", return_value=repo_dir),
+                mock.patch("awdit.cli.load_effective_config", return_value=loaded),
+                mock.patch(
+                    "awdit.cli.OpenAIResponsesProvider.from_loaded_config",
+                    return_value=FakeProvider(),
+                ),
+                mock.patch("sys.stdout", stdout),
+            ):
+                result = main(["list-models"])
+
+            self.assertEqual(0, result)
+            output = stdout.getvalue()
+            self.assertIn("Available openai models", output)
+            self.assertIn("gpt-5.4", output)
+            self.assertIn("gpt-5.4-mini", output)
+
     def test_review_accepts_defaults_and_writes_run_scoped_manifests(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             repo_dir = Path(tmp_dir) / "repo"
