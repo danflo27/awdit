@@ -1,0 +1,573 @@
+from __future__ import annotations
+
+import copy
+import json
+import os
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Mapping
+import tomllib
+
+
+SLOT_NAMES = (
+    "hunter_1",
+    "hunter_2",
+    "skeptic_1",
+    "skeptic_2",
+    "referee_1",
+    "referee_2",
+    "solver_1",
+    "solver_2",
+)
+
+BUILTIN_DEFAULTS: dict[str, Any] = {
+    "active_provider": "openai",
+    "providers": {
+        "openai": {
+            "base_url": "https://api.openai.com/v1",
+        }
+    },
+    "scope": {
+        "include": [],
+        "exclude": [],
+    },
+    "validation": {
+        "checks": [],
+    },
+    "repo_memory": {
+        "enabled": True,
+        "require_danger_map_approval": True,
+        "confirm_refresh_on_startup": True,
+        "auto_update_on_completion": True,
+    },
+    "resources": {
+        "shared": [],
+        "slots": {slot_name: [] for slot_name in SLOT_NAMES},
+    },
+    "github": {
+        "prefer_gh": True,
+    },
+}
+
+CONFIG_BACKED_RUNTIME_KEYS = {"slots", "scope", "validation", "repo_memory", "resources"}
+PathKey = tuple[str, ...]
+
+
+class ConfigError(RuntimeError):
+    """Raised when awdit config is missing or invalid."""
+
+
+@dataclass(frozen=True)
+class SourceInfo:
+    label: str
+    base_dir: Path | None
+
+
+@dataclass(frozen=True)
+class ValidationCheck:
+    name: str
+    command: str
+    timeout_seconds: int
+
+
+@dataclass(frozen=True)
+class SlotConfig:
+    default_model: str
+    prompt_file: Path
+
+
+@dataclass(frozen=True)
+class ProviderConfig:
+    api_key_env: str
+    base_url: str
+    allowed_models: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class ScopeConfig:
+    include: tuple[str, ...]
+    exclude: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class GithubConfig:
+    prefer_gh: bool
+
+
+@dataclass(frozen=True)
+class RepoMemoryConfig:
+    enabled: bool
+    require_danger_map_approval: bool
+    confirm_refresh_on_startup: bool
+    auto_update_on_completion: bool
+
+
+@dataclass(frozen=True)
+class ResourcesConfig:
+    shared: tuple[str, ...]
+    slots: dict[str, tuple[str, ...]]
+
+
+@dataclass(frozen=True)
+class EffectiveConfig:
+    active_provider: str
+    providers: dict[str, ProviderConfig]
+    slots: dict[str, SlotConfig]
+    scope: ScopeConfig
+    validation_checks: tuple[ValidationCheck, ...]
+    repo_memory: RepoMemoryConfig
+    resources: ResourcesConfig
+    github: GithubConfig
+
+
+@dataclass(frozen=True)
+class LoadedConfig:
+    effective: EffectiveConfig
+    raw: dict[str, Any]
+    sources: dict[PathKey, SourceInfo]
+    user_config_path: Path
+    repo_config_path: Path
+    repo_config_exists: bool
+
+    def source_label(self, *path: str) -> str:
+        return self.sources[tuple(path)].label
+
+
+def default_user_config_path() -> Path:
+    return Path.home() / ".awdit" / "config.toml"
+
+
+def default_repo_config_path(cwd: Path | None = None) -> Path:
+    base = cwd or Path.cwd()
+    return base / "config" / "config.toml"
+
+
+def load_effective_config(
+    *,
+    cwd: Path | None = None,
+    user_config_path: Path | None = None,
+    repo_config_path: Path | None = None,
+    env: Mapping[str, str] | None = None,
+) -> LoadedConfig:
+    cwd = cwd or Path.cwd()
+    user_config_path = user_config_path or default_user_config_path()
+    repo_config_path = repo_config_path or default_repo_config_path(cwd)
+    environ = env if env is not None else os.environ
+
+    if not user_config_path.exists():
+        raise ConfigError(
+            f"Missing required user config at {user_config_path}. "
+            "Create ~/.awdit/config.toml before running awdit."
+        )
+
+    layers = [
+        (BUILTIN_DEFAULTS, SourceInfo("built-in", None)),
+        (_load_toml_file(user_config_path), SourceInfo("user config", user_config_path.parent)),
+    ]
+    repo_exists = repo_config_path.exists()
+    if repo_exists:
+        layers.append(
+            (_load_toml_file(repo_config_path), SourceInfo("repo config", repo_config_path.parent))
+        )
+
+    merged, sources = merge_layers(layers)
+    effective = _normalize_and_validate(merged, sources, environ)
+    return LoadedConfig(
+        effective=effective,
+        raw=merged,
+        sources=sources,
+        user_config_path=user_config_path,
+        repo_config_path=repo_config_path,
+        repo_config_exists=repo_exists,
+    )
+
+
+def apply_runtime_overrides(loaded: LoadedConfig, overrides: dict[str, Any]) -> LoadedConfig:
+    return apply_runtime_overrides_with_env(loaded, overrides, env=os.environ)
+
+
+def apply_runtime_overrides_with_env(
+    loaded: LoadedConfig,
+    overrides: dict[str, Any],
+    *,
+    env: Mapping[str, str],
+) -> LoadedConfig:
+    if not overrides:
+        return loaded
+    merged, sources = merge_layer(
+        loaded.raw,
+        loaded.sources,
+        overrides,
+        SourceInfo("runtime override", None),
+    )
+    effective = _normalize_and_validate(merged, sources, env)
+    return LoadedConfig(
+        effective=effective,
+        raw=merged,
+        sources=sources,
+        user_config_path=loaded.user_config_path,
+        repo_config_path=loaded.repo_config_path,
+        repo_config_exists=loaded.repo_config_exists or loaded.repo_config_path.exists(),
+    )
+
+
+def merge_patch_dicts(base: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:
+    merged, _ = merge_layer(base, {}, patch, SourceInfo("runtime override", None))
+    return merged
+
+
+def save_repo_overrides(repo_config_path: Path, patch: dict[str, Any]) -> None:
+    if not patch:
+        return
+
+    existing: dict[str, Any] = {}
+    if repo_config_path.exists():
+        existing = _load_toml_file(repo_config_path)
+
+    merged = merge_patch_dicts(existing, patch)
+    repo_config_path.parent.mkdir(parents=True, exist_ok=True)
+    repo_config_path.write_text(_dump_known_schema_toml(merged), encoding="utf-8")
+
+
+def summarize_config(loaded: LoadedConfig) -> list[tuple[str, str, str]]:
+    active_provider = loaded.effective.active_provider
+    provider = loaded.effective.providers[active_provider]
+    rows = [
+        ("Active provider", active_provider, loaded.source_label("active_provider")),
+        (
+            "Allowed models",
+            ", ".join(provider.allowed_models),
+            loaded.source_label("providers", active_provider, "allowed_models"),
+        ),
+    ]
+    for slot_name in SLOT_NAMES:
+        label = slot_name.replace("_", " ").title()
+        rows.append(
+            (
+                f"{label} model",
+                loaded.effective.slots[slot_name].default_model,
+                loaded.source_label("slots", slot_name, "default_model"),
+            )
+        )
+        rows.append(
+            (
+                f"{label} prompt",
+                str(loaded.effective.slots[slot_name].prompt_file),
+                loaded.source_label("slots", slot_name, "prompt_file"),
+            )
+        )
+    rows.extend(
+        [
+            (
+                "Scope include",
+                ", ".join(loaded.effective.scope.include) or "(none)",
+                loaded.source_label("scope", "include"),
+            ),
+            (
+                "Scope exclude",
+                ", ".join(loaded.effective.scope.exclude) or "(none)",
+                loaded.source_label("scope", "exclude"),
+            ),
+            (
+                "Validation checks",
+                ", ".join(
+                    f"{check.name} ({check.timeout_seconds}s)"
+                    for check in loaded.effective.validation_checks
+                ),
+                loaded.source_label("validation", "checks"),
+            ),
+            (
+                "Prefer gh",
+                str(loaded.effective.github.prefer_gh).lower(),
+                loaded.source_label("github", "prefer_gh"),
+            ),
+        ]
+    )
+    return rows
+
+
+def build_operational_save_patch(overrides: dict[str, Any]) -> dict[str, Any]:
+    return {key: copy.deepcopy(value) for key, value in overrides.items() if key in CONFIG_BACKED_RUNTIME_KEYS}
+
+
+def merge_layers(
+    layers: list[tuple[dict[str, Any], SourceInfo]]
+) -> tuple[dict[str, Any], dict[PathKey, SourceInfo]]:
+    merged: dict[str, Any] = {}
+    sources: dict[PathKey, SourceInfo] = {}
+    for layer, source_info in layers:
+        merged, sources = merge_layer(merged, sources, layer, source_info)
+    return merged, sources
+
+
+def merge_layer(
+    base: dict[str, Any],
+    base_sources: dict[PathKey, SourceInfo],
+    patch: dict[str, Any],
+    source_info: SourceInfo,
+) -> tuple[dict[str, Any], dict[PathKey, SourceInfo]]:
+    result = copy.deepcopy(base)
+    sources = dict(base_sources)
+    _merge_into(result, patch, source_info, (), sources)
+    return result, sources
+
+
+def _merge_into(
+    target: dict[str, Any],
+    patch: dict[str, Any],
+    source_info: SourceInfo,
+    path: PathKey,
+    sources: dict[PathKey, SourceInfo],
+) -> None:
+    for key, value in patch.items():
+        child_path = path + (key,)
+        if isinstance(value, dict) and isinstance(target.get(key), dict):
+            _merge_into(target[key], value, source_info, child_path, sources)
+            continue
+        target[key] = copy.deepcopy(value)
+        _mark_sources(value, child_path, source_info, sources)
+
+
+def _mark_sources(
+    value: Any,
+    path: PathKey,
+    source_info: SourceInfo,
+    sources: dict[PathKey, SourceInfo],
+) -> None:
+    sources[path] = source_info
+    if isinstance(value, dict):
+        for key, child in value.items():
+            _mark_sources(child, path + (key,), source_info, sources)
+
+
+def _load_toml_file(path: Path) -> dict[str, Any]:
+    try:
+        with path.open("rb") as handle:
+            data = tomllib.load(handle)
+    except tomllib.TOMLDecodeError as exc:
+        raise ConfigError(f"Failed to parse TOML at {path}: {exc}") from exc
+    if not isinstance(data, dict):
+        raise ConfigError(f"Expected TOML table at {path}, found {type(data).__name__}.")
+    return data
+
+
+def _normalize_and_validate(
+    raw: dict[str, Any],
+    sources: dict[PathKey, SourceInfo],
+    env: Mapping[str, str],
+) -> EffectiveConfig:
+    active_provider = _require_string(raw, ("active_provider",))
+    providers_raw = _require_table(raw, ("providers",))
+    if active_provider not in providers_raw:
+        raise ConfigError(f"Active provider {active_provider!r} does not exist in [providers].")
+
+    providers: dict[str, ProviderConfig] = {}
+    for provider_name, provider_raw in providers_raw.items():
+        if not isinstance(provider_raw, dict):
+            raise ConfigError(f"Provider {provider_name!r} must be a table.")
+        api_key_env = _require_string(provider_raw, ("providers", provider_name, "api_key_env"))
+        base_url = _require_string(provider_raw, ("providers", provider_name, "base_url"))
+        allowed_models = _require_string_list(
+            provider_raw,
+            ("providers", provider_name, "allowed_models"),
+        )
+        if not allowed_models:
+            raise ConfigError(f"Provider {provider_name!r} must declare at least one allowed model.")
+        providers[provider_name] = ProviderConfig(
+            api_key_env=api_key_env,
+            base_url=base_url,
+            allowed_models=tuple(allowed_models),
+        )
+
+    active_provider_config = providers[active_provider]
+    if not env.get(active_provider_config.api_key_env):
+        raise ConfigError(
+            f"Missing provider env var {active_provider_config.api_key_env!r} "
+            f"for provider {active_provider!r}."
+        )
+
+    slots_raw = _require_table(raw, ("slots",))
+    slots: dict[str, SlotConfig] = {}
+    active_allowed = set(active_provider_config.allowed_models)
+    for slot_name in SLOT_NAMES:
+        if slot_name not in slots_raw or not isinstance(slots_raw[slot_name], dict):
+            raise ConfigError(f"Missing required [slots.{slot_name}] config block.")
+        slot_raw = slots_raw[slot_name]
+        default_model = _require_string(slot_raw, ("slots", slot_name, "default_model"))
+        if default_model not in active_allowed:
+            raise ConfigError(
+                f"Default model {default_model!r} for slot {slot_name!r} is not present in "
+                f"providers.{active_provider}.allowed_models."
+            )
+        prompt_value = _require_string(slot_raw, ("slots", slot_name, "prompt_file"))
+        prompt_source = sources[("slots", slot_name, "prompt_file")]
+        prompt_path = _resolve_declared_path(prompt_value, prompt_source)
+        if not prompt_path.exists():
+            raise ConfigError(f"Missing prompt file for slot {slot_name!r}: {prompt_path}")
+        slots[slot_name] = SlotConfig(default_model=default_model, prompt_file=prompt_path)
+
+    scope_raw = _require_table(raw, ("scope",))
+    scope = ScopeConfig(
+        include=tuple(_require_string_list(scope_raw, ("scope", "include"))),
+        exclude=tuple(_require_string_list(scope_raw, ("scope", "exclude"))),
+    )
+
+    validation_raw = _require_table(raw, ("validation",))
+    checks_raw = validation_raw.get("checks")
+    if not isinstance(checks_raw, list) or not checks_raw:
+        raise ConfigError("validation.checks must be a non-empty list.")
+    checks: list[ValidationCheck] = []
+    for index, item in enumerate(checks_raw):
+        if not isinstance(item, dict):
+            raise ConfigError(f"validation.checks[{index}] must be a table.")
+        name = _require_string(item, ("validation", "checks", str(index), "name"))
+        command = _require_string(item, ("validation", "checks", str(index), "command"))
+        timeout_seconds = _require_positive_int(
+            item,
+            ("validation", "checks", str(index), "timeout_seconds"),
+        )
+        checks.append(
+            ValidationCheck(name=name, command=command, timeout_seconds=timeout_seconds)
+        )
+
+    github_raw = raw.get("github", {})
+    if not isinstance(github_raw, dict):
+        raise ConfigError("github must be a table.")
+    prefer_gh = github_raw.get("prefer_gh", True)
+    if not isinstance(prefer_gh, bool):
+        raise ConfigError("github.prefer_gh must be true or false.")
+
+    return EffectiveConfig(
+        active_provider=active_provider,
+        providers=providers,
+        slots=slots,
+        scope=scope,
+        validation_checks=tuple(checks),
+        github=GithubConfig(prefer_gh=prefer_gh),
+    )
+
+
+def _require_table(container: dict[str, Any], path: PathKey) -> dict[str, Any]:
+    if len(path) == 1:
+        value = container.get(path[0])
+    else:
+        value = container
+        for key in path:
+            if not isinstance(value, dict):
+                break
+            value = value.get(key)
+    if not isinstance(value, dict):
+        dotted = ".".join(path)
+        raise ConfigError(f"Missing or invalid table for {dotted}.")
+    return value
+
+
+def _require_string(container: dict[str, Any], path: PathKey) -> str:
+    dotted = ".".join(path)
+    value = container.get(path[-1])
+    if not isinstance(value, str) or not value.strip():
+        raise ConfigError(f"Missing or invalid string for {dotted}.")
+    return value
+
+
+def _require_string_list(container: dict[str, Any], path: PathKey) -> list[str]:
+    dotted = ".".join(path)
+    value = container.get(path[-1])
+    if not isinstance(value, list):
+        raise ConfigError(f"Missing or invalid list for {dotted}.")
+    normalized: list[str] = []
+    for item in value:
+        if not isinstance(item, str) or not item.strip():
+            raise ConfigError(f"Every item in {dotted} must be a non-empty string.")
+        normalized.append(item)
+    return normalized
+
+
+def _require_positive_int(container: dict[str, Any], path: PathKey) -> int:
+    dotted = ".".join(path)
+    value = container.get(path[-1])
+    if not isinstance(value, int) or value <= 0:
+        raise ConfigError(f"Missing or invalid positive integer for {dotted}.")
+    return value
+
+
+def _resolve_declared_path(value: str, source_info: SourceInfo) -> Path:
+    path = Path(value).expanduser()
+    if path.is_absolute():
+        return path.resolve()
+    if source_info.base_dir is None:
+        return path.resolve()
+    return (source_info.base_dir / path).resolve()
+
+
+def _dump_known_schema_toml(data: dict[str, Any]) -> str:
+    lines: list[str] = []
+
+    if "active_provider" in data:
+        lines.append(f'active_provider = {_format_toml_value(data["active_provider"])}')
+
+    providers = data.get("providers", {})
+    if isinstance(providers, dict):
+        for provider_name in sorted(providers):
+            provider = providers[provider_name]
+            if not isinstance(provider, dict):
+                continue
+            lines.extend(
+                [
+                    "",
+                    f"[providers.{provider_name}]",
+                ]
+            )
+            for key in ("api_key_env", "base_url", "allowed_models"):
+                if key in provider:
+                    lines.append(f"{key} = {_format_toml_value(provider[key])}")
+
+    slots = data.get("slots", {})
+    if isinstance(slots, dict):
+        for slot_name in SLOT_NAMES:
+            if slot_name not in slots or not isinstance(slots[slot_name], dict):
+                continue
+            slot = slots[slot_name]
+            lines.extend(["", f"[slots.{slot_name}]"])
+            for key in ("default_model", "prompt_file"):
+                if key in slot:
+                    lines.append(f"{key} = {_format_toml_value(slot[key])}")
+
+    scope = data.get("scope", {})
+    if isinstance(scope, dict) and scope:
+        lines.extend(["", "[scope]"])
+        for key in ("include", "exclude"):
+            if key in scope:
+                lines.append(f"{key} = {_format_toml_value(scope[key])}")
+
+    validation = data.get("validation", {})
+    if isinstance(validation, dict):
+        checks = validation.get("checks", [])
+        if isinstance(checks, list):
+            for check in checks:
+                if not isinstance(check, dict):
+                    continue
+                lines.extend(["", "[[validation.checks]]"])
+                for key in ("name", "command", "timeout_seconds"):
+                    if key in check:
+                        lines.append(f"{key} = {_format_toml_value(check[key])}")
+
+    github = data.get("github", {})
+    if isinstance(github, dict) and github:
+        lines.extend(["", "[github]"])
+        if "prefer_gh" in github:
+            lines.append(f"prefer_gh = {_format_toml_value(github['prefer_gh'])}")
+
+    return "\n".join(lines).strip() + "\n"
+
+
+def _format_toml_value(value: Any) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, str):
+        return json.dumps(value)
+    if isinstance(value, list):
+        return "[" + ", ".join(_format_toml_value(item) for item in value) + "]"
+    raise TypeError(f"Unsupported TOML value type: {type(value).__name__}")
