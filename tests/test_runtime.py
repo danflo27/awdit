@@ -139,13 +139,23 @@ class BlockingProvider(ImmediateProvider):
 class RecoveringProvider(ImmediateProvider):
     def __init__(self) -> None:
         super().__init__()
-        self.fail_once = True
+        self.fail_next = False
 
     def start_foreground_turn(self, **kwargs) -> ProviderTurnResult:
-        if self.fail_once:
-            self.fail_once = False
+        if self.fail_next:
+            self.fail_next = False
             raise RuntimeError("provider handle lost")
         return super().start_foreground_turn(**kwargs)
+
+    def classify_provider_failure(self, value) -> str | None:
+        if "provider handle lost" in str(value):
+            return str(value)
+        return None
+
+
+class FirstDispatchFailureProvider(ImmediateProvider):
+    def start_foreground_turn(self, **kwargs) -> ProviderTurnResult:
+        raise RuntimeError("provider handle lost")
 
     def classify_provider_failure(self, value) -> str | None:
         if "provider handle lost" in str(value):
@@ -333,7 +343,18 @@ class RuntimeTests(unittest.TestCase):
 
     def test_provider_failure_recovery_rolls_epoch_and_retries_dispatch(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
-            runtime = self._make_runtime(Path(tmp_dir) / "repo", provider=RecoveringProvider())
+            provider = RecoveringProvider()
+            runtime = self._make_runtime(Path(tmp_dir) / "repo", provider=provider)
+
+            accepted, _, first_dispatch_id = runtime.submit_dispatch(
+                work_label="Prime handle",
+                work_key="runtime/prime",
+                instructions_text="Please finish once.",
+            )
+            self.assertTrue(accepted)
+            first_record = runtime.wait_for_dispatch(first_dispatch_id, timeout_seconds=5.0)
+            self.assertEqual("completed", first_record.status)
+            provider.fail_next = True
 
             accepted, _, dispatch_id = runtime.submit_dispatch(
                 work_label="Recover me",
@@ -348,6 +369,24 @@ class RuntimeTests(unittest.TestCase):
             self.assertTrue(recovery_path.exists())
             recovery = json.loads(recovery_path.read_text(encoding="utf-8"))
             self.assertNotEqual(recovery["failed_epoch_id"], recovery["recovered_epoch_id"])
+
+    def test_first_dispatch_failure_does_not_fake_recovery(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            runtime = self._make_runtime(
+                Path(tmp_dir) / "repo",
+                provider=FirstDispatchFailureProvider(),
+            )
+
+            accepted, _, dispatch_id = runtime.submit_dispatch(
+                work_label="Fail fast",
+                work_key="runtime/fail",
+                instructions_text="Please fail immediately.",
+            )
+            self.assertTrue(accepted)
+            record = runtime.wait_for_dispatch(dispatch_id, timeout_seconds=5.0)
+
+            self.assertEqual("failed", record.status)
+            self.assertFalse((runtime.artifacts_root / dispatch_id / "recovery.json").exists())
 
     def test_quit_is_rejected_while_dispatch_is_active(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

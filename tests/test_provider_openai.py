@@ -195,6 +195,53 @@ class ProviderTests(unittest.TestCase):
             provider.classify_provider_failure(SimpleNamespace(status="failed", error=None)),
         )
 
+    def test_tool_execution_errors_are_returned_to_the_model(self) -> None:
+        provider = OpenAIResponsesProvider(
+            base_url="https://api.openai.com/v1",
+            api_key="token",
+            client=FakeClient(FakeResponses()),
+        )
+        outputs, traces = provider._execute_tool_calls(
+            function_calls=[
+                SimpleNamespace(
+                    call_id="call_1",
+                    name="read_file",
+                    arguments='{"path":"missing.txt"}',
+                )
+            ],
+            tool_executor=lambda name, args: (_ for _ in ()).throw(RuntimeError("out of scope")),
+            response_id="resp_1",
+        )
+
+        self.assertEqual("call_1", outputs[0]["call_id"])
+        self.assertIn('"ok": false', outputs[0]["output"])
+        self.assertIn('"tool_name": "read_file"', outputs[0]["output"])
+        self.assertIn("out of scope", outputs[0]["output"])
+        self.assertEqual("read_file", traces[0].name)
+
+    def test_invalid_tool_arguments_are_returned_to_the_model(self) -> None:
+        provider = OpenAIResponsesProvider(
+            base_url="https://api.openai.com/v1",
+            api_key="token",
+            client=FakeClient(FakeResponses()),
+        )
+        outputs, traces = provider._execute_tool_calls(
+            function_calls=[
+                SimpleNamespace(
+                    call_id="call_1",
+                    name="read_file",
+                    arguments="{broken",
+                )
+            ],
+            tool_executor=lambda name, args: "should not run",
+            response_id="resp_1",
+        )
+
+        self.assertEqual("call_1", outputs[0]["call_id"])
+        self.assertIn('"ok": false', outputs[0]["output"])
+        self.assertIn("JSONDecodeError", outputs[0]["output"])
+        self.assertEqual({}, traces[0].arguments)
+
 
 if __name__ == "__main__":
     unittest.main()

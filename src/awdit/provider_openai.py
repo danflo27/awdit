@@ -258,8 +258,32 @@ class OpenAIResponsesProvider:
             call_id = str(getattr(tool_call, "call_id", ""))
             name = str(getattr(tool_call, "name", ""))
             raw_arguments = getattr(tool_call, "arguments", "{}")
-            arguments = json.loads(raw_arguments or "{}")
-            output = tool_executor(name, arguments)
+            try:
+                arguments = json.loads(raw_arguments or "{}")
+            except json.JSONDecodeError as exc:
+                arguments = {}
+                output = json.dumps(
+                    {
+                        "ok": False,
+                        "tool_name": name,
+                        "error_type": type(exc).__name__,
+                        "error_message": str(exc),
+                    },
+                    indent=2,
+                )
+            else:
+                try:
+                    output = tool_executor(name, arguments)
+                except Exception as exc:
+                    output = json.dumps(
+                        {
+                            "ok": False,
+                            "tool_name": name,
+                            "error_type": type(exc).__name__,
+                            "error_message": str(exc),
+                        },
+                        indent=2,
+                    )
             tool_outputs.append(
                 {
                     "type": "function_call_output",

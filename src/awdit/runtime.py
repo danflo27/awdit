@@ -571,11 +571,20 @@ class OneSlotRuntime:
                 )
             except Exception as exc:
                 failure_reason = self.provider.classify_provider_failure(exc)
-                if failure_reason and recovery_attempts < 1:
+                if (
+                    self._should_recover_from_provider_failure(
+                        failure_reason=failure_reason,
+                        previous_response_id=previous_response_id,
+                    )
+                    and recovery_attempts < 1
+                ):
                     recovery_attempts += 1
                     self._handle_provider_failure(dispatch_id=dispatch_id, reason=failure_reason)
                     continue
-                self._mark_dispatch_failed(dispatch_id=dispatch_id, reason=str(exc))
+                self._mark_dispatch_failed(
+                    dispatch_id=dispatch_id,
+                    reason=failure_reason or str(exc),
+                )
                 return
 
             with self._condition:
@@ -694,6 +703,26 @@ class OneSlotRuntime:
             message=f"Provider event: {event_type}.",
             dispatch_id=dispatch_id,
             data=data,
+        )
+
+    def _should_recover_from_provider_failure(
+        self,
+        *,
+        failure_reason: str | None,
+        previous_response_id: str | None,
+    ) -> bool:
+        if not failure_reason or not previous_response_id or not self.state.latest_checkpoint_ref:
+            return False
+        lowered = failure_reason.lower()
+        # Recovery is only for losing an attached warm session, not general request failure.
+        return any(
+            marker in lowered
+            for marker in (
+                "provider handle lost",
+                "previous response",
+                "response id",
+                "previous_response_id",
+            )
         )
 
     def _update_dispatch_handle(self, dispatch_id: str, response_id: str) -> None:
