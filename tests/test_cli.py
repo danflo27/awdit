@@ -190,7 +190,7 @@ class ReviewCliTests(unittest.TestCase):
                 result = main(["review"])
 
             self.assertEqual(0, result)
-            run_dir = repo_dir / "awdit" / "runs" / "2026-03-29_101530"
+            run_dir = repo_dir / "awdit" / "data" / "runs" / "2026-03-29_101530"
             artifacts_dir = run_dir / "session_state" / "artifacts" / "hunter_1"
             response_files = list(artifacts_dir.glob("*/response.txt"))
             self.assertTrue(response_files)
@@ -270,7 +270,7 @@ class ReviewCliTests(unittest.TestCase):
                 result = main(["review"])
 
             self.assertEqual(0, result)
-            transcript_path = repo_dir / "awdit" / "runs" / "2026-03-29_101530" / "logs" / "prototype__2026-03-29_101530.txt"
+            transcript_path = repo_dir / "awdit" / "data" / "runs" / "2026-03-29_101530" / "logs" / "prototype__2026-03-29_101530.txt"
             transcript = transcript_path.read_text(encoding="utf-8")
             self.assertIn("streamed reply", transcript)
             self.assertIn("Foreground dispatch dispatch_", transcript)
@@ -394,7 +394,7 @@ class ReviewCliTests(unittest.TestCase):
             self.assertIn("Shared resources for this run", output)
             self.assertIn("Note for user:", output)
             self.assertIn("Everything under config/resources/shared/", output)
-            run_dir = repo_dir / "awdit" / "runs" / "2026-03-29_101530"
+            run_dir = repo_dir / "awdit" / "data" / "runs" / "2026-03-29_101530"
             shared_manifest = run_dir / "resources" / "shared" / "manifest.md"
             slot_manifest = run_dir / "resources" / "slots" / "hunter_1" / "manifest.md"
             summary_path = run_dir / "resources" / "summary.md"
@@ -444,7 +444,7 @@ class ReviewCliTests(unittest.TestCase):
 
             self.assertEqual(0, result)
             self.assertIn("Prompt snapshots", output)
-            run_dir = repo_dir / "awdit" / "runs" / "2026-03-29_101530"
+            run_dir = repo_dir / "awdit" / "data" / "runs" / "2026-03-29_101530"
             shared_manifest = run_dir / "resources" / "shared" / "manifest.md"
             run_json = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
 
@@ -486,7 +486,7 @@ class ReviewCliTests(unittest.TestCase):
             )
 
             self.assertEqual(0, result)
-            run_dir = repo_dir / "awdit" / "runs" / "2026-03-29_101530"
+            run_dir = repo_dir / "awdit" / "data" / "runs" / "2026-03-29_101530"
             shared_manifest = run_dir / "resources" / "shared" / "manifest.md"
             slot_manifest = run_dir / "resources" / "slots" / "hunter_1" / "manifest.md"
 
@@ -513,7 +513,7 @@ class ReviewCliTests(unittest.TestCase):
 
             self.assertEqual(0, result)
             self.assertIn("Review canceled before launch.", output)
-            self.assertFalse((repo_dir / "awdit" / "runs" / "2026-03-29_101530").exists())
+            self.assertFalse((repo_dir / "awdit" / "data" / "runs" / "2026-03-29_101530").exists())
 
 
 if __name__ == "__main__":

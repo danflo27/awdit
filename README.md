@@ -6,7 +6,7 @@ The current implemented slice is the startup resource flow for `awdit review`:
 - awdit loads the effective config and resource defaults
 - everything under `config/resources/shared/` and `config/resources/slots/<slot>/` is included by default unless excluded in repo config
 - the operator can accept, replace, or exit with the `y / e / n` review flow
-- the final selected resources are frozen under `awdit/runs/<run_id>/resources/`
+- the final selected resources are frozen under `awdit/data/runs/<run_id>/resources/`
 - local files and folders are staged into the run folder, while URLs are currently recorded in manifests without being fetched
 
 ## Development

@@ -232,7 +232,7 @@ Custom names may be added later. Slot labels are the public-facing default for n
 - Provenance and overlap rationale must remain visible when findings are clustered.
 - The exact canonicalization policy for converting clusters into later issue packets remains `TBD`.
 - Provenance must record which hunters originated each issue.
-- Each run writes one run-local case file per finding under `awdit/runs/<run_id>/issues/`.
+- Each run writes one run-local case file per finding under `awdit/data/runs/<run_id>/issues/`.
 
 ### Skeptics
 - Skeptics compete independently on the shared hunter issue ledger.
@@ -345,7 +345,7 @@ flowchart LR
 ### Storage Model
 awdit stores two kinds of data:
 - repo-scoped living intelligence under `awdit/repos/<repo_key>/`
-- run-scoped immutable artifacts under `awdit/runs/<run_id>/`
+- run-scoped immutable artifacts under `awdit/data/runs/<run_id>/`
 
 ### Repo-Scoped Living Intelligence
 Expected repo-scoped areas include:
@@ -400,7 +400,7 @@ flowchart TB
         CI["canonical case index + variant links"]
     end
 
-    subgraph Run["awdit/runs/<run_id>/ immutable artifacts"]
+    subgraph Run["awdit/data/runs/<run_id>/ immutable artifacts"]
         RJ["run.json"]
         DG["derived_context/"]
         PR["prompts/"]
