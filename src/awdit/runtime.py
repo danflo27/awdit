@@ -9,6 +9,7 @@ from datetime import datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from awdit.paths import MANAGED_ROOT_NAME
 from awdit.provider_openai import (
     BackgroundPollResult,
     OpenAIResponsesProvider,
@@ -138,6 +139,7 @@ class SlotRuntimeState:
 class OneSlotRuntime:
     SLOT_NAME = "hunter_1"
     DEFAULT_POLL_INTERVAL_SECONDS = 0.2
+    DISPATCH_PLACEHOLDER = ""
 
     def __init__(
         self,
@@ -201,12 +203,15 @@ class OneSlotRuntime:
         print("")
         print("One-slot runtime prototype mode")
         print("- Slot: Hunter 1")
-        print(f"- Default dispatch mode: {self.default_mode}")
+        print("- Dispatch commands: dispatch-fg, dispatch-bg")
         print("Type 'help' for commands.")
         while True:
             raw = input("runtime> ").strip().lower()
-            if raw == "dispatch":
-                self._interactive_dispatch()
+            if raw == "dispatch-fg":
+                self._interactive_dispatch(mode="foreground")
+                continue
+            if raw == "dispatch-bg":
+                self._interactive_dispatch(mode="background")
                 continue
             if raw == "status":
                 self._print_status()
@@ -238,7 +243,7 @@ class OneSlotRuntime:
         *,
         work_label: str,
         work_key: str,
-        instructions_text: str,
+        instructions_text: str | None = None,
         mode: str | None = None,
     ) -> tuple[bool, str, str | None]:
         dispatch_mode = mode or self.default_mode
@@ -247,7 +252,12 @@ class OneSlotRuntime:
         artifact_dir = self.artifacts_root / dispatch_id
         artifact_dir.mkdir(parents=True, exist_ok=True)
         instructions_path = artifact_dir / "instructions.txt"
-        _safe_write_text(instructions_path, instructions_text)
+        _safe_write_text(
+            instructions_path,
+            instructions_text
+            if instructions_text is not None
+            else self._generated_dispatch_payload_record(mode=dispatch_mode),
+        )
 
         dispatch_record = DispatchRecord(
             dispatch_id=dispatch_id,
@@ -399,46 +409,18 @@ class OneSlotRuntime:
             return []
         return [str(path) for path in sorted(self.artifacts_root.iterdir())]
 
-    def _interactive_dispatch(self) -> None:
+    def _interactive_dispatch(self, *, mode: str) -> None:
         print("")
-        work_label = input("Work label: ").strip()
-        if not work_label:
-            print("Dispatch canceled: work label is required.")
-            return
-        work_key = input("Work key: ").strip()
-        if not work_key:
-            print("Dispatch canceled: work key is required.")
-            return
-        source_kind = input("Instructions source [inline/file]: ").strip().lower()
-        if source_kind in {"file", "f"}:
-            raw_path = input("Instructions file path: ").strip()
-            path = Path(raw_path).expanduser()
-            if not path.is_absolute():
-                path = (self.cwd / path).resolve()
-            else:
-                path = path.resolve()
-            if not path.exists():
-                print("Dispatch canceled: instruction file does not exist.")
-                return
-            instructions_text = path.read_text(encoding="utf-8")
-        else:
-            instructions_text = input("Instructions: ").strip()
-        if not instructions_text.strip():
-            print("Dispatch canceled: instructions are required.")
-            return
-
-        override = input(
-            f"Dispatch mode override [Enter={self.default_mode}/foreground/background]: "
-        ).strip().lower()
-        mode = self.default_mode if not override else override
-        if mode not in {"foreground", "background"}:
-            print("Dispatch canceled: mode must be foreground or background.")
-            return
+        work_label = self._generated_work_label(mode=mode)
+        work_key = self._generated_work_key(mode=mode)
+        print("Dispatch summary")
+        print(f"- mode: {mode}")
+        print(f"- label: {work_label}")
+        print(f"- key: {work_key}")
 
         accepted, message, dispatch_id = self.submit_dispatch(
             work_label=work_label,
             work_key=work_key,
-            instructions_text=instructions_text,
             mode=mode,
         )
         print(message)
@@ -488,7 +470,8 @@ class OneSlotRuntime:
     def _print_help(self) -> None:
         print("")
         print("Commands")
-        print("- dispatch: queue work for Hunter 1")
+        print("- dispatch-fg: launch Hunter 1 in foreground mode")
+        print("- dispatch-bg: launch Hunter 1 in background mode")
         print("- status: show current runtime state and write a status snapshot")
         print("- events: show recent lifecycle events")
         print("- artifacts: list runtime artifact directories")
@@ -604,7 +587,6 @@ class OneSlotRuntime:
         previous_response_id: str | None,
         checkpoint_body: str | None,
     ) -> ProviderTurnResult:
-        instructions_text = Path(record.instructions_ref).read_text(encoding="utf-8")
         system_instructions = self._compose_system_instructions(
             work_label=record.work_label,
             work_key=record.work_key,
@@ -615,7 +597,7 @@ class OneSlotRuntime:
             return self.provider.start_foreground_turn(
                 model=self.model_name,
                 instructions=system_instructions,
-                input_text=instructions_text,
+                input_text=self.DISPATCH_PLACEHOLDER,
                 previous_response_id=previous_response_id,
                 tools=tools,
                 tool_executor=self._run_tool,
@@ -629,7 +611,7 @@ class OneSlotRuntime:
         handle = self.provider.start_background_turn(
             model=self.model_name,
             instructions=system_instructions,
-            input_text=instructions_text,
+            input_text=self.DISPATCH_PLACEHOLDER,
             previous_response_id=previous_response_id,
             tools=tools,
         )
@@ -996,6 +978,23 @@ class OneSlotRuntime:
         ]
         return "\n".join(part for part in body_parts if part is not None).strip()
 
+    def _generated_work_label(self, *, mode: str) -> str:
+        return f"Hunter 1 {mode} run"
+
+    def _generated_work_key(self, *, mode: str) -> str:
+        return f"{self.SLOT_NAME}/{mode}"
+
+    def _generated_dispatch_payload_record(self, *, mode: str) -> str:
+        return "\n".join(
+            [
+                "Dispatch payload record",
+                f"slot: {self.SLOT_NAME}",
+                f"mode: {mode}",
+                "source: configured slot prompt",
+                "user_payload: none",
+            ]
+        )
+
     def _build_tool_schemas(self) -> list[dict[str, Any]]:
         return [
             {
@@ -1099,7 +1098,7 @@ class OneSlotRuntime:
             if not path.is_file():
                 continue
             relative = path.relative_to(self.cwd).as_posix()
-            if relative.startswith(".awdit/"):
+            if relative.startswith(f"{MANAGED_ROOT_NAME}/"):
                 continue
             if self.scope_include and not self._matches_any(relative, self.scope_include):
                 continue
@@ -1135,8 +1134,8 @@ class OneSlotRuntime:
                 raise RuntimeError("Staged resource path does not exist.")
             return path
         relative = path.relative_to(self.cwd).as_posix()
-        if relative.startswith(".awdit/"):
-            raise RuntimeError("Only staged run resources may be read under .awdit.")
+        if relative.startswith(f"{MANAGED_ROOT_NAME}/"):
+            raise RuntimeError("Only staged run resources may be read under awdit.")
         if self.scope_include and not self._matches_any(relative, self.scope_include):
             raise RuntimeError("Path is outside the configured scope include globs.")
         if self._matches_any(relative, self.scope_exclude):

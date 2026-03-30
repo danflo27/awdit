@@ -36,6 +36,15 @@ uv run awdit list-models
 uv run awdit review
 ```
 
+## Terminal UX
+
+CLI presentation should follow CRAP principles: color, repetition, alignment, and proximity.
+Even before a richer TUI exists, repeated terminal sections should use consistent headings,
+list formatting, note blocks, and line wrapping so the operator can scan output quickly.
+
+More ambitious ASCII-art or TUI styling is future work. For now, favor clean structure and
+predictable layout over decorative output.
+
 ## Using `awdit` From Another Repo
 
 If you want to inspect a different repository without installing a global binary, point `uv run`

@@ -179,13 +179,7 @@ class ReviewCliTests(unittest.TestCase):
                             "y",
                             "n",
                             "y",
-                            "1",
-                            "dispatch",
-                            "Foreground task",
-                            "runtime/fg",
-                            "inline",
-                            "Please respond",
-                            "",
+                            "dispatch-fg",
                             "quit",
                         ],
                         stdout,
@@ -196,11 +190,90 @@ class ReviewCliTests(unittest.TestCase):
                 result = main(["review"])
 
             self.assertEqual(0, result)
-            run_dir = repo_dir / ".awdit" / "runs" / "2026-03-29_101530"
+            run_dir = repo_dir / "awdit" / "runs" / "2026-03-29_101530"
             artifacts_dir = run_dir / "session_state" / "artifacts" / "hunter_1"
             response_files = list(artifacts_dir.glob("*/response.txt"))
             self.assertTrue(response_files)
-            self.assertIn("One-slot runtime prototype mode", stdout.getvalue())
+            output = stdout.getvalue()
+            self.assertIn("One-slot runtime prototype mode", output)
+            self.assertIn("Dispatch commands: dispatch-fg, dispatch-bg", output)
+            transcript_path = run_dir / "logs" / "prototype__2026-03-29_101530.txt"
+            self.assertTrue(transcript_path.exists())
+            transcript = transcript_path.read_text(encoding="utf-8")
+            self.assertIn("Prototype runtime setup", transcript)
+            self.assertIn("Prototype transcript:", transcript)
+            self.assertIn("runtime> dispatch-fg", transcript)
+            self.assertIn("Dispatch summary", transcript)
+            self.assertIn("- mode: foreground", transcript)
+            self.assertIn("- label: Hunter 1 foreground run", transcript)
+            self.assertIn("- key: hunter_1/foreground", transcript)
+            self.assertNotIn("Work label:", transcript)
+            self.assertNotIn("Work key:", transcript)
+            self.assertNotIn("Instructions source", transcript)
+            self.assertIn("quit", transcript)
+            self.assertIn(f"Foreground dispatch {response_files[0].parent.name} finished with status=completed.", transcript)
+            self.assertNotIn("Choose the default dispatch mode", transcript)
+
+    def test_review_captures_streamed_foreground_output_in_transcript(self) -> None:
+        class StreamingProvider:
+            def start_foreground_turn(self, **kwargs):
+                event_callback = kwargs["event_callback"]
+                event_callback("output_delta", {"delta": "streamed "})
+                event_callback("output_delta", {"delta": "reply"})
+                return ProviderTurnResult(
+                    response_id="resp_stream",
+                    final_text="streamed reply",
+                    tool_traces=(),
+                    status="completed",
+                    model=kwargs["model"],
+                )
+
+            def start_background_turn(self, **kwargs):
+                raise AssertionError("background should not be used")
+
+            def poll_background_turn(self, **kwargs):
+                raise AssertionError("background should not be used")
+
+            def classify_provider_failure(self, value):
+                return None
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_dir = Path(tmp_dir) / "repo"
+            _write(repo_dir / "config" / "resources" / "shared" / "refund-boundaries.md", "shared")
+            loaded = self._loaded_config(repo_dir)
+
+            stdout = io.StringIO()
+            with (
+                mock.patch("awdit.cli.Path.cwd", return_value=repo_dir),
+                mock.patch("awdit.cli.load_effective_config", return_value=loaded),
+                mock.patch("awdit.cli._make_run_id", return_value="2026-03-29_101530"),
+                mock.patch(
+                    "awdit.runtime.OpenAIResponsesProvider.from_loaded_config",
+                    return_value=StreamingProvider(),
+                ),
+                mock.patch(
+                    "builtins.input",
+                    side_effect=self._input_mock(
+                        [
+                            "n",
+                            "y",
+                            "n",
+                            "y",
+                            "dispatch-fg",
+                            "quit",
+                        ],
+                        stdout,
+                    ),
+                ),
+                mock.patch("sys.stdout", stdout),
+            ):
+                result = main(["review"])
+
+            self.assertEqual(0, result)
+            transcript_path = repo_dir / "awdit" / "runs" / "2026-03-29_101530" / "logs" / "prototype__2026-03-29_101530.txt"
+            transcript = transcript_path.read_text(encoding="utf-8")
+            self.assertIn("streamed reply", transcript)
+            self.assertIn("Foreground dispatch dispatch_", transcript)
 
     def test_review_can_run_background_dispatch_and_keep_status_available(self) -> None:
         class FakeBackgroundProvider:
@@ -254,13 +327,7 @@ class ReviewCliTests(unittest.TestCase):
                             "y",
                             "n",
                             "y",
-                            "2",
-                            "dispatch",
-                            "Background task",
-                            "runtime/bg",
-                            "inline",
-                            "Please respond later",
-                            "",
+                            "dispatch-bg",
                             "status",
                             "events",
                             "status",
@@ -279,6 +346,7 @@ class ReviewCliTests(unittest.TestCase):
             self.assertEqual(0, result)
             self.assertIn("Runtime status", stdout.getvalue())
             self.assertIn("Recent events", stdout.getvalue())
+            self.assertIn("dispatch-bg", stdout.getvalue())
 
     def test_list_models_prints_available_openai_models(self) -> None:
         class FakeProvider:
@@ -323,8 +391,10 @@ class ReviewCliTests(unittest.TestCase):
             result, output = self._run_review(repo_dir, loaded, ["n", "y", "n"])
 
             self.assertEqual(0, result)
+            self.assertIn("Shared resources for this run", output)
+            self.assertIn("Note for user:", output)
             self.assertIn("Everything under config/resources/shared/", output)
-            run_dir = repo_dir / ".awdit" / "runs" / "2026-03-29_101530"
+            run_dir = repo_dir / "awdit" / "runs" / "2026-03-29_101530"
             shared_manifest = run_dir / "resources" / "shared" / "manifest.md"
             slot_manifest = run_dir / "resources" / "slots" / "hunter_1" / "manifest.md"
             summary_path = run_dir / "resources" / "summary.md"
@@ -332,6 +402,7 @@ class ReviewCliTests(unittest.TestCase):
             self.assertTrue(shared_manifest.exists())
             self.assertTrue(slot_manifest.exists())
             self.assertTrue(summary_path.exists())
+            self.assertFalse((run_dir / "logs").exists())
 
             shared_text = shared_manifest.read_text(encoding="utf-8")
             self.assertIn("refund-boundaries.md", shared_text)
@@ -362,13 +433,18 @@ class ReviewCliTests(unittest.TestCase):
                 repo_dir / "docs" / "PROPOSED_FILE_STRUCTURE_CONFIG_BEHAVIOUR.txt",
                 "file structure",
             )
+            _write(repo_dir / "config" / "resources" / "shared" / "architecture.md", "architecture")
+            _write(
+                repo_dir / "config" / "resources" / "shared" / "agent-isolation-workflow.md",
+                "workflow",
+            )
             loaded = self._loaded_config(repo_dir)
 
             result, output = self._run_review(repo_dir, loaded, ["n", "y", "n"])
 
             self.assertEqual(0, result)
             self.assertIn("Prompt snapshots", output)
-            run_dir = repo_dir / ".awdit" / "runs" / "2026-03-29_101530"
+            run_dir = repo_dir / "awdit" / "runs" / "2026-03-29_101530"
             shared_manifest = run_dir / "resources" / "shared" / "manifest.md"
             run_json = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
 
@@ -410,7 +486,7 @@ class ReviewCliTests(unittest.TestCase):
             )
 
             self.assertEqual(0, result)
-            run_dir = repo_dir / ".awdit" / "runs" / "2026-03-29_101530"
+            run_dir = repo_dir / "awdit" / "runs" / "2026-03-29_101530"
             shared_manifest = run_dir / "resources" / "shared" / "manifest.md"
             slot_manifest = run_dir / "resources" / "slots" / "hunter_1" / "manifest.md"
 
@@ -437,7 +513,7 @@ class ReviewCliTests(unittest.TestCase):
 
             self.assertEqual(0, result)
             self.assertIn("Review canceled before launch.", output)
-            self.assertFalse((repo_dir / ".awdit" / "runs" / "2026-03-29_101530").exists())
+            self.assertFalse((repo_dir / "awdit" / "runs" / "2026-03-29_101530").exists())
 
 
 if __name__ == "__main__":

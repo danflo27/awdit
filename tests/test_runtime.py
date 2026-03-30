@@ -167,9 +167,11 @@ class CaptureInstructionsProvider(ImmediateProvider):
     def __init__(self) -> None:
         super().__init__()
         self.instructions: str | None = None
+        self.input_text: str | None = None
 
     def start_foreground_turn(self, **kwargs) -> ProviderTurnResult:
         self.instructions = kwargs["instructions"]
+        self.input_text = kwargs["input_text"]
         return super().start_foreground_turn(**kwargs)
 
 
@@ -268,6 +270,38 @@ class RuntimeTests(unittest.TestCase):
             )
             self.assertEqual("live", new_record["status"])
             self.assertEqual(runtime.state.latest_checkpoint_ref, new_record["seed_checkpoint_ref"])
+
+    def test_interactive_foreground_dispatch_uses_generated_metadata_and_empty_payload(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            provider = CaptureInstructionsProvider()
+            runtime = self._make_runtime(Path(tmp_dir) / "repo", provider=provider)
+
+            runtime._interactive_dispatch(mode="foreground")
+
+            self.assertTrue(runtime.wait_for_idle(timeout_seconds=5.0))
+            self.assertEqual(1, len(runtime._dispatches))
+            record = next(iter(runtime._dispatches.values()))
+            self.assertEqual("completed", record.status)
+            self.assertEqual("Hunter 1 foreground run", record.work_label)
+            self.assertEqual("hunter_1/foreground", record.work_key)
+            self.assertEqual("", provider.input_text)
+            instructions_record = Path(record.instructions_ref).read_text(encoding="utf-8")
+            self.assertIn("source: configured slot prompt", instructions_record)
+            self.assertIn("user_payload: none", instructions_record)
+
+    def test_interactive_background_dispatch_uses_generated_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            provider = BackgroundProvider()
+            runtime = self._make_runtime(Path(tmp_dir) / "repo", provider=provider)
+
+            runtime._interactive_dispatch(mode="background")
+
+            self.assertTrue(runtime.wait_for_idle(timeout_seconds=5.0))
+            self.assertEqual(1, len(runtime._dispatches))
+            record = next(iter(runtime._dispatches.values()))
+            self.assertEqual("completed", record.status)
+            self.assertEqual("Hunter 1 background run", record.work_label)
+            self.assertEqual("hunter_1/background", record.work_key)
 
     def test_idle_compaction_without_checkpoint_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -480,7 +514,6 @@ class RuntimeTests(unittest.TestCase):
             accepted, _, dispatch_id = runtime.submit_dispatch(
                 work_label="Read prompt",
                 work_key="runtime/prompt",
-                instructions_text="Describe the repo.",
                 mode="foreground",
             )
             self.assertTrue(accepted)
@@ -489,6 +522,16 @@ class RuntimeTests(unittest.TestCase):
             self.assertIsNotNone(provider.instructions)
             self.assertIn("changed later", provider.instructions)
             self.assertNotIn(snapshot_prompt, provider.instructions)
+            self.assertEqual("", provider.input_text)
+
+    def test_runtime_disallows_repo_managed_artifact_reads_outside_staged_resources(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            runtime = self._make_runtime(Path(tmp_dir) / "repo", provider=ImmediateProvider())
+            hidden = runtime.cwd / "awdit" / "secret.txt"
+            _write(hidden, "keep out\n")
+
+            with self.assertRaisesRegex(RuntimeError, "Only staged run resources may be read under awdit."):
+                runtime._tool_read_file({"path": "awdit/secret.txt"})
 
 
 if __name__ == "__main__":
