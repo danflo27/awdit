@@ -3,6 +3,7 @@ __pycache__/
 .pytest_cache/
 .env
 .awdit/
+awdit/
 .venv/
 build/
 dist/

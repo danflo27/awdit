@@ -5,8 +5,8 @@ $ awdit review
 
 awdit> Starting new run...
 [* create run_id: 2026-03-29_101530 *]
-[* create .awdit/runs/2026-03-29_101530/ *]
-[* open sqlite db: .awdit/awdit.db *]
+[* create awdit/runs/2026-03-29_101530/ *]
+[* open sqlite db: awdit/awdit.db *]
 [* insert runs row: status=starting *]
 [* agent names not configured yet, using slot labels *]
 
@@ -14,15 +14,15 @@ awdit> Repository detected: `acme-payments`
 awdit> No repo danger map exists for this repository yet.
 awdit> Generating repo memory bootstrap before review...
 [* create repo key: acme-payments_7f9d1c2a *]
-[* create .awdit/repos/acme-payments_7f9d1c2a/ *]
+[* create awdit/repos/acme-payments_7f9d1c2a/ *]
 [* inspect tracked files, configs, tests, migrations, docs, and git metadata *]
-[* write .awdit/repos/acme-payments_7f9d1c2a/danger_map.md *]
-[* write .awdit/repos/acme-payments_7f9d1c2a/danger_map.json *]
-[* write .awdit/repos/acme-payments_7f9d1c2a/memory/repo_comments.md *]
-[* write .awdit/repos/acme-payments_7f9d1c2a/cases/canonical_index.json *]
+[* write awdit/repos/acme-payments_7f9d1c2a/danger_map.md *]
+[* write awdit/repos/acme-payments_7f9d1c2a/danger_map.json *]
+[* write awdit/repos/acme-payments_7f9d1c2a/memory/repo_comments.md *]
+[* write awdit/repos/acme-payments_7f9d1c2a/cases/canonical_index.json *]
 
 awdit> Repo danger map ready:
-awdit>   `.awdit/repos/acme-payments_7f9d1c2a/danger_map.md`
+awdit>   `awdit/repos/acme-payments_7f9d1c2a/danger_map.md`
 awdit> Review the map, then choose:
 awdit>   y. Accept it and continue
 awdit>   e. Enter corrections or guidance, then regenerate it
@@ -32,13 +32,13 @@ user> e
 
 awdit> Enter corrections or guidance for danger-map regeneration:
 user> focus on webhook replay boundaries and org scoping assumptions
-[* append startup guidance to .awdit/repos/acme-payments_7f9d1c2a/memory/repo_comments.md *]
+[* append startup guidance to awdit/repos/acme-payments_7f9d1c2a/memory/repo_comments.md *]
 [* regenerate danger map using prior scan plus new user guidance *]
-[* rewrite .awdit/repos/acme-payments_7f9d1c2a/danger_map.md *]
-[* rewrite .awdit/repos/acme-payments_7f9d1c2a/danger_map.json *]
+[* rewrite awdit/repos/acme-payments_7f9d1c2a/danger_map.md *]
+[* rewrite awdit/repos/acme-payments_7f9d1c2a/danger_map.json *]
 
 awdit> Updated repo danger map ready:
-awdit>   `.awdit/repos/acme-payments_7f9d1c2a/danger_map.md`
+awdit>   `awdit/repos/acme-payments_7f9d1c2a/danger_map.md`
 awdit> Accept / edit / regenerate? [Y/e/n]
 user> y
 
@@ -71,8 +71,8 @@ user> y
 [* changed files: app/api/refunds.py, app/auth.py, app/webhooks.py, tests/test_refunds.py *]
 [* expand surrounding context under include/exclude rules and context budget *]
 [* derive run-local role digests from repo danger map and truth-labeled memory *]
-[* write target snapshot to .awdit/runs/2026-03-29_101530/run.json *]
-[* write derived role digests to .awdit/runs/2026-03-29_101530/derived_context/ *]
+[* write target snapshot to awdit/runs/2026-03-29_101530/run.json *]
+[* write derived role digests to awdit/runs/2026-03-29_101530/derived_context/ *]
 
 awdit> Proposed model lineup from config:
 awdit>   Hunter 1  -> gpt-5.4
@@ -100,7 +100,7 @@ awdit> Enter the exact shared resource list for this run, comma-separated:
 awdit> You can use files from `config/resources/`, any other local path, folders, or URLs.
 user> ~/notes/payment-threat-model.md, https://internal.example/wiki/refund-trust-boundaries
 [* validate local paths exist *]
-[* write .awdit/runs/2026-03-29_101530/resources/shared/manifest.md *]
+[* write awdit/runs/2026-03-29_101530/resources/shared/manifest.md *]
 [* stage local files and folders for shared resources *]
 [* record URL resources in the shared manifest without fetching them *]
 
@@ -132,7 +132,7 @@ awdit> Place files anywhere convenient on disk, then point awdit at them here.
 awdit> awdit will stage local inputs and write a per-slot manifest for later review.
 user> ~/notes/payment-threat-model.md, ~/notes/auth-review-notes.md, ~/src/acme-payments/docs/auth/, https://owasp.org/Top10/A01_2021-Broken_Access_Control/
 [* validate local paths exist *]
-[* write .awdit/runs/2026-03-29_101530/resources/slots/hunter_1/manifest.md *]
+[* write awdit/runs/2026-03-29_101530/resources/slots/hunter_1/manifest.md *]
 [* stage local files and folders for Hunter 1 resources *]
 [* record URL resources in the Hunter 1 manifest without fetching them *]
 
@@ -150,9 +150,9 @@ user> 9
 
 [* render prompts for all agents from configured prompt files *]
 [* prompt wording remains editable; exact slot wording is not frozen in architecture *]
-[* write exact prompt snapshots to .awdit/runs/2026-03-29_101530/prompts/ *]
+[* write exact prompt snapshots to awdit/runs/2026-03-29_101530/prompts/ *]
 [* runtime execution will still read the configured prompt files; snapshots are stored for run review *]
-[* write .awdit/runs/2026-03-29_101530/resources/summary.md *]
+[* write awdit/runs/2026-03-29_101530/resources/summary.md *]
 [* create one visible slot identity and one initial reserved session epoch marker per slot for this run *]
 [* no slot workers are started yet; each worker will launch lazily on first dispatch *]
 [* warm slot sessions are enabled by default for this run and should stay live as long as possible *]
@@ -183,8 +183,8 @@ awdit>     - missing org scoping in `app/api/refunds.py:73-89`
 [* auth bypass findings are linked in one candidate cluster with both hunters credited *]
 [* refund scoping findings are linked in one candidate cluster with both hunters credited *]
 [* webhook compare and retry desync remain standalone findings *]
-[* write case files under .awdit/runs/2026-03-29_101530/issues/ *]
-[* write .awdit/runs/2026-03-29_101530/reports/candidate_ledger.md *]
+[* write case files under awdit/runs/2026-03-29_101530/issues/ *]
+[* write awdit/runs/2026-03-29_101530/reports/candidate_ledger.md *]
 [* write candidate ledger and provenance to db *]
 
 awdit> Launching skeptics on the shared hunter issue ledger...
@@ -229,7 +229,7 @@ awdit> Skeptic 2 is nearing its live context budget.
 awdit> Current usage is 75%. awdit will compact this slot at the next safe boundary unless the slot finishes comfortably first.
 [* AWD-004 skeptic debate reaches the turn cap without resolution *]
 [* coordinator forwards both skeptic positions minimally in the skeptic summary *]
-[* write .awdit/runs/2026-03-29_101530/reports/skeptic_summary.md *]
+[* write awdit/runs/2026-03-29_101530/reports/skeptic_summary.md *]
 
 [* build structured issue packets for referees *]
 [* packet contents include case ID, packet revision, code refs, cluster status, hunter provenance, skeptic outcomes, debate links when present, unresolved questions, and issue-file links *]
@@ -288,7 +288,7 @@ awdit> Running short referee rebuttal round for disagreements...
 [* write merged_referee_report.md *]
 
 awdit> Merged referee report ready:
-awdit>   `.awdit/runs/2026-03-29_101530/reports/merged_referee_report.md`
+awdit>   `awdit/runs/2026-03-29_101530/reports/merged_referee_report.md`
 
 awdit> Human truth review
 awdit> Only issues that survived to human review are shown here.
@@ -296,7 +296,7 @@ awdit> Only issues that survived to human review are shown here.
 awdit> AWD-001
 awdit> Claim: Public `X-Internal-User` header can bypass auth in `app/auth.py`
 awdit> Referee outcome: both referees said REAL BUG
-awdit> Issue report: `.awdit/runs/2026-03-29_101530/issues/AWD-001.md`
+awdit> Issue report: `awdit/runs/2026-03-29_101530/issues/AWD-001.md`
 awdit> Code refs: `app/auth.py:42-55`, `app/auth.py:88-93`
 awdit> Truth? [y]es / [n]o / [u]nsure
 user> y
@@ -305,7 +305,7 @@ awdit> AWD-002
 awdit> Claim: Refund lookup may be missing org scoping in `app/api/refunds.py`
 awdit> Referee outcome: disputed
 awdit> Referee disagreement note: included in issue report
-awdit> Issue report: `.awdit/runs/2026-03-29_101530/issues/AWD-002.md`
+awdit> Issue report: `awdit/runs/2026-03-29_101530/issues/AWD-002.md`
 awdit> Code refs: `app/api/refunds.py:71-90`
 awdit> Truth? [y]es / [n]o / [u]nsure
 user> n
@@ -313,7 +313,7 @@ user> n
 awdit> AWD-003
 awdit> Claim: Webhook signature compare uses non-constant-time equality in `app/webhooks.py`
 awdit> Referee outcome: both referees said REAL BUG
-awdit> Issue report: `.awdit/runs/2026-03-29_101530/issues/AWD-003.md`
+awdit> Issue report: `awdit/runs/2026-03-29_101530/issues/AWD-003.md`
 awdit> Code refs: `app/webhooks.py:33-47`
 awdit> Truth? [y]es / [n]o / [u]nsure
 user> y
@@ -333,8 +333,8 @@ awdit> Auto-dismissed without human review: 1
 awdit> Continue to solver stage with confirmed bugs only? [Y/n]
 user> y
 
-[* create worktree for Solver 1: .awdit/worktrees/2026-03-29_101530/solver_1 *]
-[* create worktree for Solver 2: .awdit/worktrees/2026-03-29_101530/solver_2 *]
+[* create worktree for Solver 1: awdit/worktrees/2026-03-29_101530/solver_1 *]
+[* create worktree for Solver 2: awdit/worktrees/2026-03-29_101530/solver_2 *]
 [* both start from the same clean base ref *]
 [* Hunter and skeptic slot sessions remain part of the run record, but only solver slots receive new work here *]
 
@@ -349,49 +349,49 @@ awdit> Solvers finished. Running shared baseline validation...
 [* run configured validation checks on Solver 2 full branch *]
 [* replay configured exploit probes where available *]
 [* run static re-analysis and a basic nearby variant scan *]
-[* store shared baseline facts in .awdit/runs/2026-03-29_101530/validation/baseline/ *]
-[* write .awdit/runs/2026-03-29_101530/validation/baseline/summary.md *]
+[* store shared baseline facts in awdit/runs/2026-03-29_101530/validation/baseline/ *]
+[* write awdit/runs/2026-03-29_101530/validation/baseline/summary.md *]
 
 awdit> Referees are comparing validated fixes...
 [* Referee 1 reviews shared baseline facts for Solver 1 and Solver 2 *]
 [* Referee 1 runs one extra targeted check for AWD-001 before final comparison *]
-[* Referee 1 writes fix comparison report to .awdit/runs/2026-03-29_101530/reports/referee_1_fix_review.md *]
+[* Referee 1 writes fix comparison report to awdit/runs/2026-03-29_101530/reports/referee_1_fix_review.md *]
 [* Referee 2 reviews shared baseline facts for Solver 1 and Solver 2 *]
 [* Referee 2 accepts shared baseline facts without extra follow-up for AWD-003 *]
-[* Referee 2 writes fix comparison report to .awdit/runs/2026-03-29_101530/reports/referee_2_fix_review.md *]
+[* Referee 2 writes fix comparison report to awdit/runs/2026-03-29_101530/reports/referee_2_fix_review.md *]
 [* merge referee fix judgments into solver comparison summary *]
-[* write .awdit/runs/2026-03-29_101530/reports/solver_comparison_summary.md *]
+[* write awdit/runs/2026-03-29_101530/reports/solver_comparison_summary.md *]
 
 awdit> Choose the winning fix for each confirmed bug
 
 awdit> AWD-001
 awdit> Solver 1 avg: 8.5
-awdit>   Shared baseline validation: `.awdit/runs/2026-03-29_101530/validation/baseline/AWD-001.md`
-awdit>   Referee comparison notes: `.awdit/runs/2026-03-29_101530/reports/referee_1_fix_review.md`, `.awdit/runs/2026-03-29_101530/reports/referee_2_fix_review.md`
-awdit>   Solution report: `.awdit/runs/2026-03-29_101530/solvers/solver_1/AWD-001.md`
+awdit>   Shared baseline validation: `awdit/runs/2026-03-29_101530/validation/baseline/AWD-001.md`
+awdit>   Referee comparison notes: `awdit/runs/2026-03-29_101530/reports/referee_1_fix_review.md`, `awdit/runs/2026-03-29_101530/reports/referee_2_fix_review.md`
+awdit>   Solution report: `awdit/runs/2026-03-29_101530/solvers/solver_1/AWD-001.md`
 awdit> Solver 2 avg: 7.0
-awdit>   Shared baseline validation: `.awdit/runs/2026-03-29_101530/validation/baseline/AWD-001.md`
-awdit>   Solution report: `.awdit/runs/2026-03-29_101530/solvers/solver_2/AWD-001.md`
+awdit>   Shared baseline validation: `awdit/runs/2026-03-29_101530/validation/baseline/AWD-001.md`
+awdit>   Solution report: `awdit/runs/2026-03-29_101530/solvers/solver_2/AWD-001.md`
 awdit> Pick [1/2]
 user> 1
 
 awdit> AWD-003
 awdit> Solver 1 avg: 7.5
-awdit>   Shared baseline validation: `.awdit/runs/2026-03-29_101530/validation/baseline/AWD-003.md`
-awdit>   Solution report: `.awdit/runs/2026-03-29_101530/solvers/solver_1/AWD-003.md`
+awdit>   Shared baseline validation: `awdit/runs/2026-03-29_101530/validation/baseline/AWD-003.md`
+awdit>   Solution report: `awdit/runs/2026-03-29_101530/solvers/solver_1/AWD-003.md`
 awdit> Solver 2 avg: 9.0
-awdit>   Shared baseline validation: `.awdit/runs/2026-03-29_101530/validation/baseline/AWD-003.md`
-awdit>   Referee comparison notes: `.awdit/runs/2026-03-29_101530/reports/referee_1_fix_review.md`, `.awdit/runs/2026-03-29_101530/reports/referee_2_fix_review.md`
-awdit>   Solution report: `.awdit/runs/2026-03-29_101530/solvers/solver_2/AWD-003.md`
+awdit>   Shared baseline validation: `awdit/runs/2026-03-29_101530/validation/baseline/AWD-003.md`
+awdit>   Referee comparison notes: `awdit/runs/2026-03-29_101530/reports/referee_1_fix_review.md`, `awdit/runs/2026-03-29_101530/reports/referee_2_fix_review.md`
+awdit>   Solution report: `awdit/runs/2026-03-29_101530/solvers/solver_2/AWD-003.md`
 awdit> Pick [1/2]
 user> 2
 
-[* create integration worktree: .awdit/worktrees/2026-03-29_101530/selected *]
+[* create integration worktree: awdit/worktrees/2026-03-29_101530/selected *]
 [* cherry-pick selected per-bug commits in finding ID order *]
 [* write final amended report with links to old code and chosen fixed code *]
 [* update repo-wide danger map and truth-labeled memory from this run *]
-[* update .awdit/repos/acme-payments_7f9d1c2a/cases/canonical_index.json with linked findings and truth outcomes *]
-[* append any user comments to .awdit/repos/acme-payments_7f9d1c2a/memory/repo_comments.md *]
+[* update awdit/repos/acme-payments_7f9d1c2a/cases/canonical_index.json with linked findings and truth outcomes *]
+[* append any user comments to awdit/repos/acme-payments_7f9d1c2a/memory/repo_comments.md *]
 [* update run row: status=completed *]
 [* any slot that exceeded context budget during the run would have been compacted and rehydrated as the same slot identity in a new session epoch *]
 
@@ -399,17 +399,17 @@ awdit> Audit complete.
 
 awdit> Final run summary
 awdit>   Repo danger map:
-awdit>     `.awdit/repos/acme-payments_7f9d1c2a/danger_map.md`
+awdit>     `awdit/repos/acme-payments_7f9d1c2a/danger_map.md`
 awdit>   Shared resource manifest:
-awdit>     `.awdit/runs/2026-03-29_101530/resources/shared/manifest.md`
+awdit>     `awdit/runs/2026-03-29_101530/resources/shared/manifest.md`
 awdit>   Merged referee report:
-awdit>     `.awdit/runs/2026-03-29_101530/reports/merged_referee_report.md`
+awdit>     `awdit/runs/2026-03-29_101530/reports/merged_referee_report.md`
 awdit>   Final truth-labeled summary:
-awdit>     `.awdit/runs/2026-03-29_101530/reports/final_truth_labeled_summary.md`
+awdit>     `awdit/runs/2026-03-29_101530/reports/final_truth_labeled_summary.md`
 awdit>   Solver comparison summary:
-awdit>     `.awdit/runs/2026-03-29_101530/reports/solver_comparison_summary.md`
+awdit>     `awdit/runs/2026-03-29_101530/reports/solver_comparison_summary.md`
 awdit>   Solver selection summary:
-awdit>     `.awdit/runs/2026-03-29_101530/reports/solver_selection_summary.md`
+awdit>     `awdit/runs/2026-03-29_101530/reports/solver_selection_summary.md`
 
 awdit> Notes
 awdit>   - AWD-004 was recorded as NOT A BUG in the merged referee report
@@ -427,7 +427,7 @@ awdit> Starting new run...
 
 awdit> Repository detected: `acme-payments`
 awdit> Existing repo danger map found:
-awdit>   `.awdit/repos/acme-payments_7f9d1c2a/danger_map.md`
+awdit>   `awdit/repos/acme-payments_7f9d1c2a/danger_map.md`
 awdit> Last updated by run `2026-03-29_101530` at `2026-03-29 10:42:11`
 awdit> Refresh repo danger map before this review? [Y/n]
 user> y

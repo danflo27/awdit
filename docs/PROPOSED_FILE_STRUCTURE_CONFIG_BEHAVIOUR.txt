@@ -11,8 +11,8 @@ Goal
 ----
 Keep the storage model simple:
 - config/ contains human-managed defaults
-- .awdit/repos/<repo_key>/ contains evolving repo intelligence only
-- .awdit/runs/<run_id>/ contains the exact immutable resources and artifacts used for one run
+- awdit/repos/<repo_key>/ contains evolving repo intelligence only
+- awdit/runs/<run_id>/ contains the exact immutable resources and artifacts used for one run
 
 This document lives under docs/ as a design note and is not itself part of the proposed runtime layout.
 
@@ -51,9 +51,10 @@ Notes:
 - secrets stay in env vars rather than inside `config.toml`
 
 
-Repo-scoped living intelligence
--------------------------------
-.awdit/
+Runtime-managed structure
+-------------------------
+awdit/
+  awdit.db
   repos/
     <repo_key>/
       danger_map.md
@@ -62,16 +63,13 @@ Repo-scoped living intelligence
         repo_comments.md
       cases/
         canonical_index.json
-
-
-Run-scoped immutable artifacts
-------------------------------
-.awdit/
   runs/
     <run_id>/
       run.json
       prompts/
       derived_context/
+      logs/
+        prototype__<run_id>.txt
       session_state/
       resources/
         shared/
@@ -94,6 +92,18 @@ Run-scoped immutable artifacts
       validation/
         baseline/
       solvers/
+  worktrees/
+    <run_id>/
+      solver_1/
+      solver_2/
+      selected/
+
+Notes:
+- `awdit/` is the visible forward-facing root for all app-managed runtime artifacts
+- `repos/` holds evolving repo intelligence across runs
+- `runs/` holds the exact immutable artifacts for a single run
+- `logs/prototype__<run_id>.txt` is the plain-text prototype terminal transcript
+- `worktrees/` is the runtime-managed area for disposable run-local worktrees
 
 session_state/ design notes
 ---------------------------
@@ -127,7 +137,7 @@ Config behavior
 - y means use the list as shown
 - if the user chooses e, they replace the exact list for that run
 - if the user chooses n, awdit exits the review wizard before launch
-- the final chosen resources are recorded only under .awdit/runs/<run_id>/resources/
+- the final chosen resources are recorded only under awdit/runs/<run_id>/resources/
 - the current runtime implementation stages local files and folders into staged/
 - the current runtime implementation records URLs in the manifests without fetching them
 - run-scoped artifacts will likely also include debate transcripts, session checkpoint or compaction artifacts, and coordinator merge summaries
