@@ -140,17 +140,11 @@ class LoadedConfig:
     effective: EffectiveConfig
     raw: dict[str, Any]
     sources: dict[PathKey, SourceInfo]
-    user_config_path: Path
-    repo_config_path: Path
-    repo_config_exists: bool
+    config_path: Path
     resolved_env: dict[str, str]
 
     def source_label(self, *path: str) -> str:
         return self.sources[tuple(path)].label
-
-
-def default_user_config_path() -> Path:
-    return Path.home() / ".awdit" / "config.toml"
 
 
 def default_repo_config_path(cwd: Path | None = None) -> Path:
@@ -178,40 +172,30 @@ def default_slot_resources_path(slot_name: str, cwd: Path | None = None) -> Path
 def load_effective_config(
     *,
     cwd: Path | None = None,
-    user_config_path: Path | None = None,
-    repo_config_path: Path | None = None,
+    config_path: Path | None = None,
     env: Mapping[str, str] | None = None,
 ) -> LoadedConfig:
     cwd = cwd or Path.cwd()
-    user_config_path = user_config_path or default_user_config_path()
-    repo_config_path = repo_config_path or default_repo_config_path(cwd)
+    config_path = config_path or default_repo_config_path(cwd)
     environ = _resolve_runtime_env(cwd=cwd, env=env)
 
-    if not user_config_path.exists():
+    if not config_path.exists():
         raise ConfigError(
-            f"Missing required user config at {user_config_path}. "
-            "Create ~/.awdit/config.toml before running awdit."
+            f"Missing required config at {config_path}. "
+            "Create config/config.toml before running awdit."
         )
 
     layers = [
         (BUILTIN_DEFAULTS, SourceInfo("built-in", None)),
-        (_load_toml_file(user_config_path), SourceInfo("user config", user_config_path.parent)),
+        (_load_toml_file(config_path), SourceInfo("config", config_path.parent)),
     ]
-    repo_exists = repo_config_path.exists()
-    if repo_exists:
-        layers.append(
-            (_load_toml_file(repo_config_path), SourceInfo("repo config", repo_config_path.parent))
-        )
-
     merged, sources = merge_layers(layers)
     effective = _normalize_and_validate(merged, sources, environ)
     return LoadedConfig(
         effective=effective,
         raw=merged,
         sources=sources,
-        user_config_path=user_config_path,
-        repo_config_path=repo_config_path,
-        repo_config_exists=repo_exists,
+        config_path=config_path,
         resolved_env=dict(environ),
     )
 
@@ -267,9 +251,7 @@ def apply_runtime_overrides_with_env(
         effective=effective,
         raw=merged,
         sources=sources,
-        user_config_path=loaded.user_config_path,
-        repo_config_path=loaded.repo_config_path,
-        repo_config_exists=loaded.repo_config_exists or loaded.repo_config_path.exists(),
+        config_path=loaded.config_path,
         resolved_env=dict(env),
     )
 

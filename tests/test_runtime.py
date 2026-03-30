@@ -163,18 +163,25 @@ class FirstDispatchFailureProvider(ImmediateProvider):
         return None
 
 
+class CaptureInstructionsProvider(ImmediateProvider):
+    def __init__(self) -> None:
+        super().__init__()
+        self.instructions: str | None = None
+
+    def start_foreground_turn(self, **kwargs) -> ProviderTurnResult:
+        self.instructions = kwargs["instructions"]
+        return super().start_foreground_turn(**kwargs)
+
+
 class RuntimeTests(unittest.TestCase):
     def _loaded_config(self, repo_dir: Path):
-        home_dir = repo_dir.parent / "home" / ".awdit"
-        user_config = home_dir / "config.toml"
-        repo_config = repo_dir / "config" / "config.toml"
-        _write_prompt_tree(home_dir)
-        _write(user_config, _user_config_text())
-        _write(repo_config, "")
+        config_dir = repo_dir / "config"
+        config_path = config_dir / "config.toml"
+        _write_prompt_tree(config_dir)
+        _write(config_path, _user_config_text())
         return load_effective_config(
             cwd=repo_dir,
-            user_config_path=user_config,
-            repo_config_path=repo_config,
+            config_path=config_path,
             env={"OPENAI_API_KEY": "token"},
         )
 
@@ -442,6 +449,46 @@ class RuntimeTests(unittest.TestCase):
 
             matches = json.loads(runtime._tool_search_text({"query": "hello"}))
             self.assertEqual("app/service.py", matches["matches"][0]["path"])
+
+    def test_runtime_reads_prompt_from_config_not_prompt_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_dir = Path(tmp_dir) / "repo"
+            provider = CaptureInstructionsProvider()
+            _write(repo_dir / "app" / "service.py", "print('hello')\n")
+            _write(repo_dir / "notes" / "shared-note.md", "shared runtime note\n")
+            loaded = self._loaded_config(repo_dir)
+            resources = RuntimeResources(
+                shared=(str((repo_dir / "notes" / "shared-note.md").resolve()),),
+                slots={slot_name: () for slot_name in SLOT_NAMES},
+            )
+            with mock.patch("awdit.cli._make_run_id", return_value="2026-03-29_101530"):
+                snapshot = _persist_run_resource_snapshot(repo_dir, loaded, resources)
+            snapshot_prompt = (snapshot.prompts_dir / "hunter_1.md").read_text(encoding="utf-8").strip()
+            loaded.effective.slots["hunter_1"].prompt_file.write_text("changed later\n", encoding="utf-8")
+
+            runtime = OneSlotRuntime(
+                cwd=repo_dir,
+                loaded=loaded,
+                run_dir=snapshot.run_dir,
+                default_mode="foreground",
+                provider=provider,
+                poll_interval_seconds=0.01,
+            )
+            self.addCleanup(lambda: runtime.request_shutdown())
+            self.addCleanup(lambda: runtime.wait_for_idle(timeout_seconds=5.0))
+
+            accepted, _, dispatch_id = runtime.submit_dispatch(
+                work_label="Read prompt",
+                work_key="runtime/prompt",
+                instructions_text="Describe the repo.",
+                mode="foreground",
+            )
+            self.assertTrue(accepted)
+            runtime.wait_for_dispatch(dispatch_id)
+
+            self.assertIsNotNone(provider.instructions)
+            self.assertIn("changed later", provider.instructions)
+            self.assertNotIn(snapshot_prompt, provider.instructions)
 
 
 if __name__ == "__main__":

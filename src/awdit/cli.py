@@ -41,6 +41,7 @@ class RunResourceSnapshot:
     run_id: str
     run_dir: Path
     run_json: Path
+    prompts_dir: Path
     shared_manifest: Path
     slot_manifests: dict[str, Path]
     summary_path: Path
@@ -109,6 +110,7 @@ def _handle_review(_: argparse.Namespace) -> int:
     print("Run-scoped resource snapshot")
     print(f"- Run id: {snapshot.run_id}")
     print(f"- Run metadata: {snapshot.run_json}")
+    print(f"- Prompt snapshots: {snapshot.prompts_dir}")
     print(f"- Shared resource manifest: {snapshot.shared_manifest}")
     for slot_name in SLOT_NAMES:
         manifest = snapshot.slot_manifests.get(slot_name)
@@ -121,7 +123,7 @@ def _handle_review(_: argparse.Namespace) -> int:
     if config_patch:
         print("")
         print(
-            f"Note: config-backed changes were not saved. Update {current.repo_config_path} "
+            f"Note: config-backed changes were not saved. Update {current.config_path} "
             "manually if you want to keep them."
         )
 
@@ -505,11 +507,20 @@ def _persist_run_resource_snapshot(
 ) -> RunResourceSnapshot:
     run_id = _make_run_id()
     run_dir = cwd / ".awdit" / "runs" / run_id
+    prompts_dir = run_dir / "prompts"
     resources_dir = run_dir / "resources"
     shared_dir = resources_dir / "shared"
     slot_root = resources_dir / "slots"
+    prompts_dir.mkdir(parents=True, exist_ok=True)
     shared_dir.mkdir(parents=True, exist_ok=True)
     slot_root.mkdir(parents=True, exist_ok=True)
+
+    prompt_snapshot_paths: dict[str, str] = {}
+    for slot_name in SLOT_NAMES:
+        prompt_path = loaded.effective.slots[slot_name].prompt_file
+        snapshot_path = prompts_dir / f"{slot_name}.md"
+        shutil.copy2(prompt_path, snapshot_path)
+        prompt_snapshot_paths[slot_name] = str(snapshot_path)
 
     shared_records = _stage_resource_items(resources.shared, shared_dir / "staged")
     shared_manifest = shared_dir / "manifest.md"
@@ -538,8 +549,14 @@ def _persist_run_resource_snapshot(
             {
                 "run_id": run_id,
                 "created_at": datetime.now().isoformat(timespec="seconds"),
-                "repo_config_path": str(loaded.repo_config_path),
-                "user_config_path": str(loaded.user_config_path),
+                "config_path": str(loaded.config_path),
+                "slots": {
+                    slot_name: {
+                        "model": loaded.effective.slots[slot_name].default_model,
+                        "prompt_snapshot": prompt_snapshot_paths[slot_name],
+                    }
+                    for slot_name in SLOT_NAMES
+                },
                 "resources": {
                     "shared": list(resources.shared),
                     "slots": {slot_name: list(items) for slot_name, items in resources.slots.items()},
@@ -557,6 +574,7 @@ def _persist_run_resource_snapshot(
         run_id=run_id,
         run_dir=run_dir,
         run_json=run_json,
+        prompts_dir=prompts_dir,
         shared_manifest=shared_manifest,
         slot_manifests=slot_manifests,
         summary_path=summary_path,

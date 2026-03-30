@@ -1,26 +1,4 @@
->....                                                                             
-[slots.skeptic_2]
-default_model = "gpt-5.4-mini"
-prompt_file = "prompts/skeptic_2.md"
-
-[slots.referee_1]
-default_model = "gpt-5.4"
-prompt_file = "prompts/referee_1.md"
-
-[slots.referee_2]
-default_model = "gpt-5.4"
-prompt_file = "prompts/referee_2.md"
-
-[slots.solver_1]
-default_model = "gpt-5.4"
-prompt_file = "prompts/solver_1.md"
-
-[slots.solver_2]
-default_model = "gpt-5.4-mini"
-prompt_file = "prompts/solver_2.md"
-EOF
-
-(base) df@Daniels-MacBook-Pro awdit % uv run awdit review                                                               
+uv run awdit review
 
 Effective config summary
 - Resource folders under config/resources/shared/ and config/resources/slots/<slot>
@@ -100,17 +78,17 @@ Effective config summary
 - Slot-specific resource sets with items: 0
 
 Run-scoped resource snapshot
-- Run id: 2026-03-29_195350
-- Run metadata: /Users/df/projects/awdit/.awdit/runs/2026-03-29_195350/run.json
-- Shared resource manifest: /Users/df/projects/awdit/.awdit/runs/2026-03-29_195350/resources/shared/manifest.md
-- Resource summary: /Users/df/projects/awdit/.awdit/runs/2026-03-29_195350/resources/summary.md
+- Run id: 2026-03-29_220921
+- Run metadata: /Users/df/projects/awdit/.awdit/runs/2026-03-29_220921/run.json
+- Shared resource manifest: /Users/df/projects/awdit/.awdit/runs/2026-03-29_220921/resources/shared/manifest.md
+- Resource summary: /Users/df/projects/awdit/.awdit/runs/2026-03-29_220921/resources/summary.md
 
 Enter one-slot runtime prototype mode? [y/N] y
 Prototype runtime setup
 Choose the default dispatch mode for this prototype session.
   1. Foreground
   2. Background
-> 1
+> Foreground
 
 One-slot runtime prototype mode
 - Slot: Hunter 1
@@ -126,15 +104,11 @@ Commands
 - compact: compact immediately if idle, or defer until current work completes
 - help: show this help
 - quit: exit only when the runtime is idle
-runtime> events
-
-Recent events
-- 2026-03-29T19:54:22 reserved_epoch_created (epoch=epoch_075fb205 dispatch=None): Created reserved epoch record for prototype runtime entry.
 runtime> status
 
 Runtime status
 - slot_name: hunter_1
-- current_epoch_id: epoch_075fb205
+- current_epoch_id: epoch_7bd576c1
 - current_epoch_live: False
 - active_dispatch_id: None
 - pending_dispatch_id: None
@@ -144,16 +118,43 @@ Runtime status
 - worker_thread_alive: False
 - lease_started_at: None
 - last_heartbeat_at: None
-- snapshot: /Users/df/projects/awdit/.awdit/runs/2026-03-29_195350/session_state/snapshots/20260329_195502_530131.json
+- snapshot: /Users/df/projects/awdit/.awdit/runs/2026-03-29_220921/session_state/snapshots/20260329_220952_186296.json
+runtime> events
+
+Recent events
+- 2026-03-29T22:09:39 reserved_epoch_created (epoch=epoch_7bd576c1 dispatch=None): Created reserved epoch record for prototype runtime entry.
+runtime> artifacts
+
+Artifacts
+- (none)
 runtime> dispatch
 
-Work label: prototype-run-1
-Work key: prototype-key-run-1
+Work label: review awdit runtime prototype
+Work key: self-review/runtime1
 Instructions source [inline/file]: inline
 Instructions: Review the awdit runtime prototype implementation in src/awdit/runtime.py, src/awdit/provider_openai.py, and src/awdit/cli.py. Focus on correctness risks, failure recovery, file-scope boundaries, and operator UX confusion.
-Dispatch mode override [Enter=foreground/foreground/background]:           
-Dispatch accepted: dispatch_75534f66
-Foreground dispatch dispatch_75534f66 finished with status=failed.
+Dispatch mode override [Enter=foreground/foreground/background]: foreground
+Dispatch accepted: dispatch_28c53f71
+Foreground dispatch dispatch_28c53f71 finished with status=failed.
+runtime> status
+
+Runtime status
+- slot_name: hunter_1
+- current_epoch_id: epoch_bb6aba50
+- current_epoch_live: True
+- active_dispatch_id: None
+- pending_dispatch_id: None
+- compaction_requested: False
+- latest_checkpoint_ref: None
+- provider_handle_id: None
+- worker_thread_alive: True
+- lease_started_at: 2026-03-29T22:10:58
+- last_heartbeat_at: 2026-03-29T22:10:58
+- snapshot: /Users/df/projects/awdit/.awdit/runs/2026-03-29_220921/session_state/snapshots/20260329_221108_157386.json
+runtime> artifacts
+
+Artifacts
+- /Users/df/projects/awdit/.awdit/runs/2026-03-29_220921/session_state/artifacts/hunter_1/dispatch_28c53f71
 runtime> help
 
 Commands
@@ -167,43 +168,15 @@ Commands
 runtime> events
 
 Recent events
-- 2026-03-29T19:54:22 reserved_epoch_created (epoch=epoch_075fb205 dispatch=None): Created reserved epoch record for prototype runtime entry.
-- 2026-03-29T19:57:53 epoch_live (epoch=epoch_075fb205 dispatch=dispatch_75534f66): Activated epoch epoch_075fb205 on first dispatch.
-- 2026-03-29T19:57:53 worker_started (epoch=epoch_075fb205 dispatch=dispatch_75534f66): Started Hunter 1 runtime worker thread.
-- 2026-03-29T19:57:53 dispatch_queued (epoch=epoch_075fb205 dispatch=dispatch_75534f66): Queued dispatch dispatch_75534f66 as active work.
-- 2026-03-29T19:57:53 dispatch_started (epoch=epoch_075fb205 dispatch=dispatch_75534f66): Started dispatch dispatch_75534f66.
-- 2026-03-29T19:57:54 epoch_compacted (epoch=epoch_92e69a41 dispatch=dispatch_75534f66): Rolled epoch epoch_075fb205 to epoch_92e69a41.
-- 2026-03-29T19:57:54 provider_failure_recovered (epoch=epoch_92e69a41 dispatch=dispatch_75534f66): Recovered dispatch dispatch_75534f66 into epoch epoch_92e69a41.
-- 2026-03-29T19:57:54 dispatch_started (epoch=epoch_92e69a41 dispatch=dispatch_75534f66): Started dispatch dispatch_75534f66.
-- 2026-03-29T19:57:55 dispatch_failed (epoch=epoch_92e69a41 dispatch=dispatch_75534f66): Dispatch dispatch_75534f66 failed.
-runtime> artifacts
-
-Artifacts
-- /Users/df/projects/awdit/.awdit/runs/2026-03-29_195350/session_state/artifacts/hunter_1/dispatch_75534f66
-runtime> status
-
-Runtime status
-- slot_name: hunter_1
-- current_epoch_id: epoch_92e69a41
-- current_epoch_live: True
-- active_dispatch_id: None
-- pending_dispatch_id: None
-- compaction_requested: False
-- latest_checkpoint_ref: None
-- provider_handle_id: None
-- worker_thread_alive: True
-- lease_started_at: 2026-03-29T19:57:54
-- last_heartbeat_at: 2026-03-29T19:57:54
-- snapshot: /Users/df/projects/awdit/.awdit/runs/2026-03-29_195350/session_state/snapshots/20260329_195846_656309.json
-runtime> help
-
-Commands
-- dispatch: queue work for Hunter 1
-- status: show current runtime state and write a status snapshot
-- events: show recent lifecycle events
-- artifacts: list runtime artifact directories
-- compact: compact immediately if idle, or defer until current work completes
-- help: show this help
-- quit: exit only when the runtime is idle
-runtime> quit
-Prototype runtime exited cleanly.
+- 2026-03-29T22:09:39 reserved_epoch_created (epoch=epoch_7bd576c1 dispatch=None): Created reserved epoch record for prototype runtime entry.
+- 2026-03-29T22:10:56 epoch_live (epoch=epoch_7bd576c1 dispatch=dispatch_28c53f71): Activated epoch epoch_7bd576c1 on first dispatch.
+- 2026-03-29T22:10:56 worker_started (epoch=epoch_7bd576c1 dispatch=dispatch_28c53f71): Started Hunter 1 runtime worker thread.
+- 2026-03-29T22:10:56 dispatch_queued (epoch=epoch_7bd576c1 dispatch=dispatch_28c53f71): Queued dispatch dispatch_28c53f71 as active work.
+- 2026-03-29T22:10:56 dispatch_started (epoch=epoch_7bd576c1 dispatch=dispatch_28c53f71): Started dispatch dispatch_28c53f71.
+- 2026-03-29T22:10:58 tool_calls_requested (epoch=epoch_7bd576c1 dispatch=dispatch_28c53f71): Provider event: tool_calls_requested.
+- 2026-03-29T22:10:58 epoch_compacted (epoch=epoch_bb6aba50 dispatch=dispatch_28c53f71): Rolled epoch epoch_7bd576c1 to epoch_bb6aba50.
+- 2026-03-29T22:10:58 provider_failure_recovered (epoch=epoch_bb6aba50 dispatch=dispatch_28c53f71): Recovered dispatch dispatch_28c53f71 into epoch epoch_bb6aba50.
+- 2026-03-29T22:10:58 dispatch_started (epoch=epoch_bb6aba50 dispatch=dispatch_28c53f71): Started dispatch dispatch_28c53f71.
+- 2026-03-29T22:11:01 tool_calls_requested (epoch=epoch_bb6aba50 dispatch=dispatch_28c53f71): Provider event: tool_calls_requested.
+- 2026-03-29T22:11:01 dispatch_failed (epoch=epoch_bb6aba50 dispatch=dispatch_28c53f71): Dispatch dispatch_28c53f71 failed.
+runtime> 

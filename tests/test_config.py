@@ -96,30 +96,40 @@ def _user_config_text() -> str:
 
 
 class ConfigTests(unittest.TestCase):
-    def test_load_order_and_list_replacement(self) -> None:
+    def test_repo_config_loads_declared_values(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
-            home_dir = root / "home" / ".awdit"
             repo_dir = root / "repo"
-            user_config = home_dir / "config.toml"
             repo_config = repo_dir / "config" / "config.toml"
-
-            _write_prompt_tree(home_dir)
-            _write(user_config, _user_config_text())
 
             repo_prompt_dir = repo_dir / "config" / "repo_prompts"
             repo_prompt_dir.mkdir(parents=True, exist_ok=True)
             (repo_prompt_dir / "hunter-1.md").write_text("# hunter override\n", encoding="utf-8")
+            _write_prompt_tree(repo_dir / "config")
             _write(
                 repo_config,
                 """
-                [slots.hunter_1]
-                default_model = "gpt-5.4-mini"
-                prompt_file = "repo_prompts/hunter-1.md"
+                active_provider = "openai"
+
+                [providers.openai]
+                api_key_env = "OPENAI_API_KEY"
+                base_url = "https://api.openai.com/v1"
+                allowed_models = ["gpt-5.4", "gpt-5.4-mini"]
 
                 [scope]
                 include = ["src/**"]
                 exclude = ["fixtures/**"]
+
+                [[validation.checks]]
+                name = "unit"
+                command = "pytest -q"
+                timeout_seconds = 120
+
+                [repo_memory]
+                enabled = true
+                require_danger_map_approval = true
+                confirm_refresh_on_startup = true
+                auto_update_on_completion = true
 
                 [resources.shared]
                 exclude = ["legacy/**"]
@@ -127,17 +137,46 @@ class ConfigTests(unittest.TestCase):
                 [resources.slots.hunter_1]
                 exclude = ["old/**"]
 
-                [[validation.checks]]
-                name = "unit"
-                command = "pytest -q"
-                timeout_seconds = 120
+                [github]
+                prefer_gh = true
+
+                [slots.hunter_1]
+                default_model = "gpt-5.4-mini"
+                prompt_file = "repo_prompts/hunter-1.md"
+
+                [slots.hunter_2]
+                default_model = "gpt-5.4"
+                prompt_file = "prompts/hunter_2.md"
+
+                [slots.skeptic_1]
+                default_model = "gpt-5.4"
+                prompt_file = "prompts/skeptic_1.md"
+
+                [slots.skeptic_2]
+                default_model = "gpt-5.4-mini"
+                prompt_file = "prompts/skeptic_2.md"
+
+                [slots.referee_1]
+                default_model = "gpt-5.4"
+                prompt_file = "prompts/referee_1.md"
+
+                [slots.referee_2]
+                default_model = "gpt-5.4"
+                prompt_file = "prompts/referee_2.md"
+
+                [slots.solver_1]
+                default_model = "gpt-5.4"
+                prompt_file = "prompts/solver_1.md"
+
+                [slots.solver_2]
+                default_model = "gpt-5.4-mini"
+                prompt_file = "prompts/solver_2.md"
                 """,
             )
 
             loaded = load_effective_config(
                 cwd=repo_dir,
-                user_config_path=user_config,
-                repo_config_path=repo_config,
+                config_path=repo_config,
                 env={"OPENAI_API_KEY": "token"},
             )
 
@@ -150,8 +189,8 @@ class ConfigTests(unittest.TestCase):
                 (repo_prompt_dir / "hunter-1.md").resolve(),
                 loaded.effective.slots["hunter_1"].prompt_file,
             )
-            self.assertEqual("repo config", loaded.source_label("slots", "hunter_1", "prompt_file"))
-            self.assertEqual("user config", loaded.source_label("slots", "hunter_2", "prompt_file"))
+            self.assertEqual("config", loaded.source_label("slots", "hunter_1", "prompt_file"))
+            self.assertEqual("config", loaded.source_label("slots", "hunter_2", "prompt_file"))
             self.assertEqual(("src/**",), loaded.effective.scope.include)
             self.assertEqual(("fixtures/**",), loaded.effective.scope.exclude)
             self.assertEqual(
@@ -171,13 +210,12 @@ class ConfigTests(unittest.TestCase):
     def test_inactive_provider_does_not_require_env(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
-            home_dir = root / "home" / ".awdit"
             repo_dir = root / "repo"
-            user_config = home_dir / "config.toml"
+            config_path = repo_dir / "config" / "config.toml"
 
-            _write_prompt_tree(home_dir)
+            _write_prompt_tree(repo_dir / "config")
             _write(
-                user_config,
+                config_path,
                 _user_config_text()
                 + """
 
@@ -190,8 +228,7 @@ class ConfigTests(unittest.TestCase):
 
             loaded = load_effective_config(
                 cwd=repo_dir,
-                user_config_path=user_config,
-                repo_config_path=repo_dir / "config" / "config.toml",
+                config_path=config_path,
                 env={"OPENAI_API_KEY": "token"},
             )
 
@@ -200,18 +237,16 @@ class ConfigTests(unittest.TestCase):
     def test_active_provider_requires_env(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
-            home_dir = root / "home" / ".awdit"
             repo_dir = root / "repo"
-            user_config = home_dir / "config.toml"
+            config_path = repo_dir / "config" / "config.toml"
 
-            _write_prompt_tree(home_dir)
-            _write(user_config, _user_config_text())
+            _write_prompt_tree(repo_dir / "config")
+            _write(config_path, _user_config_text())
 
             with self.assertRaises(ConfigError) as ctx:
                 load_effective_config(
                     cwd=repo_dir,
-                    user_config_path=user_config,
-                    repo_config_path=repo_dir / "config" / "config.toml",
+                    config_path=config_path,
                     env={},
                 )
 
@@ -220,18 +255,16 @@ class ConfigTests(unittest.TestCase):
     def test_repo_dotenv_supplies_active_provider_env(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
-            home_dir = root / "home" / ".awdit"
             repo_dir = root / "repo"
-            user_config = home_dir / "config.toml"
+            config_path = repo_dir / "config" / "config.toml"
 
-            _write_prompt_tree(home_dir)
-            _write(user_config, _user_config_text())
+            _write_prompt_tree(repo_dir / "config")
+            _write(config_path, _user_config_text())
             _write(default_repo_env_path(repo_dir), 'OPENAI_API_KEY="dotenv-token"')
 
             loaded = load_effective_config(
                 cwd=repo_dir,
-                user_config_path=user_config,
-                repo_config_path=repo_dir / "config" / "config.toml",
+                config_path=config_path,
                 env={},
             )
 
@@ -240,87 +273,77 @@ class ConfigTests(unittest.TestCase):
     def test_explicit_env_overrides_repo_dotenv(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
-            home_dir = root / "home" / ".awdit"
             repo_dir = root / "repo"
-            user_config = home_dir / "config.toml"
+            config_path = repo_dir / "config" / "config.toml"
 
-            _write_prompt_tree(home_dir)
-            _write(user_config, _user_config_text())
+            _write_prompt_tree(repo_dir / "config")
+            _write(config_path, _user_config_text())
             _write(default_repo_env_path(repo_dir), "OPENAI_API_KEY=dotenv-token")
 
             loaded = load_effective_config(
                 cwd=repo_dir,
-                user_config_path=user_config,
-                repo_config_path=repo_dir / "config" / "config.toml",
+                config_path=config_path,
                 env={"OPENAI_API_KEY": "shell-token"},
             )
 
             self.assertEqual("shell-token", loaded.resolved_env["OPENAI_API_KEY"])
 
-    def test_missing_user_config_raises(self) -> None:
+    def test_missing_repo_config_raises(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
             with self.assertRaises(ConfigError):
                 load_effective_config(
                     cwd=root / "repo",
-                    user_config_path=root / "missing.toml",
-                    repo_config_path=root / "repo" / "config" / "config.toml",
+                    config_path=root / "repo" / "config" / "config.toml",
                     env={"OPENAI_API_KEY": "token"},
                 )
 
     def test_invalid_default_model_raises(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
-            home_dir = root / "home" / ".awdit"
             repo_dir = root / "repo"
-            user_config = home_dir / "config.toml"
-            _write_prompt_tree(home_dir)
+            config_path = repo_dir / "config" / "config.toml"
+            _write_prompt_tree(repo_dir / "config")
             _write(
-                user_config,
+                config_path,
                 _user_config_text().replace('default_model = "gpt-5.4"', 'default_model = "bad-model"', 1),
             )
 
             with self.assertRaises(ConfigError):
                 load_effective_config(
                     cwd=repo_dir,
-                    user_config_path=user_config,
-                    repo_config_path=repo_dir / "config" / "config.toml",
+                    config_path=config_path,
                     env={"OPENAI_API_KEY": "token"},
                 )
 
     def test_missing_prompt_file_raises(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
-            home_dir = root / "home" / ".awdit"
             repo_dir = root / "repo"
-            user_config = home_dir / "config.toml"
-            _write_prompt_tree(home_dir)
-            (home_dir / "prompts" / "hunter_1.md").unlink()
-            _write(user_config, _user_config_text())
+            config_path = repo_dir / "config" / "config.toml"
+            _write_prompt_tree(repo_dir / "config")
+            (repo_dir / "config" / "prompts" / "hunter_1.md").unlink()
+            _write(config_path, _user_config_text())
 
             with self.assertRaises(ConfigError):
                 load_effective_config(
                     cwd=repo_dir,
-                    user_config_path=user_config,
-                    repo_config_path=repo_dir / "config" / "config.toml",
+                    config_path=config_path,
                     env={"OPENAI_API_KEY": "token"},
                 )
 
     def test_runtime_override_sources_and_save_back(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
-            home_dir = root / "home" / ".awdit"
             repo_dir = root / "repo"
-            user_config = home_dir / "config.toml"
             repo_config = repo_dir / "config" / "config.toml"
 
-            _write_prompt_tree(home_dir)
-            _write(user_config, _user_config_text())
+            _write_prompt_tree(repo_dir / "config")
+            _write(repo_config, _user_config_text())
 
             loaded = load_effective_config(
                 cwd=repo_dir,
-                user_config_path=user_config,
-                repo_config_path=repo_config,
+                config_path=repo_config,
                 env={"OPENAI_API_KEY": "token"},
             )
             overridden = apply_runtime_overrides_with_env(
@@ -388,23 +411,11 @@ class ConfigTests(unittest.TestCase):
     def test_resource_folder_defaults_are_auto_discovered(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
-            home_dir = root / "home" / ".awdit"
             repo_dir = root / "repo"
-            user_config = home_dir / "config.toml"
             repo_config = repo_dir / "config" / "config.toml"
 
-            _write_prompt_tree(home_dir)
-            _write(user_config, _user_config_text())
-            _write(
-                repo_config,
-                """
-                [resources.shared]
-                exclude = ["drafts/**"]
-
-                [resources.slots.hunter_1]
-                exclude = ["old/**"]
-                """,
-            )
+            _write_prompt_tree(repo_dir / "config")
+            _write(repo_config, _user_config_text())
 
             shared_dir = default_shared_resources_path(repo_dir)
             slot_dir = default_slot_resources_path("hunter_1", repo_dir)
@@ -412,12 +423,11 @@ class ConfigTests(unittest.TestCase):
             _write(shared_dir / "drafts" / "ignored.md", "ignore me")
             _write(shared_dir / ".gitkeep", "")
             _write(slot_dir / "auth-review-notes.md", "slot note")
-            _write(slot_dir / "old" / "ignored.md", "ignore me")
+            _write(slot_dir / "archive" / "ignored.md", "ignore me")
 
             loaded = load_effective_config(
                 cwd=repo_dir,
-                user_config_path=user_config,
-                repo_config_path=repo_config,
+                config_path=repo_config,
                 env={"OPENAI_API_KEY": "token"},
             )
 

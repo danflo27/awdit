@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import json
 import time
 import textwrap
 import tempfile
@@ -60,6 +61,14 @@ def _user_config_text() -> str:
         confirm_refresh_on_startup = true
         auto_update_on_completion = true
 
+        [resources.shared]
+        include = ["https://example.com/shared-reference"]
+        exclude = ["ignored/**"]
+
+        [resources.slots.hunter_1]
+        include = ["manual/hunter-note.md"]
+        exclude = []
+
         [github]
         prefer_gh = true
         """
@@ -85,29 +94,15 @@ class ReviewCliTests(unittest.TestCase):
         return _fake_input
 
     def _loaded_config(self, repo_dir: Path):
-        home_dir = repo_dir.parent / "home" / ".awdit"
-        user_config = home_dir / "config.toml"
-        repo_config = repo_dir / "config" / "config.toml"
+        config_dir = repo_dir / "config"
+        config_path = config_dir / "config.toml"
 
-        _write_prompt_tree(home_dir)
-        _write(user_config, _user_config_text())
-        _write(
-            repo_config,
-            """
-            [resources.shared]
-            include = ["https://example.com/shared-reference"]
-            exclude = ["ignored/**"]
-
-            [resources.slots.hunter_1]
-            include = ["manual/hunter-note.md"]
-            exclude = []
-            """,
-        )
+        _write_prompt_tree(config_dir)
+        _write(config_path, _user_config_text())
         _write(repo_dir / "config" / "manual" / "hunter-note.md", "manual hunter note")
         return load_effective_config(
             cwd=repo_dir,
-            user_config_path=user_config,
-            repo_config_path=repo_config,
+            config_path=config_path,
             env={"OPENAI_API_KEY": "token"},
         )
 
@@ -356,6 +351,32 @@ class ReviewCliTests(unittest.TestCase):
             self.assertTrue(
                 (run_dir / "resources" / "slots" / "hunter_1" / "staged" / "02_hunter-note.md").exists()
             )
+
+    def test_awdit_self_review_stages_design_docs_and_prompt_snapshots(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_dir = Path(tmp_dir) / "awdit"
+            _write(repo_dir / "docs" / "architecture.md", "architecture")
+            _write(repo_dir / "docs" / "agent-isolation-workflow.md", "workflow")
+            _write(repo_dir / "docs" / "e2e-cli-walkthrough.txt", "walkthrough")
+            _write(
+                repo_dir / "docs" / "PROPOSED_FILE_STRUCTURE_CONFIG_BEHAVIOUR.txt",
+                "file structure",
+            )
+            loaded = self._loaded_config(repo_dir)
+
+            result, output = self._run_review(repo_dir, loaded, ["n", "y", "n"])
+
+            self.assertEqual(0, result)
+            self.assertIn("Prompt snapshots", output)
+            run_dir = repo_dir / ".awdit" / "runs" / "2026-03-29_101530"
+            shared_manifest = run_dir / "resources" / "shared" / "manifest.md"
+            run_json = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+
+            shared_text = shared_manifest.read_text(encoding="utf-8")
+            self.assertIn("architecture.md", shared_text)
+            self.assertIn("agent-isolation-workflow.md", shared_text)
+            self.assertTrue((run_dir / "prompts" / "hunter_1.md").exists())
+            self.assertIn("prompt_snapshot", run_json["slots"]["hunter_1"])
 
     def test_review_edit_replaces_effective_lists_for_the_run(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
