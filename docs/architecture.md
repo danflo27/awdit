@@ -371,6 +371,9 @@ Expected run-scoped areas include:
 - validation artifacts
 - solver comparison summary
 
+Prompt snapshots are stored for run auditability. Runtime execution still reads the
+configured prompt files declared in `config/config.toml`.
+
 ## Forward-Facing Markdown Artifacts
 - Every code-oriented stage should produce a human-reviewable Markdown artifact, not only raw JSON or logs.
 - The terminal should surface clickable Markdown paths at each major stage.
@@ -425,10 +428,12 @@ flowchart TB
 - Final reports should use local file-and-line references when running locally and GitHub links when that context is available.
 
 ## Config Surface
+- `config/config.toml` is the required forward-facing runtime config for the repo.
 - `active_provider` selects the active model provider.
 - `providers` defines provider credentials, URLs, and allowed models.
 - `slots.<slot_name>.default_model` defines the proposed default model lineup.
 - `slots.<slot_name>.prompt_file` defines the editable prompt file for that slot.
+- Secrets stay in environment variables rather than inside `config.toml`.
 - `scope` defines include and exclude globs.
 - `validation.checks` defines the shared baseline post-solver validation suite.
 - `repo_memory` defines repo-memory behavior such as enablement, approval, refresh confirmation, and end-of-run updates.

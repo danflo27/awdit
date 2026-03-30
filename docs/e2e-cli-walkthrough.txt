@@ -151,6 +151,7 @@ user> 9
 [* render prompts for all agents from configured prompt files *]
 [* prompt wording remains editable; exact slot wording is not frozen in architecture *]
 [* write exact prompt snapshots to .awdit/runs/2026-03-29_101530/prompts/ *]
+[* runtime execution will still read the configured prompt files; snapshots are stored for run review *]
 [* write .awdit/runs/2026-03-29_101530/resources/summary.md *]
 [* create one visible slot identity and one initial reserved session epoch marker per slot for this run *]
 [* no slot workers are started yet; each worker will launch lazily on first dispatch *]

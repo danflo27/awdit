@@ -44,6 +44,12 @@ config/
       solver_1/
       solver_2/
 
+Notes:
+- `config/config.toml` is the required forward-facing runtime config for the repo
+- prompt files referenced from `config.toml` are the execution source of truth
+- run-scoped prompt snapshots are stored for auditability, not as the live execution source
+- secrets stay in env vars rather than inside `config.toml`
+
 
 Repo-scoped living intelligence
 -------------------------------
