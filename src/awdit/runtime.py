@@ -334,6 +334,8 @@ class OneSlotRuntime:
                     dispatch_id=self.state.active_dispatch_id,
                 )
                 return "Compaction requested. It will run after the active dispatch completes."
+            if not self.state.latest_checkpoint_ref:
+                return "Compaction unavailable: no completed dispatch checkpoint exists yet."
             self._perform_compaction_locked(reason="manual_idle_compaction")
             return f"Compaction complete. Current epoch is now {self.state.current_epoch_id}."
 
@@ -841,7 +843,14 @@ class OneSlotRuntime:
             return
         self.state.active_dispatch_id = None
         if self.state.compaction_requested:
-            self._perform_compaction_locked(reason="deferred_manual_compaction")
+            if self.state.latest_checkpoint_ref:
+                self._perform_compaction_locked(reason="deferred_manual_compaction")
+            else:
+                self._emit_event(
+                    event_type="compaction_skipped",
+                    message="Skipped deferred compaction because no checkpoint exists yet.",
+                    dispatch_id=dispatch_id,
+                )
             self.state.compaction_requested = False
         if self.state.pending_dispatch_id is not None:
             next_dispatch_id = self.state.pending_dispatch_id
@@ -864,6 +873,8 @@ class OneSlotRuntime:
         reason: str,
         recovery_reason: str | None = None,
     ) -> str:
+        if not self.state.latest_checkpoint_ref:
+            raise RuntimeError("Compaction requires a completed dispatch checkpoint.")
         current_epoch_id = self.state.current_epoch_id
         current_epoch = self._epochs[current_epoch_id]
         current_epoch.status = "closed"

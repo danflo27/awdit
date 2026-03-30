@@ -262,6 +262,24 @@ class RuntimeTests(unittest.TestCase):
             self.assertEqual("live", new_record["status"])
             self.assertEqual(runtime.state.latest_checkpoint_ref, new_record["seed_checkpoint_ref"])
 
+    def test_idle_compaction_without_checkpoint_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            runtime = self._make_runtime(
+                Path(tmp_dir) / "repo",
+                provider=FirstDispatchFailureProvider(),
+            )
+            accepted, _, dispatch_id = runtime.submit_dispatch(
+                work_label="Fail first",
+                work_key="runtime/fail",
+                instructions_text="Please fail immediately.",
+            )
+            self.assertTrue(accepted)
+            runtime.wait_for_dispatch(dispatch_id, timeout_seconds=5.0)
+
+            message = runtime.request_compaction()
+
+            self.assertIn("no completed dispatch checkpoint", message.lower())
+
     def test_active_compaction_defers_until_dispatch_finishes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             provider = BlockingProvider()
