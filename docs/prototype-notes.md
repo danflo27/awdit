@@ -7,3 +7,16 @@
     - Shared resources should follow the same exact design
 - I dont want to manually create the work label and work key. Maybe automatically create them, and then have the user approve, or edit 
 - The `Dispatch mode override [Enter=foreground/foreground/background]:  ` command is unclear. Lets dicsuss its function and how it should look
+
+
+03-30-2026
+- The in line instructions should not even be an option
+- These three inputs (
+Work label: test3
+Work key: testkey3
+Instructions source [inline/file]: inline
+Instructions: Review this repo for cohesiveness, correctness based off of the docs, and look for security ulnerabilities
+)  should not be in the CLI. The label and key should autogenerate and the user confirms or edits, and the only prompts the agent should have are the config/prompts/[slot].md file for that specific agent. The orchestrator will need a slot prompt as well. We will generate the prompts together later. 
+
+- prototype logging did not get generated or created anywhere
+- We need an orchestrator.md file in the config prompts, and lets also try to spawn the rchestrator, who will dispatch hunter_1 with the correct prompt, and alert the user when  hunter_1 is finished
