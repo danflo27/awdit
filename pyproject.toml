@@ -12,13 +12,11 @@ license = { file = "LICENSE" }
 dependencies = ["openai>=1.98.0"]
 
 [project.scripts]
-awdit = "awdit.cli:main"
+awdit = "cli:main"
 
 [tool.uv]
 exclude-newer = "2026-03-15T00:00:00Z"
 
 [tool.setuptools]
 package-dir = { "" = "src" }
-
-[tool.setuptools.packages.find]
-where = ["src"]
+py-modules = ["cli", "config", "paths", "provider_openai", "runtime"]

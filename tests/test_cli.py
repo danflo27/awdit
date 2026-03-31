@@ -9,9 +9,10 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from awdit.cli import main
-from awdit.config import SLOT_NAMES, load_effective_config
-from awdit.provider_openai import BackgroundPollResult, ProviderBackgroundHandle, ProviderTurnResult
+from cli import main
+from config import SLOT_NAMES, load_effective_config
+from paths import runs_root
+from provider_openai import BackgroundPollResult, ProviderBackgroundHandle, ProviderTurnResult
 
 
 def _write(path: Path, content: str) -> None:
@@ -111,9 +112,9 @@ class ReviewCliTests(unittest.TestCase):
         stdout = io.StringIO()
         inputs = [*inputs, "n"]
         with (
-            mock.patch("awdit.cli.Path.cwd", return_value=repo_dir),
-            mock.patch("awdit.cli.load_effective_config", return_value=loaded),
-            mock.patch("awdit.cli._make_run_id", return_value="2026-03-29_101530"),
+            mock.patch("cli.Path.cwd", return_value=repo_dir),
+            mock.patch("cli.load_effective_config", return_value=loaded),
+            mock.patch("cli._make_run_id", return_value="2026-03-29_101530"),
             mock.patch("builtins.input", side_effect=self._input_mock(inputs, stdout)),
             mock.patch("sys.stdout", stdout),
         ):
@@ -165,11 +166,11 @@ class ReviewCliTests(unittest.TestCase):
 
             stdout = io.StringIO()
             with (
-                mock.patch("awdit.cli.Path.cwd", return_value=repo_dir),
-                mock.patch("awdit.cli.load_effective_config", return_value=loaded),
-                mock.patch("awdit.cli._make_run_id", return_value="2026-03-29_101530"),
+                mock.patch("cli.Path.cwd", return_value=repo_dir),
+                mock.patch("cli.load_effective_config", return_value=loaded),
+                mock.patch("cli._make_run_id", return_value="2026-03-29_101530"),
                 mock.patch(
-                    "awdit.runtime.OpenAIResponsesProvider.from_loaded_config",
+                    "runtime.OpenAIResponsesProvider.from_loaded_config",
                     return_value=FakeProvider(),
                 ),
                 mock.patch(
@@ -191,7 +192,7 @@ class ReviewCliTests(unittest.TestCase):
                 result = main(["review"])
 
             self.assertEqual(0, result)
-            run_dir = repo_dir / "awdit" / "data" / "runs" / "2026-03-29_101530"
+            run_dir = runs_root(repo_dir) / "2026-03-29_101530"
             artifacts_dir = run_dir / "session_state" / "artifacts" / "hunter_1"
             response_files = list(artifacts_dir.glob("*/response.txt"))
             self.assertTrue(response_files)
@@ -245,11 +246,11 @@ class ReviewCliTests(unittest.TestCase):
 
             stdout = io.StringIO()
             with (
-                mock.patch("awdit.cli.Path.cwd", return_value=repo_dir),
-                mock.patch("awdit.cli.load_effective_config", return_value=loaded),
-                mock.patch("awdit.cli._make_run_id", return_value="2026-03-29_101530"),
+                mock.patch("cli.Path.cwd", return_value=repo_dir),
+                mock.patch("cli.load_effective_config", return_value=loaded),
+                mock.patch("cli._make_run_id", return_value="2026-03-29_101530"),
                 mock.patch(
-                    "awdit.runtime.OpenAIResponsesProvider.from_loaded_config",
+                    "runtime.OpenAIResponsesProvider.from_loaded_config",
                     return_value=StreamingProvider(),
                 ),
                 mock.patch(
@@ -271,7 +272,7 @@ class ReviewCliTests(unittest.TestCase):
                 result = main(["review"])
 
             self.assertEqual(0, result)
-            transcript_path = repo_dir / "awdit" / "data" / "runs" / "2026-03-29_101530" / "logs" / "prototype__2026-03-29_101530.txt"
+            transcript_path = runs_root(repo_dir) / "2026-03-29_101530" / "logs" / "prototype__2026-03-29_101530.txt"
             transcript = transcript_path.read_text(encoding="utf-8")
             self.assertIn("streamed reply", transcript)
             self.assertIn("Foreground dispatch dispatch_", transcript)
@@ -313,11 +314,11 @@ class ReviewCliTests(unittest.TestCase):
             provider = FakeBackgroundProvider()
             stdout = io.StringIO()
             with (
-                mock.patch("awdit.cli.Path.cwd", return_value=repo_dir),
-                mock.patch("awdit.cli.load_effective_config", return_value=loaded),
-                mock.patch("awdit.cli._make_run_id", return_value="2026-03-29_101530"),
+                mock.patch("cli.Path.cwd", return_value=repo_dir),
+                mock.patch("cli.load_effective_config", return_value=loaded),
+                mock.patch("cli._make_run_id", return_value="2026-03-29_101530"),
                 mock.patch(
-                    "awdit.runtime.OpenAIResponsesProvider.from_loaded_config",
+                    "runtime.OpenAIResponsesProvider.from_loaded_config",
                     return_value=provider,
                 ),
                 mock.patch(
@@ -359,10 +360,10 @@ class ReviewCliTests(unittest.TestCase):
             loaded = self._loaded_config(repo_dir)
             stdout = io.StringIO()
             with (
-                mock.patch("awdit.cli.Path.cwd", return_value=repo_dir),
-                mock.patch("awdit.cli.load_effective_config", return_value=loaded),
+                mock.patch("cli.Path.cwd", return_value=repo_dir),
+                mock.patch("cli.load_effective_config", return_value=loaded),
                 mock.patch(
-                    "awdit.cli.OpenAIResponsesProvider.from_loaded_config",
+                    "cli.OpenAIResponsesProvider.from_loaded_config",
                     return_value=FakeProvider(),
                 ),
                 mock.patch("sys.stdout", stdout),
@@ -395,7 +396,7 @@ class ReviewCliTests(unittest.TestCase):
             self.assertIn("Shared resources for this run", output)
             self.assertIn("Note for user:", output)
             self.assertIn("Everything under config/resources/shared/", output)
-            run_dir = repo_dir / "awdit" / "data" / "runs" / "2026-03-29_101530"
+            run_dir = runs_root(repo_dir) / "2026-03-29_101530"
             shared_manifest = run_dir / "resources" / "shared" / "manifest.md"
             slot_manifest = run_dir / "resources" / "slots" / "hunter_1" / "manifest.md"
             summary_path = run_dir / "resources" / "summary.md"
@@ -445,7 +446,7 @@ class ReviewCliTests(unittest.TestCase):
 
             self.assertEqual(0, result)
             self.assertIn("Prompt snapshots", output)
-            run_dir = repo_dir / "awdit" / "data" / "runs" / "2026-03-29_101530"
+            run_dir = runs_root(repo_dir) / "2026-03-29_101530"
             shared_manifest = run_dir / "resources" / "shared" / "manifest.md"
             run_json = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
 
@@ -487,7 +488,7 @@ class ReviewCliTests(unittest.TestCase):
             )
 
             self.assertEqual(0, result)
-            run_dir = repo_dir / "awdit" / "data" / "runs" / "2026-03-29_101530"
+            run_dir = runs_root(repo_dir) / "2026-03-29_101530"
             shared_manifest = run_dir / "resources" / "shared" / "manifest.md"
             slot_manifest = run_dir / "resources" / "slots" / "hunter_1" / "manifest.md"
 
@@ -514,7 +515,7 @@ class ReviewCliTests(unittest.TestCase):
 
             self.assertEqual(0, result)
             self.assertIn("Review canceled before launch.", output)
-            self.assertFalse((repo_dir / "awdit" / "data" / "runs" / "2026-03-29_101530").exists())
+            self.assertFalse((runs_root(repo_dir) / "2026-03-29_101530").exists())
 
 
 if __name__ == "__main__":

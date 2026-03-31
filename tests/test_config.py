@@ -5,7 +5,7 @@ import textwrap
 import unittest
 from pathlib import Path
 
-from awdit.config import (
+from config import (
     ConfigError,
     apply_runtime_overrides_with_env,
     default_repo_env_path,
@@ -103,7 +103,7 @@ class ConfigTests(unittest.TestCase):
             repo_dir = root / "repo"
             repo_config = repo_dir / "config" / "config.toml"
 
-            repo_prompt_dir = repo_dir / "config" / "repo_prompts"
+            repo_prompt_dir = repo_dir / "config" / "prompts"
             repo_prompt_dir.mkdir(parents=True, exist_ok=True)
             (repo_prompt_dir / "hunter-1.md").write_text("# hunter override\n", encoding="utf-8")
             _write_prompt_tree(repo_dir / "config")
@@ -144,7 +144,7 @@ class ConfigTests(unittest.TestCase):
                 [slots.hunter_1]
                 default_model = "gpt-5.4-mini"
                 reasoning_effort = "high"
-                prompt_file = "repo_prompts/hunter-1.md"
+                prompt_file = "prompts/hunter-1.md"
 
                 [slots.hunter_2]
                 default_model = "gpt-5.4"

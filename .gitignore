@@ -4,6 +4,10 @@ __pycache__/
 .env
 .awdit/
 awdit/
+runs/
+repos/
+worktrees/
+state/
 .venv/
 build/
 dist/

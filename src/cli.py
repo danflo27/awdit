@@ -2,7 +2,7 @@
 
 Today `awdit review` resolves config-backed defaults, lets the operator review
 the effective shared and slot resource lists, and writes a run-scoped snapshot
-under `awdit/runs/<run_id>/resources/`. The full multi-agent audit pipeline
+under `runs/<run_id>/resources/`. The full multi-agent audit pipeline
 remains architecture-first and is still documented in the design docs.
 """
 
@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-from awdit.config import (
+from config import (
     SLOT_NAMES,
     ConfigError,
     apply_runtime_overrides,
@@ -31,9 +31,9 @@ from awdit.config import (
     merge_patch_dicts,
     summarize_config,
 )
-from awdit.paths import managed_root
-from awdit.provider_openai import OpenAIResponsesProvider
-from awdit.runtime import OneSlotRuntime
+from paths import migrate_legacy_runtime_layout, runs_root
+from provider_openai import OpenAIResponsesProvider
+from runtime import OneSlotRuntime
 
 
 @dataclass(frozen=True)
@@ -78,6 +78,7 @@ def main(argv: list[str] | None = None) -> int:
 
 def _handle_review(_: argparse.Namespace) -> int:
     cwd = Path.cwd()
+    migrate_legacy_runtime_layout(cwd)
     try:
         loaded = load_effective_config(cwd=cwd)
     except ConfigError as exc:
@@ -494,8 +495,9 @@ def _persist_run_resource_snapshot(
     loaded,
     resources: RuntimeResources,
 ) -> RunResourceSnapshot:
+    migrate_legacy_runtime_layout(cwd)
     run_id = _make_run_id()
-    run_dir = managed_root(cwd) / "runs" / run_id
+    run_dir = runs_root(cwd) / run_id
     prompts_dir = run_dir / "prompts"
     resources_dir = run_dir / "resources"
     shared_dir = resources_dir / "shared"

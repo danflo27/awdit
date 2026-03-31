@@ -4,7 +4,7 @@ import unittest
 from types import SimpleNamespace
 from unittest import mock
 
-from awdit.provider_openai import OpenAIResponsesProvider, ProviderBackgroundHandle
+from provider_openai import OpenAIResponsesProvider, ProviderBackgroundHandle
 
 
 class FakeStream:
@@ -72,7 +72,7 @@ class ProviderTests(unittest.TestCase):
             resolved_env={"OPENAI_API_KEY": "dotenv-token"},
         )
 
-        with mock.patch("awdit.provider_openai.OpenAI") as mock_openai:
+        with mock.patch("provider_openai.OpenAI") as mock_openai:
             OpenAIResponsesProvider.from_loaded_config(loaded)
 
         mock_openai.assert_called_once_with(

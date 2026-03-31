@@ -89,7 +89,7 @@ Local git refs are the default path when both local and GitHub inputs are possib
 
 ### Repo-Scoped Memory
 Every repository has one evolving repo-scoped security area under:
-- `awdit/repos/<repo_key>/`
+- `repos/<repo_key>/`
 
 This area stores:
 - danger map artifacts
@@ -177,7 +177,7 @@ Custom names may be added later. Slot labels are the public-facing default for n
 
 ### Prompt Strategy
 - Prompt files are configurable and editable.
-- Repo-specific prompt overrides should live under `config/repo_prompts/`.
+- Prompt files should live under `config/prompts/`.
 - The exact wording of slot prompts remains intentionally flexible and `TBD`.
 - Role behavior is more stable than prompt prose.
 - `referee_1` and `referee_2` share the same canonical base behavior by default, while remaining easy to override.
@@ -232,7 +232,7 @@ Custom names may be added later. Slot labels are the public-facing default for n
 - Provenance and overlap rationale must remain visible when findings are clustered.
 - The exact canonicalization policy for converting clusters into later issue packets remains `TBD`.
 - Provenance must record which hunters originated each issue.
-- Each run writes one run-local case file per finding under `awdit/data/runs/<run_id>/issues/`.
+- Each run writes one run-local case file per finding under `runs/<run_id>/issues/`.
 
 ### Skeptics
 - Skeptics compete independently on the shared hunter issue ledger.
@@ -344,8 +344,10 @@ flowchart LR
 
 ### Storage Model
 awdit stores two kinds of data:
-- repo-scoped living intelligence under `awdit/repos/<repo_key>/`
-- run-scoped immutable artifacts under `awdit/data/runs/<run_id>/`
+- repo-scoped living intelligence under `repos/<repo_key>/`
+- run-scoped immutable artifacts under `runs/<run_id>/`
+- run-local solver worktrees under `worktrees/<run_id>/`
+- persistent app state under `state/` (for example `state/awdit.db` and future scoreboard artifacts)
 
 ### Repo-Scoped Living Intelligence
 Expected repo-scoped areas include:
@@ -394,13 +396,13 @@ configured prompt files declared in `config/config.toml`.
 ### Storage Diagram
 ```mermaid
 flowchart TB
-    subgraph Repo["awdit/repos/<repo_key>/ living intelligence"]
+    subgraph Repo["repos/<repo_key>/ living intelligence"]
         DM["danger_map.md / danger_map.json"]
         RM["truth-labeled memory + repo comments"]
         CI["canonical case index + variant links"]
     end
 
-    subgraph Run["awdit/data/runs/<run_id>/ immutable artifacts"]
+    subgraph Run["runs/<run_id>/ immutable artifacts"]
         RJ["run.json"]
         DG["derived_context/"]
         PR["prompts/"]

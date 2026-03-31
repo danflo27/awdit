@@ -9,10 +9,11 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from awdit.cli import RuntimeResources, _persist_run_resource_snapshot
-from awdit.config import SLOT_NAMES, load_effective_config
-from awdit.provider_openai import BackgroundPollResult, ProviderBackgroundHandle, ProviderTurnResult
-from awdit.runtime import OneSlotRuntime
+from cli import RuntimeResources, _persist_run_resource_snapshot
+from config import SLOT_NAMES, load_effective_config
+from paths import runs_root
+from provider_openai import BackgroundPollResult, ProviderBackgroundHandle, ProviderTurnResult
+from runtime import OneSlotRuntime
 
 
 def _write(path: Path, content: str) -> None:
@@ -205,7 +206,7 @@ class RuntimeTests(unittest.TestCase):
             shared=(str((repo_dir / "notes" / "shared-note.md").resolve()),),
             slots={slot_name: () for slot_name in SLOT_NAMES},
         )
-        with mock.patch("awdit.cli._make_run_id", return_value="2026-03-29_101530"):
+        with mock.patch("cli._make_run_id", return_value="2026-03-29_101530"):
             snapshot = _persist_run_resource_snapshot(repo_dir, loaded, resources)
         runtime = OneSlotRuntime(
             cwd=repo_dir,
@@ -274,7 +275,7 @@ class RuntimeTests(unittest.TestCase):
             self.assertEqual("live", new_record["status"])
             self.assertEqual(runtime.state.latest_checkpoint_ref, new_record["seed_checkpoint_ref"])
 
-    def test_interactive_foreground_dispatch_uses_generated_metadata_and_empty_payload(self) -> None:
+    def test_interactive_foreground_dispatch_uses_generated_metadata_and_orchestrator_packet(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             provider = CaptureInstructionsProvider()
             runtime = self._make_runtime(Path(tmp_dir) / "repo", provider=provider)
@@ -287,11 +288,18 @@ class RuntimeTests(unittest.TestCase):
             self.assertEqual("completed", record.status)
             self.assertEqual("Hunter 1 foreground run", record.work_label)
             self.assertEqual("hunter_1/foreground", record.work_key)
-            self.assertEqual("", provider.input_text)
+            self.assertIsNotNone(provider.input_text)
+            self.assertIn("Orchestrator dispatch packet", provider.input_text)
+            self.assertIn(
+                "First step: inspect staged shared resources before deep code analysis.",
+                provider.input_text,
+            )
+            self.assertIn("shared_manifest: runs/2026-03-29_101530/resources/shared/manifest.md", provider.input_text)
             self.assertEqual("medium", provider.reasoning_effort)
             instructions_record = Path(record.instructions_ref).read_text(encoding="utf-8")
             self.assertIn("source: configured slot prompt", instructions_record)
             self.assertIn("user_payload: none", instructions_record)
+            self.assertIn("Dispatch payload notes:", provider.input_text)
 
     def test_interactive_background_dispatch_uses_generated_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -499,7 +507,7 @@ class RuntimeTests(unittest.TestCase):
                 shared=(str((repo_dir / "notes" / "shared-note.md").resolve()),),
                 slots={slot_name: () for slot_name in SLOT_NAMES},
             )
-            with mock.patch("awdit.cli._make_run_id", return_value="2026-03-29_101530"):
+            with mock.patch("cli._make_run_id", return_value="2026-03-29_101530"):
                 snapshot = _persist_run_resource_snapshot(repo_dir, loaded, resources)
             snapshot_prompt = (snapshot.prompts_dir / "hunter_1.md").read_text(encoding="utf-8").strip()
             loaded.effective.slots["hunter_1"].prompt_file.write_text("changed later\n", encoding="utf-8")
@@ -526,17 +534,22 @@ class RuntimeTests(unittest.TestCase):
             self.assertIsNotNone(provider.instructions)
             self.assertIn("changed later", provider.instructions)
             self.assertNotIn(snapshot_prompt, provider.instructions)
-            self.assertEqual("", provider.input_text)
+            self.assertIsNotNone(provider.input_text)
+            self.assertIn("Orchestrator dispatch packet", provider.input_text)
+            self.assertIn("Dispatch payload notes:", provider.input_text)
             self.assertEqual("medium", provider.reasoning_effort)
 
     def test_runtime_disallows_repo_managed_artifact_reads_outside_staged_resources(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             runtime = self._make_runtime(Path(tmp_dir) / "repo", provider=ImmediateProvider())
-            hidden = runtime.cwd / "awdit" / "secret.txt"
+            hidden = runs_root(runtime.cwd) / "secret.txt"
             _write(hidden, "keep out\n")
 
-            with self.assertRaisesRegex(RuntimeError, "Only staged run resources may be read under awdit."):
-                runtime._tool_read_file({"path": "awdit/secret.txt"})
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "Only staged run resources may be read under runtime-managed roots.",
+            ):
+                runtime._tool_read_file({"path": "runs/secret.txt"})
 
 
 if __name__ == "__main__":

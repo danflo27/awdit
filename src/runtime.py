@@ -9,8 +9,8 @@ from datetime import datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from awdit.paths import MANAGED_ROOT_NAME
-from awdit.provider_openai import (
+from paths import managed_runtime_root_names
+from provider_openai import (
     BackgroundPollResult,
     OpenAIResponsesProvider,
     ProviderBackgroundHandle,
@@ -139,7 +139,7 @@ class SlotRuntimeState:
 class OneSlotRuntime:
     SLOT_NAME = "hunter_1"
     DEFAULT_POLL_INTERVAL_SECONDS = 0.2
-    DISPATCH_PLACEHOLDER = ""
+    DISPATCH_INPUT_FALLBACK = "Proceed with the assigned work."
 
     def __init__(
         self,
@@ -593,13 +593,14 @@ class OneSlotRuntime:
             work_key=record.work_key,
             checkpoint_body=checkpoint_body,
         )
+        input_text = self._compose_dispatch_input(record=record)
         tools = self._build_tool_schemas()
         if record.mode == "foreground":
             return self.provider.start_foreground_turn(
                 model=self.model_name,
                 reasoning_effort=self.reasoning_effort,
                 instructions=system_instructions,
-                input_text=self.DISPATCH_PLACEHOLDER,
+                input_text=input_text,
                 previous_response_id=previous_response_id,
                 tools=tools,
                 tool_executor=self._run_tool,
@@ -614,7 +615,7 @@ class OneSlotRuntime:
             model=self.model_name,
             reasoning_effort=self.reasoning_effort,
             instructions=system_instructions,
-            input_text=self.DISPATCH_PLACEHOLDER,
+            input_text=input_text,
             previous_response_id=previous_response_id,
             tools=tools,
         )
@@ -670,6 +671,31 @@ class OneSlotRuntime:
         if checkpoint_body:
             parts.extend(["Latest persisted checkpoint context:", checkpoint_body])
         return "\n\n".join(parts)
+
+    def _compose_dispatch_input(self, *, record: DispatchRecord) -> str:
+        shared_manifest = self.run_dir / "resources" / "shared" / "manifest.md"
+        summary_manifest = self.run_dir / "resources" / "summary.md"
+        payload_notes = ""
+        try:
+            payload_notes = Path(record.instructions_ref).read_text(encoding="utf-8").strip()
+        except OSError:
+            payload_notes = ""
+
+        parts = [
+            "Orchestrator dispatch packet",
+            f"slot: {self.SLOT_NAME}",
+            f"mode: {record.mode}",
+            f"work_label: {record.work_label}",
+            f"work_key: {record.work_key}",
+            "First step: inspect staged shared resources before deep code analysis.",
+        ]
+        if shared_manifest.exists():
+            parts.append(f"shared_manifest: {self._display_path(shared_manifest)}")
+        if summary_manifest.exists():
+            parts.append(f"resource_summary: {self._display_path(summary_manifest)}")
+        if payload_notes:
+            parts.extend(["", "Dispatch payload notes:", payload_notes])
+        return "\n".join(parts).strip() or self.DISPATCH_INPUT_FALLBACK
 
     def _handle_provider_event(
         self,
@@ -1101,7 +1127,7 @@ class OneSlotRuntime:
             if not path.is_file():
                 continue
             relative = path.relative_to(self.cwd).as_posix()
-            if relative.startswith(f"{MANAGED_ROOT_NAME}/"):
+            if self._is_runtime_managed_relative(relative):
                 continue
             if self.scope_include and not self._matches_any(relative, self.scope_include):
                 continue
@@ -1137,8 +1163,8 @@ class OneSlotRuntime:
                 raise RuntimeError("Staged resource path does not exist.")
             return path
         relative = path.relative_to(self.cwd).as_posix()
-        if relative.startswith(f"{MANAGED_ROOT_NAME}/"):
-            raise RuntimeError("Only staged run resources may be read under awdit.")
+        if self._is_runtime_managed_relative(relative):
+            raise RuntimeError("Only staged run resources may be read under runtime-managed roots.")
         if self.scope_include and not self._matches_any(relative, self.scope_include):
             raise RuntimeError("Path is outside the configured scope include globs.")
         if self._matches_any(relative, self.scope_exclude):
@@ -1156,6 +1182,12 @@ class OneSlotRuntime:
     def _matches_any(self, relative_path: str, globs: tuple[str, ...]) -> bool:
         posix = PurePosixPath(relative_path)
         return any(posix.match(pattern) for pattern in globs)
+
+    def _is_runtime_managed_relative(self, relative_path: str) -> bool:
+        for root_name in managed_runtime_root_names(include_legacy=True):
+            if relative_path == root_name or relative_path.startswith(f"{root_name}/"):
+                return True
+        return False
 
     def _is_relative_to(self, path: Path, root: Path) -> bool:
         try:

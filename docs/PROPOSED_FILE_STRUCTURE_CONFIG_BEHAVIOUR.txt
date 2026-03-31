@@ -11,8 +11,8 @@ Goal
 ----
 Keep the storage model simple:
 - config/ contains human-managed defaults
-- awdit/repos/<repo_key>/ contains evolving repo intelligence only
-- awdit/data/runs/<run_id>/ contains the exact immutable resources and artifacts used for one run
+- repos/<repo_key>/ contains evolving repo intelligence only
+- runs/<run_id>/ contains the exact immutable resources and artifacts used for one run
 
 This document lives under docs/ as a design note and is not itself part of the proposed runtime layout.
 
@@ -21,7 +21,7 @@ Human-managed defaults
 ----------------------
 config/
   config.toml
-  repo_prompts/
+  prompts/
     hunter_1.md
     hunter_2.md
     skeptic_1.md
@@ -53,56 +53,56 @@ Notes:
 
 Runtime-managed structure
 -------------------------
-awdit/
+runs/
+  <run_id>/
+    run.json
+    prompts/
+    derived_context/
+    logs/
+      prototype__<run_id>.txt
+    session_state/
+    resources/
+      shared/
+        manifest.md
+        staged/
+      slots/
+        hunter_1/
+          manifest.md
+          staged/
+        hunter_2/
+        skeptic_1/
+        skeptic_2/
+        referee_1/
+        referee_2/
+        solver_1/
+        solver_2/
+    issues/
+    reports/
+      debate/
+    validation/
+      baseline/
+    solvers/
+repos/
+  <repo_key>/
+    danger_map.md
+    danger_map.json
+    memory/
+      repo_comments.md
+    cases/
+      canonical_index.json
+worktrees/
+  <run_id>/
+    solver_1/
+    solver_2/
+    selected/
+state/
   awdit.db
-  repos/
-    <repo_key>/
-      danger_map.md
-      danger_map.json
-      memory/
-        repo_comments.md
-      cases/
-        canonical_index.json
-  data/
-    runs/
-      <run_id>/
-        run.json
-        prompts/
-        derived_context/
-        logs/
-          prototype__<run_id>.txt
-        session_state/
-        resources/
-          shared/
-            manifest.md
-            staged/
-          slots/
-            hunter_1/
-              manifest.md
-              staged/
-            hunter_2/
-            skeptic_1/
-            skeptic_2/
-            referee_1/
-            referee_2/
-            solver_1/
-            solver_2/
-        issues/
-        reports/
-          debate/
-        validation/
-          baseline/
-        solvers/
-  worktrees/
-    <run_id>/
-      solver_1/
-      solver_2/
-      selected/
+  scoreboard/
 
 Notes:
-- `awdit/` is the visible forward-facing root for all app-managed runtime artifacts
+- `runs/`, `repos/`, `worktrees/`, and `state/` are the runtime-managed roots
 - `repos/` holds evolving repo intelligence across runs
-- `data/runs/` holds the exact immutable artifacts for a single run
+- `runs/` holds the exact immutable artifacts for a single run
 - `logs/prototype__<run_id>.txt` is the plain-text prototype terminal transcript
 - `worktrees/` is the runtime-managed area for disposable run-local worktrees
 
@@ -138,7 +138,7 @@ Config behavior
 - y means use the list as shown
 - if the user chooses e, they replace the exact list for that run
 - if the user chooses n, awdit exits the review wizard before launch
-- the final chosen resources are recorded only under awdit/data/runs/<run_id>/resources/
+- the final chosen resources are recorded only under runs/<run_id>/resources/
 - the current runtime implementation stages local files and folders into staged/
 - the current runtime implementation records URLs in the manifests without fetching them
 - run-scoped artifacts will likely also include debate transcripts, session checkpoint or compaction artifacts, and coordinator merge summaries
