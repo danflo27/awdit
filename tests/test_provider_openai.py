@@ -106,6 +106,7 @@ class ProviderTests(unittest.TestCase):
         deltas = []
         result = provider.start_foreground_turn(
             model="gpt-5.4",
+            reasoning_effort="high",
             instructions="system",
             input_text="input",
             previous_response_id=None,
@@ -116,6 +117,7 @@ class ProviderTests(unittest.TestCase):
 
         self.assertEqual("resp_1", result.response_id)
         self.assertEqual("hello world", result.final_text)
+        self.assertEqual({"effort": "high"}, responses.create_calls[0]["reasoning"])
         self.assertEqual(
             ["hello ", "world"],
             [payload["delta"] for event_type, payload in deltas if event_type == "output_delta"],
@@ -136,6 +138,7 @@ class ProviderTests(unittest.TestCase):
 
         handle = provider.start_background_turn(
             model="gpt-5.4",
+            reasoning_effort="low",
             instructions="system",
             input_text="input",
             previous_response_id=None,
@@ -155,6 +158,7 @@ class ProviderTests(unittest.TestCase):
         )
 
         self.assertEqual("bg_1", handle.response_id)
+        self.assertEqual({"effort": "low"}, responses.create_calls[0]["reasoning"])
         self.assertEqual("running", poll_one.status)
         self.assertEqual("completed", poll_two.status)
         self.assertEqual("done", poll_two.final_text)

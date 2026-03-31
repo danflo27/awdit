@@ -156,6 +156,7 @@ class OneSlotRuntime:
         self.run_dir = run_dir.resolve()
         self.default_mode = default_mode
         self.model_name = loaded.effective.slots[self.SLOT_NAME].default_model
+        self.reasoning_effort = loaded.effective.slots[self.SLOT_NAME].reasoning_effort
         self.prompt_file = loaded.effective.slots[self.SLOT_NAME].prompt_file
         self.scope_include = loaded.effective.scope.include
         self.scope_exclude = loaded.effective.scope.exclude
@@ -596,6 +597,7 @@ class OneSlotRuntime:
         if record.mode == "foreground":
             return self.provider.start_foreground_turn(
                 model=self.model_name,
+                reasoning_effort=self.reasoning_effort,
                 instructions=system_instructions,
                 input_text=self.DISPATCH_PLACEHOLDER,
                 previous_response_id=previous_response_id,
@@ -610,6 +612,7 @@ class OneSlotRuntime:
 
         handle = self.provider.start_background_turn(
             model=self.model_name,
+            reasoning_effort=self.reasoning_effort,
             instructions=system_instructions,
             input_text=self.DISPATCH_PLACEHOLDER,
             previous_response_id=previous_response_id,

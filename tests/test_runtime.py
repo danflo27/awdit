@@ -35,6 +35,7 @@ def _user_config_text() -> str:
             f"""
             [slots.{slot}]
             default_model = "{default_model}"
+            reasoning_effort = "medium"
             prompt_file = "prompts/{slot}.md"
             """
         )
@@ -168,10 +169,12 @@ class CaptureInstructionsProvider(ImmediateProvider):
         super().__init__()
         self.instructions: str | None = None
         self.input_text: str | None = None
+        self.reasoning_effort: str | None = None
 
     def start_foreground_turn(self, **kwargs) -> ProviderTurnResult:
         self.instructions = kwargs["instructions"]
         self.input_text = kwargs["input_text"]
+        self.reasoning_effort = kwargs["reasoning_effort"]
         return super().start_foreground_turn(**kwargs)
 
 
@@ -285,6 +288,7 @@ class RuntimeTests(unittest.TestCase):
             self.assertEqual("Hunter 1 foreground run", record.work_label)
             self.assertEqual("hunter_1/foreground", record.work_key)
             self.assertEqual("", provider.input_text)
+            self.assertEqual("medium", provider.reasoning_effort)
             instructions_record = Path(record.instructions_ref).read_text(encoding="utf-8")
             self.assertIn("source: configured slot prompt", instructions_record)
             self.assertIn("user_payload: none", instructions_record)
@@ -523,6 +527,7 @@ class RuntimeTests(unittest.TestCase):
             self.assertIn("changed later", provider.instructions)
             self.assertNotIn(snapshot_prompt, provider.instructions)
             self.assertEqual("", provider.input_text)
+            self.assertEqual("medium", provider.reasoning_effort)
 
     def test_runtime_disallows_repo_managed_artifact_reads_outside_staged_resources(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

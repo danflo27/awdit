@@ -5,7 +5,7 @@ import os
 from dataclasses import dataclass
 from typing import Any, Callable, Iterable
 
-from openai import OpenAI
+from openai import NOT_GIVEN, OpenAI
 
 
 ToolExecutor = Callable[[str, dict[str, Any]], str]
@@ -71,6 +71,7 @@ class OpenAIResponsesProvider:
         self,
         *,
         model: str,
+        reasoning_effort: str | None,
         instructions: str,
         input_text: str,
         previous_response_id: str | None,
@@ -87,6 +88,7 @@ class OpenAIResponsesProvider:
             stream_text_chunks: list[str] = []
             with self._client.responses.stream(
                 model=model,
+                reasoning={"effort": reasoning_effort} if reasoning_effort is not None else NOT_GIVEN,
                 instructions=current_instructions,
                 input=current_input,
                 previous_response_id=current_previous_response_id,
@@ -146,6 +148,7 @@ class OpenAIResponsesProvider:
         self,
         *,
         model: str,
+        reasoning_effort: str | None,
         instructions: str,
         input_text: str,
         previous_response_id: str | None,
@@ -153,6 +156,7 @@ class OpenAIResponsesProvider:
     ) -> ProviderBackgroundHandle:
         response = self._client.responses.create(
             model=model,
+            reasoning={"effort": reasoning_effort} if reasoning_effort is not None else NOT_GIVEN,
             instructions=instructions,
             input=input_text,
             previous_response_id=previous_response_id,

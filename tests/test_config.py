@@ -50,6 +50,7 @@ def _user_config_text() -> str:
             f"""
             [slots.{slot}]
             default_model = "{default_model}"
+            reasoning_effort = "medium"
             prompt_file = "prompts/{slot}.md"
             """
         )
@@ -142,34 +143,42 @@ class ConfigTests(unittest.TestCase):
 
                 [slots.hunter_1]
                 default_model = "gpt-5.4-mini"
+                reasoning_effort = "high"
                 prompt_file = "repo_prompts/hunter-1.md"
 
                 [slots.hunter_2]
                 default_model = "gpt-5.4"
+                reasoning_effort = "medium"
                 prompt_file = "prompts/hunter_2.md"
 
                 [slots.skeptic_1]
                 default_model = "gpt-5.4"
+                reasoning_effort = "medium"
                 prompt_file = "prompts/skeptic_1.md"
 
                 [slots.skeptic_2]
                 default_model = "gpt-5.4-mini"
+                reasoning_effort = "low"
                 prompt_file = "prompts/skeptic_2.md"
 
                 [slots.referee_1]
                 default_model = "gpt-5.4"
+                reasoning_effort = "medium"
                 prompt_file = "prompts/referee_1.md"
 
                 [slots.referee_2]
                 default_model = "gpt-5.4"
+                reasoning_effort = "medium"
                 prompt_file = "prompts/referee_2.md"
 
                 [slots.solver_1]
                 default_model = "gpt-5.4"
+                reasoning_effort = "medium"
                 prompt_file = "prompts/solver_1.md"
 
                 [slots.solver_2]
                 default_model = "gpt-5.4-mini"
+                reasoning_effort = "low"
                 prompt_file = "prompts/solver_2.md"
                 """,
             )
@@ -185,6 +194,7 @@ class ConfigTests(unittest.TestCase):
                 loaded.effective.providers["openai"].allowed_models,
             )
             self.assertEqual("gpt-5.4-mini", loaded.effective.slots["hunter_1"].default_model)
+            self.assertEqual("high", loaded.effective.slots["hunter_1"].reasoning_effort)
             self.assertEqual(
                 (repo_prompt_dir / "hunter-1.md").resolve(),
                 loaded.effective.slots["hunter_1"].prompt_file,
@@ -316,6 +326,24 @@ class ConfigTests(unittest.TestCase):
                     env={"OPENAI_API_KEY": "token"},
                 )
 
+    def test_invalid_reasoning_effort_raises(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            repo_dir = root / "repo"
+            config_path = repo_dir / "config" / "config.toml"
+            _write_prompt_tree(repo_dir / "config")
+            _write(
+                config_path,
+                _user_config_text().replace('reasoning_effort = "medium"', 'reasoning_effort = "extreme"', 1),
+            )
+
+            with self.assertRaises(ConfigError):
+                load_effective_config(
+                    cwd=repo_dir,
+                    config_path=config_path,
+                    env={"OPENAI_API_KEY": "token"},
+                )
+
     def test_missing_prompt_file_raises(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
@@ -349,7 +377,7 @@ class ConfigTests(unittest.TestCase):
             overridden = apply_runtime_overrides_with_env(
                 loaded,
                 {
-                    "slots": {"solver_2": {"default_model": "gpt-5.4"}},
+                    "slots": {"solver_2": {"default_model": "gpt-5.4", "reasoning_effort": "high"}},
                     "validation": {
                         "checks": [
                             {
@@ -373,6 +401,7 @@ class ConfigTests(unittest.TestCase):
                 "runtime override",
                 overridden.source_label("slots", "solver_2", "default_model"),
             )
+            self.assertEqual("high", overridden.effective.slots["solver_2"].reasoning_effort)
             self.assertEqual(
                 ("https://example.com/runtime",),
                 overridden.effective.resources.shared.include,
@@ -381,7 +410,7 @@ class ConfigTests(unittest.TestCase):
             save_repo_overrides(
                 repo_config,
                 {
-                    "slots": {"solver_2": {"default_model": "gpt-5.4"}},
+                    "slots": {"solver_2": {"default_model": "gpt-5.4", "reasoning_effort": "high"}},
                     "validation": {
                         "checks": [
                             {
@@ -403,6 +432,7 @@ class ConfigTests(unittest.TestCase):
             saved = repo_config.read_text(encoding="utf-8")
             self.assertIn("[slots.solver_2]", saved)
             self.assertIn('default_model = "gpt-5.4"', saved)
+            self.assertIn('reasoning_effort = "high"', saved)
             self.assertIn("[[validation.checks]]", saved)
             self.assertIn("[resources.shared]", saved)
             self.assertIn('include = ["https://example.com/runtime"]', saved)

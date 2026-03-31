@@ -34,6 +34,7 @@ def _user_config_text() -> str:
             f"""
             [slots.{slot}]
             default_model = "{default_model}"
+            reasoning_effort = "medium"
             prompt_file = "prompts/{slot}.md"
             """
         )

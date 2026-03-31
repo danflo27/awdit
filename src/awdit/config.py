@@ -19,6 +19,7 @@ SLOT_NAMES = (
     "solver_1",
     "solver_2",
 )
+REASONING_EFFORT_VALUES = ("low", "medium", "high")
 
 BUILTIN_DEFAULTS: dict[str, Any] = {
     "active_provider": "openai",
@@ -82,6 +83,7 @@ class ValidationCheck:
 @dataclass(frozen=True)
 class SlotConfig:
     default_model: str
+    reasoning_effort: str | None
     prompt_file: Path
 
 
@@ -331,6 +333,15 @@ def summarize_config(loaded: LoadedConfig) -> list[tuple[str, str, str]]:
                 loaded.source_label("slots", slot_name, "default_model"),
             )
         )
+        effort = loaded.effective.slots[slot_name].reasoning_effort
+        if effort is not None:
+            rows.append(
+                (
+                    f"{label} reasoning effort",
+                    effort,
+                    loaded.source_label("slots", slot_name, "reasoning_effort"),
+                )
+            )
         rows.append(
             (
                 f"{label} prompt",
@@ -496,12 +507,20 @@ def _normalize_and_validate(
                 f"Default model {default_model!r} for slot {slot_name!r} is not present in "
                 f"providers.{active_provider}.allowed_models."
             )
+        reasoning_effort = _optional_reasoning_effort(
+            slot_raw,
+            ("slots", slot_name, "reasoning_effort"),
+        )
         prompt_value = _require_string(slot_raw, ("slots", slot_name, "prompt_file"))
         prompt_source = sources[("slots", slot_name, "prompt_file")]
         prompt_path = _resolve_declared_path(prompt_value, prompt_source)
         if not prompt_path.exists():
             raise ConfigError(f"Missing prompt file for slot {slot_name!r}: {prompt_path}")
-        slots[slot_name] = SlotConfig(default_model=default_model, prompt_file=prompt_path)
+        slots[slot_name] = SlotConfig(
+            default_model=default_model,
+            reasoning_effort=reasoning_effort,
+            prompt_file=prompt_path,
+        )
 
     scope_raw = _require_table(raw, ("scope",))
     scope = ScopeConfig(
@@ -634,6 +653,17 @@ def _require_bool(container: dict[str, Any], path: PathKey) -> bool:
     return value
 
 
+def _optional_reasoning_effort(container: dict[str, Any], path: PathKey) -> str | None:
+    value = container.get(path[-1])
+    if value is None:
+        return None
+    if not isinstance(value, str) or value not in REASONING_EFFORT_VALUES:
+        dotted = ".".join(path)
+        allowed = ", ".join(REASONING_EFFORT_VALUES)
+        raise ConfigError(f"{dotted} must be one of: {allowed}.")
+    return value
+
+
 def _matches_any_glob(relative_path: Path, patterns: tuple[str, ...]) -> bool:
     posix_path = PurePosixPath(relative_path.as_posix())
     return any(posix_path.match(pattern) for pattern in patterns)
@@ -681,7 +711,7 @@ def _dump_known_schema_toml(data: dict[str, Any]) -> str:
                 continue
             slot = slots[slot_name]
             lines.extend(["", f"[slots.{slot_name}]"])
-            for key in ("default_model", "prompt_file"):
+            for key in ("default_model", "reasoning_effort", "prompt_file"):
                 if key in slot:
                     lines.append(f"{key} = {_format_toml_value(slot[key])}")
 
