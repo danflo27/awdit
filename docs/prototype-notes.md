@@ -18,5 +18,8 @@ Instructions source [inline/file]: inline
 Instructions: Review this repo for cohesiveness, correctness based off of the docs, and look for security ulnerabilities
 )  should not be in the CLI. The label and key should autogenerate and the user confirms or edits, and the only prompts the agent should have are the config/prompts/[slot].md file for that specific agent. The orchestrator will need a slot prompt as well. We will generate the prompts together later. 
 
+New:
 - prototype logging did not get generated or created anywhere
 - We need an orchestrator.md file in the config prompts, and lets also try to spawn the rchestrator, who will dispatch hunter_1 with the correct prompt, and alert the user when  hunter_1 is finished
+Use / edit / exit? [Y/e/n] prompt for shared resources is not clear -- add a space above and below the note, and change Use to proceed 
+-
