@@ -804,10 +804,12 @@ def normalize_proof_payload(
     if proof_state not in PROOF_STATE_VALUES:
         proof_state = "written_proof" if _string_list(payload.get("repro_steps")) else "hypothesized"
 
-    if proof_state in REPORTABLE_PROOF_STATES:
-        outcome = "reportable"
-    else:
-        outcome = "not_reportable"
+    outcome = str(payload.get("outcome", "") or "").strip().lower()
+    if outcome not in {"reportable", "not_reportable"}:
+        if proof_state in REPORTABLE_PROOF_STATES:
+            outcome = "reportable"
+        else:
+            outcome = "not_reportable"
 
     filter_reason = str(payload.get("filter_reason", "") or "").strip()
     if outcome == "reportable":
@@ -1203,18 +1205,13 @@ def _issue_grouping_keys(left: SwarmSeedResult, right: SwarmSeedResult) -> tuple
     right_supporting = _supporting_context_files(right)
     keys: set[str] = set()
 
+    # Merge duplicate seeds only when they explicitly point at one another's target files.
     if left.target_file in right_supporting:
         keys.add(left.target_file)
     if right.target_file in left_supporting:
         keys.add(right.target_file)
-    keys.update(left_supporting & right_supporting)
-
-    if not keys:
-        left_claim = _normalized_claim_key(left.claim)
-        right_claim = _normalized_claim_key(right.claim)
-        if left_claim and left_claim == right_claim:
-            keys.add("claim_match")
-
+    if len(keys) < 2:
+        return ()
     return tuple(sorted(keys))
 
 
@@ -1238,10 +1235,6 @@ def _evidence_file_refs(evidence: tuple[str, ...]) -> tuple[str, ...]:
         if normalized not in refs:
             refs.append(normalized)
     return tuple(refs)
-
-
-def _normalized_claim_key(text: str) -> str:
-    return " ".join(str(text).strip().lower().split())
 
 
 def list_repo_file_entries(cwd: Path) -> list[RepoFileEntry]:

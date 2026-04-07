@@ -9,9 +9,11 @@ from pathlib import Path
 from config import load_effective_config
 from provider_openai import BackgroundPollResult, ProviderBackgroundHandle
 from swarm import (
+    SwarmSeedResult,
     SwarmWorkerJob,
     freeze_swarm_prompt_bundle,
     generate_danger_map,
+    promote_issue_candidates,
     run_background_swarm_workers,
     run_swarm_sweep,
 )
@@ -343,6 +345,36 @@ class SwarmTests(unittest.TestCase):
             self.assertIn("Related duplicate seeds: `SEED-002`", ranked)
             self.assertIn("Case: `SWM-001`", ranked)
 
+    def test_swarm_does_not_group_seeds_without_bidirectional_target_links(self) -> None:
+        issue_candidates = promote_issue_candidates(
+            [
+                SwarmSeedResult(
+                    seed_id="SEED-001",
+                    target_file="app/routes.py",
+                    outcome="finding",
+                    severity_bucket="high",
+                    claim="Cross-user read through unscoped note lookup.",
+                    evidence=("app/db.py:10",),
+                    related_files=("app/db.py",),
+                    notes=(),
+                ),
+                SwarmSeedResult(
+                    seed_id="SEED-002",
+                    target_file="app/admin.py",
+                    outcome="finding",
+                    severity_bucket="medium",
+                    claim="Cross-user read through unscoped note lookup.",
+                    evidence=("app/db.py:25",),
+                    related_files=("app/db.py",),
+                    notes=(),
+                ),
+            ]
+        )
+
+        self.assertEqual(2, len(issue_candidates))
+        self.assertEqual(("SEED-001",), issue_candidates[0].seed_ids)
+        self.assertEqual(("SEED-002",), issue_candidates[1].seed_ids)
+
     def test_swarm_filters_non_reportable_proof_from_ranked_report(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             repo_dir = Path(tmp_dir) / "repo"
@@ -398,6 +430,66 @@ class SwarmTests(unittest.TestCase):
             self.assertIn("## Filtered out", ranked)
             self.assertIn("debug-only branch", ranked)
             self.assertIn("- Path-grounded only: `1`", summary)
+            self.assertIn("- Findings kept after proof: `0`", summary)
+
+    def test_swarm_respects_explicit_not_reportable_written_proof(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_dir = Path(tmp_dir) / "repo"
+            _write(repo_dir / "app" / "service.py", "print('hello')\n")
+            loaded = self._loaded_config(repo_dir)
+            run_dir = repo_dir / "runs" / "run_1"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            prompt_bundle = freeze_swarm_prompt_bundle(run_dir=run_dir, loaded=loaded)
+
+            swarm_digest = run_dir / "derived_context" / "swarm_digest.md"
+            shared_manifest = run_dir / "resources" / "shared" / "manifest.md"
+            _write(swarm_digest, "# digest\n")
+            _write(shared_manifest, "# shared\n")
+
+            provider = SequenceProvider(
+                [
+                    {
+                        "outcome": "finding",
+                        "severity_bucket": "medium",
+                        "claim": "Possible auth bypass.",
+                        "evidence": ["app/service.py:1"],
+                        "related_files": [],
+                        "notes": [],
+                    },
+                    {
+                        "outcome": "not_reportable",
+                        "proof_state": "written_proof",
+                        "claim": "Possible auth bypass.",
+                        "summary": "There is a debug-only exploit sketch, not a production issue.",
+                        "preconditions": ["Debug mode enabled."],
+                        "repro_steps": ["Set DEBUG=true.", "Hit the local-only path."],
+                        "citations": ["app/service.py:1"],
+                        "notes": [],
+                        "filter_reason": "debug-only branch",
+                    },
+                ]
+            )
+
+            result = run_swarm_sweep(
+                cwd=repo_dir,
+                loaded=loaded,
+                provider=provider,
+                prompt_bundle=prompt_bundle,
+                run_dir=run_dir,
+                swarm_digest_path=swarm_digest,
+                shared_manifest_path=shared_manifest,
+                eligible_files=[(repo_dir / "app" / "service.py").resolve()],
+            )
+
+            proof_result = result.proof_results[0]
+            ranked = result.final_ranked_findings.read_text(encoding="utf-8")
+            summary = result.final_summary.read_text(encoding="utf-8")
+            self.assertEqual("not_reportable", proof_result.outcome)
+            self.assertEqual("debug-only branch", proof_result.filter_reason)
+            self.assertFalse(proof_result.meets_report_bar)
+            self.assertIn("No findings cleared the proof-stage report bar.", ranked)
+            self.assertIn("debug-only branch", ranked)
+            self.assertIn("- Written proofs: `1`", summary)
             self.assertIn("- Findings kept after proof: `0`", summary)
 
     def test_background_scheduler_serializes_duplicate_lease_keys(self) -> None:
