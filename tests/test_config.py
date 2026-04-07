@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import sqlite3
 import tempfile
 import textwrap
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from config import (
     ConfigError,
@@ -16,6 +18,8 @@ from config import (
     resolve_resource_section_items,
     save_repo_overrides,
 )
+from repo_memory import resolve_repo_identity
+from state_db import ensure_state_db, insert_run, update_run_status
 
 
 ALL_SLOTS = (
@@ -40,6 +44,7 @@ def _write_prompt_tree(base: Path, prefix: str = "") -> None:
     prompt_dir.mkdir(parents=True, exist_ok=True)
     for slot in ALL_SLOTS:
         (prompt_dir / f"{prefix}{slot}.md").write_text(f"# {slot}\n", encoding="utf-8")
+    (prompt_dir / "swarm.md").write_text("# swarm\n", encoding="utf-8")
 
 
 def _user_config_text() -> str:
@@ -91,6 +96,14 @@ def _user_config_text() -> str:
 
         [github]
         prefer_gh = true
+
+        [swarm]
+        prompt_file = "prompts/swarm.md"
+        sweep_model = "gpt-5.4-mini"
+        proof_model = "gpt-5.4"
+        eligible_file_profile = "code_config_tests"
+        token_budget = 120000
+        allow_no_limit = true
         """
         + "\n".join(slot_blocks)
     )
@@ -140,6 +153,14 @@ class ConfigTests(unittest.TestCase):
 
                 [github]
                 prefer_gh = true
+
+                [swarm]
+                prompt_file = "prompts/swarm.md"
+                sweep_model = "gpt-5.4-mini"
+                proof_model = "gpt-5.4"
+                eligible_file_profile = "code_config_tests"
+                token_budget = 120000
+                allow_no_limit = true
 
                 [slots.hunter_1]
                 default_model = "gpt-5.4-mini"
@@ -213,6 +234,9 @@ class ConfigTests(unittest.TestCase):
                 loaded.effective.resources.slots["hunter_1"].include,
             )
             self.assertEqual(("old/**",), loaded.effective.resources.slots["hunter_1"].exclude)
+            self.assertIsNotNone(loaded.effective.swarm)
+            self.assertEqual("gpt-5.4-mini", loaded.effective.swarm.sweep_model)
+            self.assertEqual("gpt-5.4", loaded.effective.swarm.proof_model)
             self.assertEqual(1, len(loaded.effective.validation_checks))
             self.assertEqual("unit", loaded.effective.validation_checks[0].name)
             self.assertEqual("pytest -q", loaded.effective.validation_checks[0].command)
@@ -261,6 +285,29 @@ class ConfigTests(unittest.TestCase):
                 )
 
             self.assertIn("OPENAI_API_KEY", str(ctx.exception))
+
+    def test_swarm_prompt_file_must_exist_when_swarm_is_configured(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_dir = Path(tmp_dir) / "repo"
+            config_path = repo_dir / "config" / "config.toml"
+
+            _write_prompt_tree(repo_dir / "config")
+            _write(
+                config_path,
+                _user_config_text().replace(
+                    'prompt_file = "prompts/swarm.md"',
+                    'prompt_file = "prompts/missing-swarm.md"',
+                ),
+            )
+
+            with self.assertRaises(ConfigError) as ctx:
+                load_effective_config(
+                    cwd=repo_dir,
+                    config_path=config_path,
+                    env={"OPENAI_API_KEY": "token"},
+                )
+
+            self.assertIn("Missing prompt file for swarm", str(ctx.exception))
 
     def test_repo_dotenv_supplies_active_provider_env(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -476,6 +523,61 @@ class ConfigTests(unittest.TestCase):
                     loaded.effective.resources.slots["hunter_1"],
                 ),
             )
+
+    def test_repo_identity_prefers_remote_url(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_dir = Path(tmp_dir) / "repo"
+            repo_dir.mkdir(parents=True)
+
+            result = mock.Mock(returncode=0, stdout="https://example.com/acme/repo.git\n")
+            with mock.patch("repo_memory.subprocess.run", return_value=result):
+                identity = resolve_repo_identity(repo_dir)
+
+            self.assertEqual("git_remote", identity.source_kind)
+            self.assertEqual("https://example.com/acme/repo.git", identity.source_value)
+            self.assertTrue(identity.repo_key.startswith("repo_"))
+
+    def test_repo_identity_falls_back_to_repo_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_dir = Path(tmp_dir) / "repo"
+            repo_dir.mkdir(parents=True)
+
+            result = mock.Mock(returncode=1, stdout="")
+            with mock.patch("repo_memory.subprocess.run", return_value=result):
+                identity = resolve_repo_identity(repo_dir)
+
+            self.assertEqual("repo_path", identity.source_kind)
+            self.assertEqual(str(repo_dir.resolve()), identity.source_value)
+
+    def test_state_db_tracks_run_lifecycle(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_dir = Path(tmp_dir) / "repo"
+            repo_dir.mkdir(parents=True)
+
+            db_path = ensure_state_db(repo_dir)
+            insert_run(
+                cwd=repo_dir,
+                run_id="2026-04-06_120000",
+                repo_key="repo_deadbeef",
+                mode="swarm",
+                status="starting",
+                run_dir=repo_dir / "runs" / "2026-04-06_120000",
+            )
+            update_run_status(
+                cwd=repo_dir,
+                run_id="2026-04-06_120000",
+                status="completed",
+                completed=True,
+            )
+
+            with sqlite3.connect(db_path) as connection:
+                row = connection.execute(
+                    "SELECT repo_key, mode, status, completed_at FROM runs WHERE run_id = ?",
+                    ("2026-04-06_120000",),
+                ).fetchone()
+
+            self.assertEqual(("repo_deadbeef", "swarm", "completed"), row[:3])
+            self.assertIsNotNone(row[3])
 
 
 if __name__ == "__main__":

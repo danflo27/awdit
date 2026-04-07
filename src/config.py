@@ -20,6 +20,7 @@ SLOT_NAMES = (
     "solver_2",
 )
 REASONING_EFFORT_VALUES = ("low", "medium", "high")
+SWARM_ELIGIBLE_FILE_PROFILES = ("code_config_tests", "all_tracked")
 
 BUILTIN_DEFAULTS: dict[str, Any] = {
     "active_provider": "openai",
@@ -57,6 +58,7 @@ BUILTIN_DEFAULTS: dict[str, Any] = {
     "github": {
         "prefer_gh": True,
     },
+    "swarm": {},
 }
 
 CONFIG_BACKED_RUNTIME_KEYS = {"slots", "scope", "validation", "repo_memory", "resources"}
@@ -126,6 +128,16 @@ class ResourcesConfig:
 
 
 @dataclass(frozen=True)
+class SwarmConfig:
+    prompt_file: Path
+    sweep_model: str
+    proof_model: str
+    eligible_file_profile: str
+    token_budget: int
+    allow_no_limit: bool
+
+
+@dataclass(frozen=True)
 class EffectiveConfig:
     active_provider: str
     providers: dict[str, ProviderConfig]
@@ -135,6 +147,7 @@ class EffectiveConfig:
     repo_memory: RepoMemoryConfig
     resources: ResourcesConfig
     github: GithubConfig
+    swarm: SwarmConfig | None
 
 
 @dataclass(frozen=True)
@@ -391,6 +404,26 @@ def summarize_config(loaded: LoadedConfig) -> list[tuple[str, str, str]]:
             ),
         ]
     )
+    if loaded.effective.swarm is not None:
+        rows.extend(
+            [
+                (
+                    "Swarm sweep model",
+                    loaded.effective.swarm.sweep_model,
+                    loaded.source_label("swarm", "sweep_model"),
+                ),
+                (
+                    "Swarm proof model",
+                    loaded.effective.swarm.proof_model,
+                    loaded.source_label("swarm", "proof_model"),
+                ),
+                (
+                    "Swarm prompt",
+                    str(loaded.effective.swarm.prompt_file),
+                    loaded.source_label("swarm", "prompt_file"),
+                ),
+            ]
+        )
     return rows
 
 
@@ -589,6 +622,47 @@ def _normalize_and_validate(
     if not isinstance(prefer_gh, bool):
         raise ConfigError("github.prefer_gh must be true or false.")
 
+    swarm_raw = raw.get("swarm", {})
+    if swarm_raw is None:
+        swarm_raw = {}
+    if not isinstance(swarm_raw, dict):
+        raise ConfigError("swarm must be a table.")
+
+    swarm: SwarmConfig | None = None
+    if swarm_raw:
+        prompt_value = _require_string(swarm_raw, ("swarm", "prompt_file"))
+        prompt_source = sources[("swarm", "prompt_file")]
+        prompt_path = _resolve_declared_path(prompt_value, prompt_source)
+        if not prompt_path.exists():
+            raise ConfigError(f"Missing prompt file for swarm: {prompt_path}")
+
+        sweep_model = _require_string(swarm_raw, ("swarm", "sweep_model"))
+        proof_model = _require_string(swarm_raw, ("swarm", "proof_model"))
+        if sweep_model not in active_allowed:
+            raise ConfigError(
+                f"Swarm sweep_model {sweep_model!r} is not present in "
+                f"providers.{active_provider}.allowed_models."
+            )
+        if proof_model not in active_allowed:
+            raise ConfigError(
+                f"Swarm proof_model {proof_model!r} is not present in "
+                f"providers.{active_provider}.allowed_models."
+            )
+
+        eligible_file_profile = _require_string(swarm_raw, ("swarm", "eligible_file_profile"))
+        if eligible_file_profile not in SWARM_ELIGIBLE_FILE_PROFILES:
+            allowed = ", ".join(SWARM_ELIGIBLE_FILE_PROFILES)
+            raise ConfigError(f"swarm.eligible_file_profile must be one of: {allowed}.")
+
+        swarm = SwarmConfig(
+            prompt_file=prompt_path,
+            sweep_model=sweep_model,
+            proof_model=proof_model,
+            eligible_file_profile=eligible_file_profile,
+            token_budget=_require_positive_int(swarm_raw, ("swarm", "token_budget")),
+            allow_no_limit=_require_bool(swarm_raw, ("swarm", "allow_no_limit")),
+        )
+
     return EffectiveConfig(
         active_provider=active_provider,
         providers=providers,
@@ -598,6 +672,7 @@ def _normalize_and_validate(
         repo_memory=repo_memory,
         resources=ResourcesConfig(shared=shared_resources, slots=slot_resources),
         github=GithubConfig(prefer_gh=prefer_gh),
+        swarm=swarm,
     )
 
 
@@ -771,6 +846,20 @@ def _dump_known_schema_toml(data: dict[str, Any]) -> str:
         lines.extend(["", "[github]"])
         if "prefer_gh" in github:
             lines.append(f"prefer_gh = {_format_toml_value(github['prefer_gh'])}")
+
+    swarm = data.get("swarm", {})
+    if isinstance(swarm, dict) and swarm:
+        lines.extend(["", "[swarm]"])
+        for key in (
+            "prompt_file",
+            "sweep_model",
+            "proof_model",
+            "eligible_file_profile",
+            "token_budget",
+            "allow_no_limit",
+        ):
+            if key in swarm:
+                lines.append(f"{key} = {_format_toml_value(swarm[key])}")
 
     return "\n".join(lines).strip() + "\n"
 
