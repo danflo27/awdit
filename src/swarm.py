@@ -75,6 +75,41 @@ class RepoFileEntry:
     path: Path
 
 
+@dataclass(frozen=True)
+class SwarmSeedResult:
+    seed_id: str
+    target_file: str
+    outcome: str
+    severity_bucket: str
+    claim: str
+    evidence: tuple[str, ...]
+    related_files: tuple[str, ...]
+    notes: tuple[str, ...]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "seed_id": self.seed_id,
+            "target_file": self.target_file,
+            "outcome": self.outcome,
+            "severity_bucket": self.severity_bucket,
+            "claim": self.claim,
+            "evidence": list(self.evidence),
+            "related_files": list(self.related_files),
+            "notes": list(self.notes),
+        }
+
+
+@dataclass(frozen=True)
+class SwarmSweepResult:
+    seeds_dir: Path
+    proofs_dir: Path
+    reports_dir: Path
+    seed_results: tuple[SwarmSeedResult, ...]
+    seed_ledger: Path
+    final_ranked_findings: Path
+    final_summary: Path
+
+
 def load_danger_map_result(cwd: Path, repo_key: str) -> DangerMapResult | None:
     artifact_paths = danger_map_paths(cwd, repo_key)
     if not artifact_paths["danger_map_md"].exists() or not artifact_paths["danger_map_json"].exists():
@@ -370,6 +405,184 @@ def render_danger_map_markdown(payload: dict[str, Any]) -> str:
     return "\n".join(lines).strip() + "\n"
 
 
+def build_seed_input(
+    *,
+    seed_id: str,
+    target_file: str,
+    target_text: str,
+    swarm_digest_text: str,
+    shared_manifest_text: str,
+) -> str:
+    return "\n".join(
+        [
+            "Inspect the target file for one strongest black-hat seed finding.",
+            "Return exactly one JSON object and no surrounding prose.",
+            "Expected keys: outcome, severity_bucket, claim, evidence, related_files, notes.",
+            "outcome must be finding or no_finding.",
+            "severity_bucket must be high, medium, low, or none.",
+            "evidence, related_files, and notes must be JSON arrays of concise strings.",
+            f"Seed id: {seed_id}",
+            f"Target file: {target_file}",
+            "",
+            "Shared manifest:",
+            shared_manifest_text,
+            "",
+            "Swarm digest:",
+            swarm_digest_text,
+            "",
+            f"Target file contents for {target_file}:",
+            target_text,
+        ]
+    )
+
+
+def normalize_seed_payload(
+    *,
+    payload: dict[str, Any],
+    seed_id: str,
+    target_file: str,
+) -> SwarmSeedResult:
+    outcome = str(payload.get("outcome", "") or "").strip().lower()
+    if outcome not in {"finding", "no_finding"}:
+        outcome = "finding" if str(payload.get("claim", "")).strip() else "no_finding"
+
+    severity_bucket = str(payload.get("severity_bucket", "") or "").strip().lower()
+    if severity_bucket not in {"high", "medium", "low", "none"}:
+        severity_bucket = "none" if outcome == "no_finding" else "low"
+    if outcome == "no_finding":
+        severity_bucket = "none"
+
+    claim = str(payload.get("claim", "") or "").strip()
+    if outcome == "no_finding":
+        claim = ""
+
+    return SwarmSeedResult(
+        seed_id=seed_id,
+        target_file=target_file,
+        outcome=outcome,
+        severity_bucket=severity_bucket,
+        claim=claim,
+        evidence=tuple(_string_list(payload.get("evidence"))),
+        related_files=tuple(_string_list(payload.get("related_files"))),
+        notes=tuple(_string_list(payload.get("notes"))),
+    )
+
+
+def write_seed_ledger(path: Path, seed_results: list[SwarmSeedResult]) -> None:
+    lines = ["# Seed ledger", ""]
+    if not seed_results:
+        lines.append("No eligible files were processed.")
+    for result in seed_results:
+        lines.extend(
+            [
+                f"## {result.seed_id}",
+                f"- Target file: `{result.target_file}`",
+                f"- Outcome: `{result.outcome}`",
+                f"- Severity: `{result.severity_bucket}`",
+                f"- Claim: {result.claim or '(none)'}",
+                "",
+            ]
+        )
+    path.write_text("\n".join(lines).strip() + "\n", encoding="utf-8")
+
+
+def write_final_ranked_findings(path: Path, seed_results: list[SwarmSeedResult]) -> None:
+    findings = sorted(
+        [result for result in seed_results if result.outcome == "finding"],
+        key=lambda item: (_severity_rank(item.severity_bucket), item.target_file),
+    )
+    lines = [
+        "# Final ranked findings",
+        "",
+        "Thin sweep report only. Proof-stage promotion and duplicate grouping are not included yet.",
+        "",
+    ]
+    if not findings:
+        lines.append("No findings survived the sweep stage.")
+    for index, result in enumerate(findings, start=1):
+        lines.extend(
+            [
+                f"## {index}. {result.seed_id}",
+                f"- Severity: `{result.severity_bucket}`",
+                f"- Primary file: `{result.target_file}`",
+                f"- Claim: {result.claim}",
+            ]
+        )
+        if result.related_files:
+            lines.append(
+                "- Related files: " + ", ".join(f"`{item}`" for item in result.related_files)
+            )
+        if result.evidence:
+            lines.append("- Evidence:")
+            for item in result.evidence:
+                lines.append(f"  - {item}")
+        if result.notes:
+            lines.append("- Notes:")
+            for item in result.notes:
+                lines.append(f"  - {item}")
+        lines.append("")
+    path.write_text("\n".join(lines).strip() + "\n", encoding="utf-8")
+
+
+def write_final_summary(
+    path: Path,
+    seed_results: list[SwarmSeedResult],
+    seed_ledger: Path,
+    final_ranked_findings: Path,
+) -> None:
+    findings = [result for result in seed_results if result.outcome == "finding"]
+    counts = {
+        "high": sum(1 for result in findings if result.severity_bucket == "high"),
+        "medium": sum(1 for result in findings if result.severity_bucket == "medium"),
+        "low": sum(1 for result in findings if result.severity_bucket == "low"),
+    }
+    lines = [
+        "# Final summary",
+        "",
+        f"- Eligible files processed: `{len(seed_results)}`",
+        f"- Findings kept: `{len(findings)}`",
+        f"- High findings: `{counts['high']}`",
+        f"- Medium findings: `{counts['medium']}`",
+        f"- Low findings: `{counts['low']}`",
+        f"- Seed ledger: `{seed_ledger}`",
+        f"- Ranked findings: `{final_ranked_findings}`",
+    ]
+    path.write_text("\n".join(lines).strip() + "\n", encoding="utf-8")
+
+
+def _write_seed_artifacts(seeds_dir: Path, seed_result: SwarmSeedResult) -> None:
+    seed_prefix = seed_result.seed_id.lower().replace("-", "_")
+    json_path = seeds_dir / f"{seed_prefix}.json"
+    md_path = seeds_dir / f"{seed_prefix}.md"
+    json_path.write_text(json.dumps(seed_result.to_dict(), indent=2) + "\n", encoding="utf-8")
+    md_path.write_text(render_seed_markdown(seed_result), encoding="utf-8")
+
+
+def render_seed_markdown(seed_result: SwarmSeedResult) -> str:
+    lines = [
+        f"# {seed_result.seed_id}",
+        "",
+        f"- Target file: `{seed_result.target_file}`",
+        f"- Outcome: `{seed_result.outcome}`",
+        f"- Severity: `{seed_result.severity_bucket}`",
+    ]
+    if seed_result.claim:
+        lines.extend(["", "## Claim", seed_result.claim])
+    if seed_result.evidence:
+        lines.extend(["", "## Evidence"])
+        for item in seed_result.evidence:
+            lines.append(f"- {item}")
+    if seed_result.related_files:
+        lines.extend(["", "## Related files"])
+        for item in seed_result.related_files:
+            lines.append(f"- `{item}`")
+    if seed_result.notes:
+        lines.extend(["", "## Notes"])
+        for item in seed_result.notes:
+            lines.append(f"- {item}")
+    return "\n".join(lines).strip() + "\n"
+
+
 def list_repo_file_entries(cwd: Path) -> list[RepoFileEntry]:
     repo_dir = cwd.resolve()
     git_entries = _git_tracked_files(repo_dir)
@@ -408,6 +621,82 @@ def list_eligible_swarm_files(cwd: Path, loaded) -> list[Path]:
         if _matches_swarm_profile(entry.relative_path, swarm_config.eligible_file_profile):
             eligible.append(entry.path)
     return eligible
+
+
+def run_swarm_sweep(
+    *,
+    cwd: Path,
+    loaded,
+    provider: OpenAIResponsesProvider,
+    run_dir: Path,
+    swarm_digest_path: Path,
+    shared_manifest_path: Path,
+    eligible_files: list[Path],
+) -> SwarmSweepResult:
+    if loaded.effective.swarm is None:
+        raise RuntimeError("Swarm config is not available.")
+
+    swarm_root = run_dir / "swarm"
+    seeds_dir = swarm_root / "seeds"
+    proofs_dir = swarm_root / "proofs"
+    reports_dir = swarm_root / "reports"
+    seeds_dir.mkdir(parents=True, exist_ok=True)
+    proofs_dir.mkdir(parents=True, exist_ok=True)
+    reports_dir.mkdir(parents=True, exist_ok=True)
+
+    swarm_digest_text = swarm_digest_path.read_text(encoding="utf-8")
+    shared_manifest_text = shared_manifest_path.read_text(encoding="utf-8")
+    tools = RepoReadOnlyTools(
+        cwd=cwd,
+        scope_include=loaded.effective.scope.include,
+        scope_exclude=loaded.effective.scope.exclude,
+    )
+
+    seed_results: list[SwarmSeedResult] = []
+    for index, target_path in enumerate(eligible_files, start=1):
+        seed_id = f"SEED-{index:03d}"
+        target_file = display_repo_path(cwd, target_path)
+        target_text = target_path.read_text(encoding="utf-8", errors="replace")
+        result = provider.start_foreground_turn(
+            model=loaded.effective.swarm.sweep_model,
+            reasoning_effort="low",
+            instructions=loaded.effective.swarm.prompt_file.read_text(encoding="utf-8"),
+            input_text=build_seed_input(
+                seed_id=seed_id,
+                target_file=target_file,
+                target_text=target_text,
+                swarm_digest_text=swarm_digest_text,
+                shared_manifest_text=shared_manifest_text,
+            ),
+            previous_response_id=None,
+            tools=tools.schemas(),
+            tool_executor=tools.run,
+        )
+        payload = _parse_json_object(result.final_text)
+        seed_result = normalize_seed_payload(
+            payload=payload,
+            seed_id=seed_id,
+            target_file=target_file,
+        )
+        _write_seed_artifacts(seeds_dir, seed_result)
+        seed_results.append(seed_result)
+
+    seed_ledger = reports_dir / "seed_ledger.md"
+    final_ranked_findings = reports_dir / "final_ranked_findings.md"
+    final_summary = reports_dir / "final_summary.md"
+    write_seed_ledger(seed_ledger, seed_results)
+    write_final_ranked_findings(final_ranked_findings, seed_results)
+    write_final_summary(final_summary, seed_results, seed_ledger, final_ranked_findings)
+
+    return SwarmSweepResult(
+        seeds_dir=seeds_dir,
+        proofs_dir=proofs_dir,
+        reports_dir=reports_dir,
+        seed_results=tuple(seed_results),
+        seed_ledger=seed_ledger,
+        final_ranked_findings=final_ranked_findings,
+        final_summary=final_summary,
+    )
 
 
 def _git_tracked_files(repo_dir: Path) -> list[RepoFileEntry] | None:
@@ -465,6 +754,11 @@ def _merge_guidance(*groups: tuple[str, ...]) -> tuple[str, ...]:
             if value and value not in merged:
                 merged.append(value)
     return tuple(merged)
+
+
+def _severity_rank(severity_bucket: str) -> int:
+    order = {"high": 0, "medium": 1, "low": 2, "none": 3}
+    return order.get(severity_bucket, 4)
 
 
 def _matches_swarm_profile(relative_path: str, profile: str) -> bool:

@@ -117,6 +117,7 @@ This area stores:
 - Exclude globs remove matching files from audit scope, even if they would otherwise be included.
 - `Full repo review` supports tracked files with include/exclude globs.
 - Context gathering should be broad and budget-aware, pulling in nearby code, helpers, configs, tests, schemas, migrations, and relevant docs up to configured limits.
+- Cost and context management are first-class constraints: each run should preserve token-usage telemetry so operators can detect context bloat and spending spikes early.
 - Exact budgeting policy remains `TBD`.
 
 ## Multi-Agent Architecture

@@ -163,6 +163,124 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual("completed", poll_two.status)
         self.assertEqual("done", poll_two.final_text)
 
+    def test_background_usage_event_waits_for_terminal_poll(self) -> None:
+        responses = FakeResponses()
+        responses._create_results = [SimpleNamespace(id="bg_usage")]
+        responses._retrieve_results = [
+            SimpleNamespace(
+                id="bg_usage",
+                status="in_progress",
+                error=None,
+                output=[],
+                usage=SimpleNamespace(
+                    input_tokens=100,
+                    output_tokens=10,
+                    total_tokens=110,
+                    input_tokens_details=SimpleNamespace(cached_tokens=5),
+                    output_tokens_details=SimpleNamespace(reasoning_tokens=2),
+                ),
+            ),
+            SimpleNamespace(
+                id="bg_usage",
+                status="completed",
+                error=None,
+                output=[],
+                output_text="done",
+                usage=SimpleNamespace(
+                    input_tokens=600,
+                    output_tokens=90,
+                    total_tokens=690,
+                    input_tokens_details=SimpleNamespace(cached_tokens=50),
+                    output_tokens_details=SimpleNamespace(reasoning_tokens=30),
+                ),
+            ),
+        ]
+        provider = OpenAIResponsesProvider(
+            base_url="https://api.openai.com/v1",
+            api_key="token",
+            client=FakeClient(responses),
+        )
+
+        events = []
+        handle = provider.start_background_turn(
+            model="gpt-5.4-mini",
+            reasoning_effort="low",
+            instructions="system",
+            input_text="input",
+            previous_response_id=None,
+            tools=[],
+        )
+        poll_one = provider.poll_background_turn(
+            handle=handle,
+            model="gpt-5.4-mini",
+            tools=[],
+            tool_executor=lambda name, args: "",
+            event_callback=lambda event_type, data: events.append((event_type, data)),
+        )
+        poll_two = provider.poll_background_turn(
+            handle=ProviderBackgroundHandle(response_id=poll_one.response_id),
+            model="gpt-5.4-mini",
+            tools=[],
+            tool_executor=lambda name, args: "",
+            event_callback=lambda event_type, data: events.append((event_type, data)),
+        )
+
+        usage_events = [payload for event_type, payload in events if event_type == "provider_usage"]
+        self.assertEqual("running", poll_one.status)
+        self.assertEqual("completed", poll_two.status)
+        self.assertEqual(1, len(usage_events))
+        self.assertEqual(600, usage_events[0]["input_tokens"])
+        self.assertEqual(90, usage_events[0]["output_tokens"])
+        self.assertEqual(690, usage_events[0]["total_tokens"])
+
+    def test_provider_usage_events_include_token_fields(self) -> None:
+        responses = FakeResponses()
+        final_response = SimpleNamespace(
+            id="resp_usage_1",
+            status="completed",
+            model="gpt-5.4-mini",
+            output=[],
+            output_text="done",
+            usage=SimpleNamespace(
+                input_tokens=1200,
+                output_tokens=200,
+                total_tokens=1400,
+                input_tokens_details=SimpleNamespace(cached_tokens=300),
+                output_tokens_details=SimpleNamespace(reasoning_tokens=90),
+            ),
+        )
+        responses._stream_manager = FakeStreamManager(
+            FakeStream(events=[], final_response=final_response)
+        )
+        provider = OpenAIResponsesProvider(
+            base_url="https://api.openai.com/v1",
+            api_key="token",
+            client=FakeClient(responses),
+        )
+
+        events = []
+        provider.start_foreground_turn(
+            model="gpt-5.4-mini",
+            reasoning_effort=None,
+            instructions="system",
+            input_text="input",
+            previous_response_id=None,
+            tools=[],
+            tool_executor=lambda name, args: "",
+            event_callback=lambda event_type, data: events.append((event_type, data)),
+        )
+
+        usage_events = [payload for event_type, payload in events if event_type == "provider_usage"]
+        self.assertEqual(1, len(usage_events))
+        usage = usage_events[0]
+        self.assertEqual("resp_usage_1", usage["response_id"])
+        self.assertEqual("gpt-5.4-mini", usage["model"])
+        self.assertEqual(1200, usage["input_tokens"])
+        self.assertEqual(200, usage["output_tokens"])
+        self.assertEqual(1400, usage["total_tokens"])
+        self.assertEqual(300, usage["cached_input_tokens"])
+        self.assertEqual(90, usage["reasoning_output_tokens"])
+
     def test_list_model_ids_returns_sorted_model_ids(self) -> None:
         responses = FakeResponses()
         responses_models = SimpleNamespace(

@@ -9,6 +9,13 @@ The current implemented slice is the startup resource flow for `awdit review`:
 - the final selected resources are frozen under `runs/<run_id>/resources/`
 - local files and folders are staged into the run folder, while URLs are currently recorded in manifests without being fetched
 
+## Cost and Context Management
+
+Cost and context management are always first-class concerns in `awdit`.
+- Runs should capture provider usage telemetry so token growth and context pressure are visible.
+- For each dispatch, usage summaries are persisted under `runs/<run_id>/session_state/artifacts/<slot>/<dispatch_id>/usage_summary.json`.
+- Dispatch records also include `usage_stats_ref` and `usage_totals` for quick inspection during failure triage.
+
 ## Development
 
 Use `uv` for local development and project commands.

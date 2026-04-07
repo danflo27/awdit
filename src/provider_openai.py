@@ -105,6 +105,12 @@ class OpenAIResponsesProvider:
                 response = stream.get_final_response()
 
             response_id = getattr(response, "id", "")
+            self._emit_usage_event(
+                response=response,
+                fallback_response_id=response_id,
+                fallback_model=model,
+                event_callback=event_callback,
+            )
             function_calls = self._extract_function_calls(response)
             if not function_calls:
                 final_text = self._response_text(response, "".join(stream_text_chunks))
@@ -119,7 +125,11 @@ class OpenAIResponsesProvider:
             if event_callback is not None:
                 event_callback(
                     "tool_calls_requested",
-                    {"count": len(function_calls), "response_id": response_id},
+                    {
+                        "count": len(function_calls),
+                        "response_id": response_id,
+                        "tool_names": [str(getattr(call, "name", "")) for call in function_calls],
+                    },
                 )
 
             tool_outputs, new_traces = self._execute_tool_calls(
@@ -178,6 +188,12 @@ class OpenAIResponsesProvider:
         response = self._client.responses.retrieve(handle.response_id)
         failure_message = self.classify_provider_failure(response)
         if failure_message is not None:
+            self._emit_usage_event(
+                response=response,
+                fallback_response_id=handle.response_id,
+                fallback_model=model,
+                event_callback=event_callback,
+            )
             return BackgroundPollResult(
                 status="failed",
                 response_id=handle.response_id,
@@ -196,12 +212,22 @@ class OpenAIResponsesProvider:
             )
 
         response_id = getattr(response, "id", handle.response_id)
+        self._emit_usage_event(
+            response=response,
+            fallback_response_id=handle.response_id,
+            fallback_model=model,
+            event_callback=event_callback,
+        )
         function_calls = self._extract_function_calls(response)
         if function_calls:
             if event_callback is not None:
                 event_callback(
                     "tool_calls_requested",
-                    {"count": len(function_calls), "response_id": response_id},
+                    {
+                        "count": len(function_calls),
+                        "response_id": response_id,
+                        "tool_names": [str(getattr(call, "name", "")) for call in function_calls],
+                    },
                 )
             tool_outputs, new_traces = self._execute_tool_calls(
                 function_calls=function_calls,
@@ -320,3 +346,46 @@ class OpenAIResponsesProvider:
                 if isinstance(text, str) and text:
                     text_blocks.append(text)
         return "\n".join(text_blocks).strip()
+
+    def _emit_usage_event(
+        self,
+        *,
+        response: Any,
+        fallback_response_id: str,
+        fallback_model: str,
+        event_callback: ProviderEventCallback | None,
+    ) -> None:
+        if event_callback is None:
+            return
+
+        usage = getattr(response, "usage", None)
+        usage_payload = {
+            "response_id": str(getattr(response, "id", "") or fallback_response_id),
+            "model": str(getattr(response, "model", "") or fallback_model),
+            "status": str(getattr(response, "status", "unknown")),
+            "input_tokens": self._coerce_usage_int(self._usage_field(usage, "input_tokens")),
+            "output_tokens": self._coerce_usage_int(self._usage_field(usage, "output_tokens")),
+            "total_tokens": self._coerce_usage_int(self._usage_field(usage, "total_tokens")),
+            "cached_input_tokens": self._coerce_usage_int(
+                self._usage_field(self._usage_field(usage, "input_tokens_details"), "cached_tokens")
+            ),
+            "reasoning_output_tokens": self._coerce_usage_int(
+                self._usage_field(self._usage_field(usage, "output_tokens_details"), "reasoning_tokens")
+            ),
+        }
+        event_callback("provider_usage", usage_payload)
+
+    def _usage_field(self, value: Any, field_name: str) -> Any:
+        if value is None:
+            return None
+        if isinstance(value, dict):
+            return value.get(field_name)
+        return getattr(value, field_name, None)
+
+    def _coerce_usage_int(self, value: Any) -> int | None:
+        if value is None:
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None

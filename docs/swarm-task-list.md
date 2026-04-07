@@ -31,4 +31,4 @@
 - Proof stage and duplicate grouping are intentionally out of scope for this slice.
 
 ## Latest Checkpoint Commit
-- pending checkpoint 3 commit
+- `6751650` checkpoint 3: add swarm startup preflight

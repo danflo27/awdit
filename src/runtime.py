@@ -92,6 +92,8 @@ class DispatchRecord:
     supersedes_dispatch_id: str | None = None
     provider_handle_id: str | None = None
     error_message: str | None = None
+    usage_stats_ref: str | None = None
+    usage_totals: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -189,6 +191,7 @@ class OneSlotRuntime:
         self._worker_thread: threading.Thread | None = None
         self._foreground_dispatch_id: str | None = None
         self._foreground_stream_open = False
+        self._dispatch_usage: dict[str, dict[str, Any]] = {}
 
         self.state = SlotRuntimeState(slot_name=self.SLOT_NAME, current_epoch_id=initial_epoch)
         self._create_epoch_record(initial_epoch, created_reason="runtime_entry")
@@ -430,6 +433,8 @@ class OneSlotRuntime:
         if mode == "foreground":
             self._foreground_dispatch_id = dispatch_id
             self._foreground_stream_open = False
+            print(f"Foreground dispatch {dispatch_id} progress:")
+            print("- queued; waiting for worker and provider events...")
             record = self.wait_for_dispatch(dispatch_id, timeout_seconds=60.0)
             if self._foreground_stream_open:
                 print("")
@@ -711,6 +716,11 @@ class OneSlotRuntime:
             return
         if event_type == "background_poll":
             return
+        if event_type == "provider_usage":
+            self._accumulate_provider_usage(dispatch_id=dispatch_id, data=data)
+        if event_type == "tool_calls_requested":
+            usage = self._dispatch_usage.setdefault(dispatch_id, self._new_usage_totals())
+            usage["tool_calls_requested"] += self._coerce_nonnegative_int(data.get("count"))
         self._emit_event(
             event_type=event_type,
             message=f"Provider event: {event_type}.",
@@ -761,6 +771,7 @@ class OneSlotRuntime:
                 json.dumps([asdict(trace) for trace in result.tool_traces], indent=2) + "\n",
             )
             tool_trace_paths.append(str(tool_trace_path))
+        usage_path, usage_totals = self._finalize_dispatch_usage(dispatch_id=dispatch_id, failure_reason=None)
 
         checkpoint_body = self._build_checkpoint_body(dispatch_id=dispatch_id, result=result)
         checkpoint_record = CheckpointRecord(
@@ -790,6 +801,10 @@ class OneSlotRuntime:
             record.checkpoint_ref = str(checkpoint_path)
             if str(response_path) not in record.artifact_refs:
                 record.artifact_refs.append(str(response_path))
+            if usage_path and usage_path not in record.artifact_refs:
+                record.artifact_refs.append(usage_path)
+            record.usage_stats_ref = usage_path
+            record.usage_totals = usage_totals
             self.state.latest_checkpoint_ref = str(checkpoint_path)
             self.state.latest_checkpoint_body = checkpoint_body
             self._persist_dispatch(record)
@@ -835,11 +850,19 @@ class OneSlotRuntime:
             )
 
     def _mark_dispatch_failed(self, *, dispatch_id: str, reason: str) -> None:
+        usage_path, usage_totals = self._finalize_dispatch_usage(
+            dispatch_id=dispatch_id,
+            failure_reason=reason,
+        )
         with self._condition:
             record = self._dispatches[dispatch_id]
             record.status = "failed"
             record.failed_at = _timestamp()
             record.error_message = reason
+            if usage_path and usage_path not in record.artifact_refs:
+                record.artifact_refs.append(usage_path)
+            record.usage_stats_ref = usage_path
+            record.usage_totals = usage_totals
             self._persist_dispatch(record)
             self._emit_event(
                 event_type="dispatch_failed",
@@ -988,6 +1011,42 @@ class OneSlotRuntime:
                 handle.write(json.dumps(event.to_dict(), default=_json_default) + "\n")
         except FileNotFoundError:
             return
+        self._maybe_print_foreground_progress(event)
+
+    def _maybe_print_foreground_progress(self, event: RuntimeEvent) -> None:
+        if event.dispatch_id != self._foreground_dispatch_id:
+            return
+        if event.event_type == "output_delta":
+            return
+
+        if event.event_type == "tool_calls_requested":
+            count = self._coerce_nonnegative_int(event.data.get("count"))
+            response_id = str(event.data.get("response_id", "") or "")
+            tool_names = [str(name) for name in (event.data.get("tool_names") or []) if str(name)]
+            detail = f"{count} tool call(s)"
+            if tool_names:
+                detail += f" [{', '.join(tool_names)}]"
+            if response_id:
+                detail += f" response={response_id}"
+            print(f"[progress] {event.timestamp} provider requested {detail}")
+            return
+
+        if event.event_type == "provider_usage":
+            response_id = str(event.data.get("response_id", "") or "")
+            input_tokens = self._coerce_nonnegative_int(event.data.get("input_tokens"))
+            output_tokens = self._coerce_nonnegative_int(event.data.get("output_tokens"))
+            total_tokens = self._coerce_nonnegative_int(event.data.get("total_tokens"))
+            cached_tokens = self._coerce_nonnegative_int(event.data.get("cached_input_tokens"))
+            print(
+                "[progress] "
+                f"{event.timestamp} usage response={response_id or 'n/a'} "
+                f"in={input_tokens} out={output_tokens} total={total_tokens} cached_in={cached_tokens}"
+            )
+            return
+
+        print(
+            f"[progress] {event.timestamp} {event.event_type}: {event.message}"
+        )
 
     def _write_status_snapshot(self) -> Path:
         snapshot_path = self.snapshots_dir / f"{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}.json"
@@ -1204,3 +1263,105 @@ class OneSlotRuntime:
 
     def _new_checkpoint_id(self) -> str:
         return f"checkpoint_{uuid.uuid4().hex[:8]}"
+
+    def _new_usage_totals(self) -> dict[str, Any]:
+        return {
+            "responses": 0,
+            "tool_calls_requested": 0,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "total_tokens": 0,
+            "cached_input_tokens": 0,
+            "reasoning_output_tokens": 0,
+            "billable_input_tokens_estimate": 0,
+            "billable_tokens_estimate": 0,
+            "peak_input_tokens": 0,
+            "peak_total_tokens": 0,
+            "response_ids": [],
+            "models": {},
+            "_response_usage": {},
+        }
+
+    def _accumulate_provider_usage(self, *, dispatch_id: str, data: dict[str, Any]) -> None:
+        totals = self._dispatch_usage.setdefault(dispatch_id, self._new_usage_totals())
+        response_id = str(data.get("response_id", "") or "").strip()
+        if not response_id:
+            response_id = f"anonymous_{len(totals['_response_usage']) + 1}"
+
+        totals["_response_usage"][response_id] = {
+            "model": str(data.get("model", "") or ""),
+            "input_tokens": self._coerce_nonnegative_int(data.get("input_tokens")),
+            "output_tokens": self._coerce_nonnegative_int(data.get("output_tokens")),
+            "total_tokens": self._coerce_nonnegative_int(data.get("total_tokens")),
+            "cached_input_tokens": self._coerce_nonnegative_int(data.get("cached_input_tokens")),
+            "reasoning_output_tokens": self._coerce_nonnegative_int(data.get("reasoning_output_tokens")),
+        }
+        self._refresh_usage_totals(totals)
+
+    def _refresh_usage_totals(self, totals: dict[str, Any]) -> None:
+        response_usage = totals.get("_response_usage", {})
+        totals["responses"] = len(response_usage)
+        totals["input_tokens"] = 0
+        totals["output_tokens"] = 0
+        totals["total_tokens"] = 0
+        totals["cached_input_tokens"] = 0
+        totals["reasoning_output_tokens"] = 0
+        totals["peak_input_tokens"] = 0
+        totals["peak_total_tokens"] = 0
+        totals["response_ids"] = list(response_usage.keys())
+        totals["models"] = {}
+
+        for response_id in totals["response_ids"]:
+            sample = response_usage[response_id]
+            input_tokens = self._coerce_nonnegative_int(sample.get("input_tokens"))
+            output_tokens = self._coerce_nonnegative_int(sample.get("output_tokens"))
+            total_tokens = self._coerce_nonnegative_int(sample.get("total_tokens"))
+            cached_input_tokens = self._coerce_nonnegative_int(sample.get("cached_input_tokens"))
+            reasoning_output_tokens = self._coerce_nonnegative_int(sample.get("reasoning_output_tokens"))
+
+            totals["input_tokens"] += input_tokens
+            totals["output_tokens"] += output_tokens
+            totals["total_tokens"] += total_tokens
+            totals["cached_input_tokens"] += cached_input_tokens
+            totals["reasoning_output_tokens"] += reasoning_output_tokens
+            totals["peak_input_tokens"] = max(totals["peak_input_tokens"], input_tokens)
+            totals["peak_total_tokens"] = max(totals["peak_total_tokens"], total_tokens)
+
+            model = str(sample.get("model", "") or "")
+            if model:
+                totals["models"][model] = int(totals["models"].get(model, 0) or 0) + 1
+
+        totals["billable_input_tokens_estimate"] = max(0, totals["input_tokens"] - totals["cached_input_tokens"])
+        totals["billable_tokens_estimate"] = (
+            totals["billable_input_tokens_estimate"] + totals["output_tokens"]
+        )
+
+    def _coerce_nonnegative_int(self, value: Any) -> int:
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            return 0
+        return max(0, parsed)
+
+    def _finalize_dispatch_usage(
+        self,
+        *,
+        dispatch_id: str,
+        failure_reason: str | None,
+    ) -> tuple[str | None, dict[str, Any]]:
+        if dispatch_id not in self._dispatch_usage:
+            return None, {}
+
+        artifact_dir = self.artifacts_root / dispatch_id
+        usage_path = artifact_dir / "usage_summary.json"
+        totals = dict(self._dispatch_usage.pop(dispatch_id))
+        totals.pop("_response_usage", None)
+        summary = {
+            "dispatch_id": dispatch_id,
+            "slot_name": self.SLOT_NAME,
+            "captured_at": _timestamp(),
+            "failure_reason": failure_reason,
+            "totals": totals,
+        }
+        _safe_write_text(usage_path, json.dumps(summary, indent=2, default=_json_default) + "\n")
+        return str(usage_path), totals

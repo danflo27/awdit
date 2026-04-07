@@ -179,6 +179,104 @@ class CaptureInstructionsProvider(ImmediateProvider):
         return super().start_foreground_turn(**kwargs)
 
 
+class UsageReportingProvider(ImmediateProvider):
+    def start_foreground_turn(self, **kwargs) -> ProviderTurnResult:
+        callback = kwargs.get("event_callback")
+        if callback is not None:
+            callback(
+                "provider_usage",
+                {
+                    "response_id": "resp_usage_1",
+                    "model": kwargs["model"],
+                    "status": "completed",
+                    "input_tokens": 1000,
+                    "output_tokens": 250,
+                    "total_tokens": 1250,
+                    "cached_input_tokens": 300,
+                    "reasoning_output_tokens": 120,
+                },
+            )
+            callback("tool_calls_requested", {"count": 3, "response_id": "resp_usage_1"})
+            callback(
+                "provider_usage",
+                {
+                    "response_id": "resp_usage_2",
+                    "model": kwargs["model"],
+                    "status": "completed",
+                    "input_tokens": 800,
+                    "output_tokens": 120,
+                    "total_tokens": 920,
+                    "cached_input_tokens": 100,
+                    "reasoning_output_tokens": 40,
+                },
+            )
+        return super().start_foreground_turn(**kwargs)
+
+
+class FailingAfterUsageProvider(ImmediateProvider):
+    def start_foreground_turn(self, **kwargs) -> ProviderTurnResult:
+        callback = kwargs.get("event_callback")
+        if callback is not None:
+            callback(
+                "provider_usage",
+                {
+                    "response_id": "resp_usage_fail_1",
+                    "model": kwargs["model"],
+                    "status": "incomplete",
+                    "input_tokens": 500,
+                    "output_tokens": 80,
+                    "total_tokens": 580,
+                    "cached_input_tokens": 20,
+                    "reasoning_output_tokens": 10,
+                },
+            )
+            callback("tool_calls_requested", {"count": 1, "response_id": "resp_usage_fail_1"})
+        raise RuntimeError("APIError: synthetic TPM failure")
+
+
+class DuplicateBackgroundUsageProvider(ImmediateProvider):
+    def __init__(self) -> None:
+        super().__init__()
+        self.poll_calls = 0
+
+    def start_foreground_turn(self, **kwargs) -> ProviderTurnResult:
+        raise AssertionError("foreground should not be used")
+
+    def start_background_turn(self, **kwargs) -> ProviderBackgroundHandle:
+        return ProviderBackgroundHandle(response_id="bg_same")
+
+    def poll_background_turn(self, **kwargs) -> BackgroundPollResult:
+        self.poll_calls += 1
+        callback = kwargs.get("event_callback")
+        if callback is not None:
+            callback(
+                "provider_usage",
+                {
+                    "response_id": "bg_same",
+                    "model": kwargs["model"],
+                    "status": "in_progress" if self.poll_calls == 1 else "completed",
+                    "input_tokens": 100 if self.poll_calls == 1 else 600,
+                    "output_tokens": 10 if self.poll_calls == 1 else 90,
+                    "total_tokens": 110 if self.poll_calls == 1 else 690,
+                    "cached_input_tokens": 5 if self.poll_calls == 1 else 50,
+                    "reasoning_output_tokens": 2 if self.poll_calls == 1 else 30,
+                },
+            )
+        if self.poll_calls == 1:
+            return BackgroundPollResult(
+                status="running",
+                response_id="bg_same",
+                final_text="",
+                tool_traces=(),
+            )
+        return BackgroundPollResult(
+            status="completed",
+            response_id="bg_same",
+            final_text="background done",
+            tool_traces=(),
+        )
+
+
 class RuntimeTests(unittest.TestCase):
     def _loaded_config(self, repo_dir: Path):
         config_dir = repo_dir / "config"
@@ -252,6 +350,87 @@ class RuntimeTests(unittest.TestCase):
             self.assertIsNotNone(record.checkpoint_ref)
             self.assertTrue(Path(record.checkpoint_ref).exists())
             self.assertIn("dispatch_completed", [event["event_type"] for event in runtime.recent_events()])
+
+    def test_dispatch_usage_summary_is_persisted_for_completed_dispatch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            runtime = self._make_runtime(Path(tmp_dir) / "repo", provider=UsageReportingProvider())
+
+            accepted, _, dispatch_id = runtime.submit_dispatch(
+                work_label="Track usage",
+                work_key="runtime/usage",
+                instructions_text="Collect usage metrics.",
+                mode="foreground",
+            )
+            self.assertTrue(accepted)
+            record = runtime.wait_for_dispatch(dispatch_id)
+            self.assertEqual("completed", record.status)
+            self.assertIsNotNone(record.usage_stats_ref)
+
+            usage_path = Path(record.usage_stats_ref)
+            self.assertTrue(usage_path.exists())
+            usage = json.loads(usage_path.read_text(encoding="utf-8"))
+            totals = usage["totals"]
+            self.assertEqual(2, totals["responses"])
+            self.assertEqual(3, totals["tool_calls_requested"])
+            self.assertEqual(1800, totals["input_tokens"])
+            self.assertEqual(370, totals["output_tokens"])
+            self.assertEqual(2170, totals["total_tokens"])
+            self.assertEqual(400, totals["cached_input_tokens"])
+            self.assertEqual(160, totals["reasoning_output_tokens"])
+            self.assertEqual(1400, totals["billable_input_tokens_estimate"])
+            self.assertEqual(1770, totals["billable_tokens_estimate"])
+            self.assertEqual(1000, totals["peak_input_tokens"])
+            self.assertEqual(1250, totals["peak_total_tokens"])
+            self.assertEqual(["resp_usage_1", "resp_usage_2"], totals["response_ids"])
+
+    def test_dispatch_usage_summary_is_persisted_for_failed_dispatch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            runtime = self._make_runtime(Path(tmp_dir) / "repo", provider=FailingAfterUsageProvider())
+
+            accepted, _, dispatch_id = runtime.submit_dispatch(
+                work_label="Fail with usage",
+                work_key="runtime/usage-fail",
+                instructions_text="Fail but keep token telemetry.",
+                mode="foreground",
+            )
+            self.assertTrue(accepted)
+            record = runtime.wait_for_dispatch(dispatch_id, timeout_seconds=5.0)
+            self.assertEqual("failed", record.status)
+            self.assertIn("synthetic TPM failure", record.error_message or "")
+            self.assertIsNotNone(record.usage_stats_ref)
+
+            usage = json.loads(Path(record.usage_stats_ref).read_text(encoding="utf-8"))
+            self.assertEqual("APIError: synthetic TPM failure", usage["failure_reason"])
+            self.assertEqual(1, usage["totals"]["responses"])
+            self.assertEqual(1, usage["totals"]["tool_calls_requested"])
+
+    def test_background_usage_summary_dedupes_repeated_response_ids(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            runtime = self._make_runtime(
+                Path(tmp_dir) / "repo",
+                provider=DuplicateBackgroundUsageProvider(),
+            )
+
+            accepted, _, dispatch_id = runtime.submit_dispatch(
+                work_label="Background usage",
+                work_key="runtime/background-usage",
+                instructions_text="Track usage during polling.",
+                mode="background",
+            )
+            self.assertTrue(accepted)
+            record = runtime.wait_for_dispatch(dispatch_id, timeout_seconds=5.0)
+            self.assertEqual("completed", record.status)
+            self.assertIsNotNone(record.usage_stats_ref)
+
+            usage = json.loads(Path(record.usage_stats_ref).read_text(encoding="utf-8"))
+            totals = usage["totals"]
+            self.assertEqual(1, totals["responses"])
+            self.assertEqual(600, totals["input_tokens"])
+            self.assertEqual(90, totals["output_tokens"])
+            self.assertEqual(690, totals["total_tokens"])
+            self.assertEqual(50, totals["cached_input_tokens"])
+            self.assertEqual(30, totals["reasoning_output_tokens"])
+            self.assertEqual(["bg_same"], totals["response_ids"])
 
     def test_idle_compaction_creates_new_epoch(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
