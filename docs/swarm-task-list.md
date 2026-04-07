@@ -13,12 +13,16 @@
   - added repo danger-map generation and loading helpers
   - added accept, edit-and-regenerate, and regenerate loop support
   - added CLI coverage for the new danger-map startup flow
+- Checkpoint 3: swarm startup flow
+  - added shared-resource staging for swarm runs
+  - added swarm prompt snapshots and run-scoped startup artifacts
+  - added swarm digest generation and preflight output
+  - added CLI coverage for preflight artifacts and status handling
 
 ## In Progress
-- Checkpoint 3: swarm startup flow
+- Checkpoint 4: sweep execution
 
 ## Next
-- Checkpoint 4: sweep execution
 - Checkpoint 5: artifacts, reports, and polish
 
 ## Open Risks / Follow-Ups
@@ -27,4 +31,4 @@
 - Proof stage and duplicate grouping are intentionally out of scope for this slice.
 
 ## Latest Checkpoint Commit
-- pending checkpoint 2 commit
+- pending checkpoint 3 commit

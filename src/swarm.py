@@ -11,6 +11,54 @@ from paths import managed_runtime_root_names
 from provider_openai import OpenAIResponsesProvider
 from repo_memory import RepoIdentity, danger_map_paths, resolve_repo_identity
 
+CODE_EXTENSIONS = {
+    ".c",
+    ".cc",
+    ".cpp",
+    ".cs",
+    ".cxx",
+    ".go",
+    ".h",
+    ".hpp",
+    ".java",
+    ".js",
+    ".jsx",
+    ".kt",
+    ".kts",
+    ".mjs",
+    ".php",
+    ".ps1",
+    ".py",
+    ".rb",
+    ".rs",
+    ".scala",
+    ".sh",
+    ".sql",
+    ".swift",
+    ".ts",
+    ".tsx",
+    ".zsh",
+}
+CONFIG_EXTENSIONS = {
+    ".cfg",
+    ".conf",
+    ".ini",
+    ".json",
+    ".toml",
+    ".yaml",
+    ".yml",
+}
+CONFIG_FILENAMES = {
+    ".gitignore",
+    "dockerfile",
+    "docker-compose.yml",
+    "docker-compose.yaml",
+    "makefile",
+    "justfile",
+    "pyproject.toml",
+    "uv.lock",
+}
+
 
 @dataclass(frozen=True)
 class DangerMapResult:
@@ -19,6 +67,12 @@ class DangerMapResult:
     danger_map_json: Path
     repo_comments_md: Path
     payload: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class RepoFileEntry:
+    relative_path: str
+    path: Path
 
 
 def load_danger_map_result(cwd: Path, repo_key: str) -> DangerMapResult | None:
@@ -42,6 +96,18 @@ def load_danger_map_result(cwd: Path, repo_key: str) -> DangerMapResult | None:
         repo_comments_md=artifact_paths["repo_comments_md"],
         payload=payload,
     )
+
+
+def display_repo_path(cwd: Path, path: Path) -> str:
+    repo_dir = cwd.resolve()
+    candidate = path if path.is_absolute() else repo_dir / path
+    try:
+        return candidate.relative_to(repo_dir).as_posix()
+    except ValueError:
+        for entry in list_repo_file_entries(repo_dir):
+            if entry.path == candidate:
+                return entry.relative_path
+        raise RuntimeError("Path is not tracked within the repo scope.")
 
 
 class RepoReadOnlyTools:
@@ -104,38 +170,30 @@ class RepoReadOnlyTools:
 
     def allowed_paths(self, *, path_glob: str = "") -> list[Path]:
         allowed: list[Path] = []
-        for path in list_repo_files(self.cwd):
-            relative = path.relative_to(self.cwd).as_posix()
-            if self.scope_include and not _matches_any(relative, self.scope_include):
+        for entry in list_repo_file_entries(self.cwd):
+            if self.scope_include and not _matches_any(entry.relative_path, self.scope_include):
                 continue
-            if _matches_any(relative, self.scope_exclude):
+            if _matches_any(entry.relative_path, self.scope_exclude):
                 continue
-            if path_glob and not PurePosixPath(relative).match(path_glob):
+            if path_glob and not PurePosixPath(entry.relative_path).match(path_glob):
                 continue
-            allowed.append(path.resolve())
+            allowed.append(entry.path)
         return allowed
 
     def resolve_allowed_path(self, raw_path: str) -> Path:
-        path = Path(raw_path).expanduser()
-        if not path.is_absolute():
-            path = (self.cwd / path).resolve()
-        else:
-            path = path.resolve()
-        if not _is_relative_to(path, self.cwd):
-            raise RuntimeError("Path is outside the repo root.")
-        relative = path.relative_to(self.cwd).as_posix()
-        if _is_runtime_managed_relative(relative):
-            raise RuntimeError("Managed runtime files are not readable through swarm tools.")
-        if self.scope_include and not _matches_any(relative, self.scope_include):
-            raise RuntimeError("Path is outside the configured scope include globs.")
-        if _matches_any(relative, self.scope_exclude):
-            raise RuntimeError("Path is excluded by scope rules.")
+        relative = _normalize_repo_relative_path(raw_path)
+        allowed_by_relative = {
+            self._display_path(path): path for path in self.allowed_paths()
+        }
+        if relative not in allowed_by_relative:
+            raise RuntimeError("Path is outside the configured readable repo scope.")
+        path = allowed_by_relative[relative]
         if not path.exists() or not path.is_file():
             raise RuntimeError("File does not exist.")
         return path
 
     def _display_path(self, path: Path) -> str:
-        return str(path.resolve().relative_to(self.cwd))
+        return display_repo_path(self.cwd, path)
 
 
 def generate_danger_map(
@@ -239,11 +297,8 @@ def build_danger_map_input(
     identity: RepoIdentity,
     guidance_notes: tuple[str, ...],
 ) -> str:
-    repo_dir = cwd.resolve()
-    tracked_files = list_repo_files(cwd)
-    inventory = "\n".join(
-        f"- {path.relative_to(repo_dir).as_posix()}" for path in tracked_files[:400]
-    )
+    tracked_entries = list_repo_file_entries(cwd)
+    inventory = "\n".join(f"- {entry.relative_path}" for entry in tracked_entries[:400])
     guidance_block = "\n".join(f"- {item}" for item in guidance_notes) or "- (none)"
     scope_include = ", ".join(loaded.effective.scope.include) or "(none)"
     scope_exclude = ", ".join(loaded.effective.scope.exclude) or "(none)"
@@ -315,24 +370,47 @@ def render_danger_map_markdown(payload: dict[str, Any]) -> str:
     return "\n".join(lines).strip() + "\n"
 
 
-def list_repo_files(cwd: Path) -> list[Path]:
+def list_repo_file_entries(cwd: Path) -> list[RepoFileEntry]:
     repo_dir = cwd.resolve()
-    git_paths = _git_tracked_files(repo_dir)
-    if git_paths is not None:
-        return git_paths
+    git_entries = _git_tracked_files(repo_dir)
+    if git_entries is not None:
+        return git_entries
 
-    files: list[Path] = []
+    files: list[RepoFileEntry] = []
     for path in sorted(repo_dir.rglob("*")):
         if not path.is_file():
             continue
         relative = path.relative_to(repo_dir).as_posix()
         if _is_runtime_managed_relative(relative):
             continue
-        files.append(path.resolve())
+        files.append(RepoFileEntry(relative_path=relative, path=path))
     return files
 
 
-def _git_tracked_files(repo_dir: Path) -> list[Path] | None:
+def list_repo_files(cwd: Path) -> list[Path]:
+    return [entry.path for entry in list_repo_file_entries(cwd)]
+
+
+def list_eligible_swarm_files(cwd: Path, loaded) -> list[Path]:
+    repo_dir = cwd.resolve()
+    scope_include = loaded.effective.scope.include
+    scope_exclude = loaded.effective.scope.exclude
+    swarm_config = loaded.effective.swarm
+    if swarm_config is None:
+        raise RuntimeError("Swarm config is not available.")
+
+    eligible: list[Path] = []
+    for entry in list_repo_file_entries(repo_dir):
+        if scope_include and not _matches_any(entry.relative_path, scope_include):
+            continue
+        if _matches_any(entry.relative_path, scope_exclude):
+            continue
+        if _matches_swarm_profile(entry.relative_path, swarm_config.eligible_file_profile):
+            eligible.append(entry.path)
+    return eligible
+
+
+def _git_tracked_files(repo_dir: Path) -> list[RepoFileEntry] | None:
     try:
         result = subprocess.run(
             ["git", "ls-files"],
@@ -347,15 +425,15 @@ def _git_tracked_files(repo_dir: Path) -> list[Path] | None:
     if result.returncode != 0:
         return None
 
-    files: list[Path] = []
+    files: list[RepoFileEntry] = []
     for line in result.stdout.splitlines():
         value = line.strip()
         if not value:
             continue
-        path = (repo_dir / value).resolve()
+        path = repo_dir / value
         if path.is_file():
-            files.append(path)
-    return sorted(files)
+            files.append(RepoFileEntry(relative_path=value, path=path))
+    return sorted(files, key=lambda entry: entry.relative_path)
 
 
 def _parse_json_object(text: str) -> dict[str, Any]:
@@ -389,9 +467,45 @@ def _merge_guidance(*groups: tuple[str, ...]) -> tuple[str, ...]:
     return tuple(merged)
 
 
+def _matches_swarm_profile(relative_path: str, profile: str) -> bool:
+    if profile == "all_tracked":
+        return True
+
+    path = PurePosixPath(relative_path)
+    name = path.name.lower()
+    extension = path.suffix.lower()
+    parts = tuple(part.lower() for part in path.parts)
+
+    if extension in CODE_EXTENSIONS or extension in CONFIG_EXTENSIONS:
+        return True
+    if name in CONFIG_FILENAMES:
+        return True
+    if "tests" in parts or name.startswith("test_") or name.endswith("_test.py"):
+        return True
+    return False
+
+
 def _matches_any(relative_path: str, globs: tuple[str, ...]) -> bool:
     posix = PurePosixPath(relative_path)
     return any(posix.match(pattern) for pattern in globs)
+
+
+def _normalize_repo_relative_path(raw_path: str) -> str:
+    path = PurePosixPath(str(raw_path).replace("\\", "/"))
+    parts: list[str] = []
+    for part in path.parts:
+        if part in {"", "."}:
+            continue
+        if part == "..":
+            if not parts:
+                raise RuntimeError("Path escapes the repo root.")
+            parts.pop()
+            continue
+        parts.append(part)
+    normalized = "/".join(parts)
+    if not normalized:
+        raise RuntimeError("Path is empty.")
+    return normalized
 
 
 def _is_runtime_managed_relative(relative_path: str) -> bool:

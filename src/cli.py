@@ -36,7 +36,13 @@ from provider_openai import OpenAIResponsesProvider
 from repo_memory import resolve_repo_identity
 from runtime import OneSlotRuntime
 from state_db import insert_run, update_run_status
-from swarm import append_repo_guidance, generate_danger_map, load_danger_map_result
+from swarm import (
+    append_repo_guidance,
+    display_repo_path,
+    generate_danger_map,
+    list_eligible_swarm_files,
+    load_danger_map_result,
+)
 
 
 @dataclass(frozen=True)
@@ -54,6 +60,17 @@ class RunResourceSnapshot:
     shared_manifest: Path
     slot_manifests: dict[str, Path]
     summary_path: Path
+
+
+@dataclass(frozen=True)
+class SwarmStartupSnapshot:
+    run_id: str
+    run_dir: Path
+    run_json: Path
+    prompts_dir: Path
+    prompt_snapshot: Path
+    shared_manifest: Path
+    swarm_digest: Path
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -194,6 +211,36 @@ def _handle_swarm(_: argparse.Namespace) -> int:
             provider=provider,
             repo_key=identity.repo_key,
         )
+        effective_resources = _build_effective_resource_defaults(current, cwd)
+        shared_resources = _review_swarm_shared_resources(effective_resources.shared, cwd)
+        if shared_resources is None:
+            update_run_status(
+                cwd=cwd,
+                run_id=run_id,
+                status="canceled",
+                completed=True,
+            )
+            print("Swarm canceled before launch.")
+            return 0
+
+        eligible_files = list_eligible_swarm_files(cwd, current)
+        snapshot = _persist_swarm_startup_snapshot(
+            cwd=cwd,
+            loaded=current,
+            run_id=run_id,
+            run_dir=run_dir,
+            shared_resources=shared_resources,
+            danger_map_result=result,
+            eligible_files=eligible_files,
+        )
+        _print_swarm_preflight(current, snapshot, result, eligible_files)
+
+        update_run_status(
+            cwd=cwd,
+            run_id=run_id,
+            status="preflight_ready",
+            completed=False,
+        )
     except Exception as exc:
         update_run_status(
             cwd=cwd,
@@ -204,18 +251,9 @@ def _handle_swarm(_: argparse.Namespace) -> int:
         print(f"Swarm startup failed: {exc}")
         return 1
 
-    update_run_status(
-        cwd=cwd,
-        run_id=run_id,
-        status="danger_map_ready",
-        completed=False,
-    )
-
     print("")
-    print("Danger-map preparation complete.")
-    print(f"- Repo danger map: {result.danger_map_md}")
-    print("")
-    print("Swarm startup beyond danger-map approval is not implemented in this checkpoint.")
+    print("Swarm startup preflight is ready.")
+    print("Sweep execution is not implemented in this checkpoint.")
     return 0
 
 
@@ -298,6 +336,174 @@ def _generate_swarm_danger_map(
         provider=provider,
         guidance_notes=guidance_notes,
     )
+
+
+def _review_swarm_shared_resources(
+    current_items: tuple[str, ...],
+    cwd: Path,
+) -> tuple[str, ...] | None:
+    return _review_resource_list(
+        current_items,
+        cwd=cwd,
+        title="Shared resources available for this run",
+        note_lines=[
+            "Everything under config/resources/shared/ is included by default.",
+            "Repo config usually only needs [resources.shared] exclude = [...].",
+            "Use [resources.shared] include = [...] only for explicit URLs or out-of-tree paths.",
+        ],
+        prompt="Proceed / edit / exit? [Y/e/n] ",
+        edit_prompt="Enter the exact shared resource list for this run, comma-separated: ",
+        edit_help="You can use files from config/resources/, any other local path, folders, or URLs.",
+    )
+
+
+def _persist_swarm_startup_snapshot(
+    *,
+    cwd: Path,
+    loaded,
+    run_id: str,
+    run_dir: Path,
+    shared_resources: tuple[str, ...],
+    danger_map_result,
+    eligible_files: list[Path],
+) -> SwarmStartupSnapshot:
+    prompts_dir = run_dir / "prompts"
+    derived_context_dir = run_dir / "derived_context"
+    resources_dir = run_dir / "resources"
+    shared_dir = resources_dir / "shared"
+    prompts_dir.mkdir(parents=True, exist_ok=True)
+    derived_context_dir.mkdir(parents=True, exist_ok=True)
+    shared_dir.mkdir(parents=True, exist_ok=True)
+
+    if loaded.effective.swarm is None:
+        raise RuntimeError("Swarm config is not available.")
+
+    prompt_snapshot = prompts_dir / "swarm.md"
+    shutil.copy2(loaded.effective.swarm.prompt_file, prompt_snapshot)
+
+    shared_records = _stage_resource_items(shared_resources, shared_dir / "staged")
+    shared_manifest = shared_dir / "manifest.md"
+    _write_resource_manifest(shared_manifest, "Shared resources", shared_records)
+
+    swarm_digest = derived_context_dir / "swarm_digest.md"
+    _write_swarm_digest(
+        swarm_digest,
+        loaded=loaded,
+        danger_map_result=danger_map_result,
+        shared_manifest=shared_manifest,
+        eligible_files=eligible_files,
+    )
+
+    run_json = run_dir / "run.json"
+    run_json.write_text(
+        json.dumps(
+            {
+                "run_id": run_id,
+                "mode": "swarm",
+                "created_at": datetime.now().isoformat(timespec="seconds"),
+                "config_path": str(loaded.config_path),
+                "repo_key": danger_map_result.identity.repo_key,
+                "danger_map_path": str(danger_map_result.danger_map_md),
+                "swarm": {
+                    "sweep_model": loaded.effective.swarm.sweep_model,
+                    "proof_model": loaded.effective.swarm.proof_model,
+                    "eligible_file_profile": loaded.effective.swarm.eligible_file_profile,
+                    "token_budget": loaded.effective.swarm.token_budget,
+                    "allow_no_limit": loaded.effective.swarm.allow_no_limit,
+                    "prompt_snapshot": str(prompt_snapshot),
+                },
+                "resources": {
+                    "shared": list(shared_resources),
+                    "shared_manifest": str(shared_manifest),
+                },
+                "derived_context": {
+                    "swarm_digest": str(swarm_digest),
+                },
+                "eligible_files": [display_repo_path(cwd, path) for path in eligible_files],
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    return SwarmStartupSnapshot(
+        run_id=run_id,
+        run_dir=run_dir,
+        run_json=run_json,
+        prompts_dir=prompts_dir,
+        prompt_snapshot=prompt_snapshot,
+        shared_manifest=shared_manifest,
+        swarm_digest=swarm_digest,
+    )
+
+
+def _write_swarm_digest(
+    path: Path,
+    *,
+    loaded,
+    danger_map_result,
+    shared_manifest: Path,
+    eligible_files: list[Path],
+) -> None:
+    lines = [
+        "# Swarm digest",
+        "",
+        f"- Repo key: `{danger_map_result.identity.repo_key}`",
+        f"- Danger map: `{danger_map_result.danger_map_md}`",
+        f"- Shared manifest: `{shared_manifest}`",
+        f"- Eligible file count: `{len(eligible_files)}`",
+        "",
+        "## Trust boundaries",
+    ]
+    for item in danger_map_result.payload.get("trust_boundaries") or ["(none)"]:
+        lines.append(f"- {item}")
+    lines.extend(["", "## Risky sinks"])
+    for item in danger_map_result.payload.get("risky_sinks") or ["(none)"]:
+        lines.append(f"- {item}")
+    lines.extend(["", "## Auth assumptions"])
+    for item in danger_map_result.payload.get("auth_assumptions") or ["(none)"]:
+        lines.append(f"- {item}")
+    lines.extend(["", "## Hot paths"])
+    for item in danger_map_result.payload.get("hot_paths") or ["(none)"]:
+        lines.append(f"- {item}")
+    lines.extend(
+        [
+            "",
+            "## Swarm settings",
+            f"- Sweep model: `{loaded.effective.swarm.sweep_model}`",
+            f"- Proof model: `{loaded.effective.swarm.proof_model}`",
+            f"- Eligible profile: `{loaded.effective.swarm.eligible_file_profile}`",
+        ]
+    )
+    path.write_text("\n".join(lines).strip() + "\n", encoding="utf-8")
+
+
+def _print_swarm_preflight(loaded, snapshot, danger_map_result, eligible_files: list[Path]) -> None:
+    print("")
+    print("Swarm preflight")
+    print("  Mode: repo-wide black-hat sweep")
+    print(
+        "  File profile: "
+        f"{loaded.effective.swarm.eligible_file_profile.replace('_', ' ')}"
+    )
+    print(f"  Eligible files discovered: {len(eligible_files)}")
+    if loaded.effective.swarm.allow_no_limit:
+        print(
+            "  Token budget: "
+            f"{loaded.effective.swarm.token_budget} (advisory, no-limit allowed)"
+        )
+    else:
+        print(f"  Token budget: {loaded.effective.swarm.token_budget}")
+    print(f"  Sweep model: {loaded.effective.swarm.sweep_model}")
+    print(f"  Proof model: {loaded.effective.swarm.proof_model}")
+    print("  Final report style: ranked seed findings")
+    print("  Repo danger map:")
+    print(f"    {danger_map_result.danger_map_md}")
+    print("  Shared resource manifest:")
+    print(f"    {snapshot.shared_manifest}")
+    print("  Swarm digest:")
+    print(f"    {snapshot.swarm_digest}")
 
 
 def _handle_list_models(_: argparse.Namespace) -> int:

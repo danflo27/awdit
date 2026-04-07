@@ -615,14 +615,15 @@ class SwarmCliTests(unittest.TestCase):
                 repo_dir,
                 loaded,
                 DangerMapProvider(),
-                ["n", "y"],
+                ["n", "y", "y"],
             )
 
             self.assertEqual(0, result)
             self.assertIn("Starting new swarm run...", output)
             self.assertIn("No repo danger map exists for this repository yet.", output)
             self.assertIn("Repo danger map ready:", output)
-            self.assertIn("Danger-map preparation complete.", output)
+            self.assertIn("Swarm preflight", output)
+            self.assertIn("Swarm startup preflight is ready.", output)
 
             repo_dir_root = repo_dir / "repos" / "repo_deadbeef"
             self.assertTrue((repo_dir_root / "danger_map.md").exists())
@@ -634,7 +635,7 @@ class SwarmCliTests(unittest.TestCase):
                     "SELECT mode, status, completed_at FROM runs WHERE run_id = ?",
                     ("2026-04-06_121500",),
                 ).fetchone()
-            self.assertEqual(("swarm", "danger_map_ready"), row[:2])
+            self.assertEqual(("swarm", "preflight_ready"), row[:2])
             self.assertIsNone(row[2])
 
     def test_swarm_edit_regenerates_danger_map_and_appends_guidance(self) -> None:
@@ -675,7 +676,7 @@ class SwarmCliTests(unittest.TestCase):
                 repo_dir,
                 loaded,
                 DangerMapProvider(),
-                ["n", "e", "focus on auth boundaries", "y"],
+                ["n", "e", "focus on auth boundaries", "y", "y"],
             )
 
             self.assertEqual(0, result)
@@ -742,7 +743,7 @@ class SwarmCliTests(unittest.TestCase):
                 repo_dir,
                 loaded,
                 first_provider,
-                ["n", "e", "focus on auth boundaries", "y"],
+                ["n", "e", "focus on auth boundaries", "y", "y"],
                 run_id="2026-04-06_121500",
             )
             self.assertEqual(0, first_result)
@@ -751,7 +752,7 @@ class SwarmCliTests(unittest.TestCase):
                 repo_dir,
                 loaded,
                 second_provider,
-                ["n", "y", "y"],
+                ["n", "y", "y", "y"],
                 run_id="2026-04-06_121600",
             )
 
@@ -765,6 +766,172 @@ class SwarmCliTests(unittest.TestCase):
                 )
             )
             self.assertEqual(["focus on auth boundaries"], payload["guidance"])
+
+    def test_swarm_stages_shared_resources_and_writes_preflight_artifacts(self) -> None:
+        class DangerMapProvider:
+            def start_foreground_turn(self, **kwargs):
+                return ProviderTurnResult(
+                    response_id="resp_1",
+                    final_text=json.dumps(
+                        {
+                            "trust_boundaries": ["api boundary"],
+                            "risky_sinks": ["sql write path"],
+                            "auth_assumptions": ["session cookie is trusted"],
+                            "hot_paths": ["app/routes.py"],
+                            "notes": ["watch org scoping"],
+                        }
+                    ),
+                    tool_traces=(),
+                    status="completed",
+                    model=kwargs["model"],
+                )
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_dir = Path(tmp_dir) / "repo"
+            _write(
+                repo_dir / "config" / "resources" / "shared" / "refund-boundaries.md",
+                "shared note",
+            )
+            loaded = self._loaded_config(repo_dir)
+
+            result, output = self._run_swarm(
+                repo_dir,
+                loaded,
+                DangerMapProvider(),
+                ["n", "y", "y"],
+            )
+
+            self.assertEqual(0, result)
+            self.assertIn("Swarm preflight", output)
+            self.assertIn("Shared resources available for this run", output)
+            self.assertIn("Sweep execution is not implemented in this checkpoint.", output)
+
+            run_dir = runs_root(repo_dir) / "2026-04-06_121500"
+            self.assertTrue((run_dir / "prompts" / "swarm.md").exists())
+            self.assertTrue((run_dir / "resources" / "shared" / "manifest.md").exists())
+            self.assertTrue((run_dir / "derived_context" / "swarm_digest.md").exists())
+
+            shared_manifest = (run_dir / "resources" / "shared" / "manifest.md").read_text(
+                encoding="utf-8"
+            )
+            swarm_digest = (run_dir / "derived_context" / "swarm_digest.md").read_text(
+                encoding="utf-8"
+            )
+            run_json = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+
+            self.assertIn("refund-boundaries.md", shared_manifest)
+            self.assertIn("shared-reference", shared_manifest)
+            self.assertIn("Eligible file count", swarm_digest)
+            self.assertEqual("swarm", run_json["mode"])
+
+    def test_swarm_preflight_failure_marks_run_failed(self) -> None:
+        class DangerMapProvider:
+            def start_foreground_turn(self, **kwargs):
+                return ProviderTurnResult(
+                    response_id="resp_1",
+                    final_text=json.dumps(
+                        {
+                            "trust_boundaries": ["api boundary"],
+                            "risky_sinks": ["sql write path"],
+                            "auth_assumptions": ["session cookie is trusted"],
+                            "hot_paths": ["app/routes.py"],
+                            "notes": ["watch org scoping"],
+                        }
+                    ),
+                    tool_traces=(),
+                    status="completed",
+                    model=kwargs["model"],
+                )
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_dir = Path(tmp_dir) / "repo"
+            loaded = self._loaded_config(repo_dir)
+            stdout = io.StringIO()
+            identity = RepoIdentity(
+                repo_name=repo_dir.name,
+                repo_key="repo_deadbeef",
+                source_kind="repo_path",
+                source_value=str(repo_dir.resolve()),
+                repo_dir=repo_dir.resolve(),
+            )
+            with (
+                mock.patch("cli.Path.cwd", return_value=repo_dir),
+                mock.patch("cli.load_effective_config", return_value=loaded),
+                mock.patch("cli._make_run_id", return_value="2026-04-06_121500"),
+                mock.patch(
+                    "cli.OpenAIResponsesProvider.from_loaded_config",
+                    return_value=DangerMapProvider(),
+                ),
+                mock.patch("cli.resolve_repo_identity", return_value=identity),
+                mock.patch("swarm.resolve_repo_identity", return_value=identity),
+                mock.patch(
+                    "cli._persist_swarm_startup_snapshot",
+                    side_effect=RuntimeError("snapshot broke"),
+                ),
+                mock.patch(
+                    "builtins.input",
+                    side_effect=self._input_mock(["n", "y", "y"], stdout),
+                ),
+                mock.patch("sys.stdout", stdout),
+            ):
+                result = main(["swarm"])
+
+            self.assertEqual(1, result)
+            self.assertIn("Swarm startup failed: snapshot broke", stdout.getvalue())
+            with sqlite3.connect(repo_dir / "state" / "awdit.db") as connection:
+                row = connection.execute(
+                    "SELECT status, completed_at FROM runs WHERE run_id = ?",
+                    ("2026-04-06_121500",),
+                ).fetchone()
+            self.assertEqual("failed", row[0])
+            self.assertIsNotNone(row[1])
+
+    def test_swarm_preflight_handles_git_tracked_symlink_entries(self) -> None:
+        class DangerMapProvider:
+            def start_foreground_turn(self, **kwargs):
+                return ProviderTurnResult(
+                    response_id="resp_1",
+                    final_text=json.dumps(
+                        {
+                            "trust_boundaries": ["api boundary"],
+                            "risky_sinks": ["sql write path"],
+                            "auth_assumptions": ["session cookie is trusted"],
+                            "hot_paths": ["app/link.py"],
+                            "notes": ["watch symlink handling"],
+                        }
+                    ),
+                    tool_traces=(),
+                    status="completed",
+                    model=kwargs["model"],
+                )
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            repo_dir = root / "repo"
+            outside_file = root / "shared" / "linked.py"
+            _write(outside_file, "print('linked')\n")
+            (repo_dir / "app").mkdir(parents=True, exist_ok=True)
+            (repo_dir / "app" / "link.py").symlink_to(outside_file)
+            loaded = self._loaded_config(repo_dir)
+
+            git_result = mock.Mock(returncode=0, stdout="app/link.py\n")
+            with mock.patch("swarm.subprocess.run", return_value=git_result):
+                result, output = self._run_swarm(
+                    repo_dir,
+                    loaded,
+                    DangerMapProvider(),
+                    ["n", "y", "y"],
+                )
+
+            self.assertEqual(0, result)
+            self.assertIn("Eligible files discovered: 1", output)
+
+            run_json = json.loads(
+                ((runs_root(repo_dir) / "2026-04-06_121500") / "run.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(["app/link.py"], run_json["eligible_files"])
 
     def test_swarm_generation_failure_marks_run_failed_and_returns_error(self) -> None:
         class FailingDangerMapProvider:
