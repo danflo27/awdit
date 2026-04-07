@@ -33,7 +33,10 @@ from config import (
 )
 from paths import migrate_legacy_runtime_layout, runs_root
 from provider_openai import OpenAIResponsesProvider
+from repo_memory import resolve_repo_identity
 from runtime import OneSlotRuntime
+from state_db import insert_run, update_run_status
+from swarm import append_repo_guidance, generate_danger_map, load_danger_map_result
 
 
 @dataclass(frozen=True)
@@ -62,6 +65,12 @@ def main(argv: list[str] | None = None) -> int:
         help="Review config defaults, resolve run resources, and write run-scoped manifests.",
     )
     review_parser.set_defaults(handler=_handle_review)
+
+    swarm_parser = subparsers.add_parser(
+        "swarm",
+        help="Run the repo-wide black-hat sweep startup flow.",
+    )
+    swarm_parser.set_defaults(handler=_handle_swarm)
 
     list_models_parser = subparsers.add_parser(
         "list-models",
@@ -144,6 +153,151 @@ def _handle_review(_: argparse.Namespace) -> int:
     print("Startup resource review complete.")
     print("Full audit pipeline beyond startup resource staging is not implemented yet.")
     return 0
+
+
+def _handle_swarm(_: argparse.Namespace) -> int:
+    cwd = Path.cwd()
+    migrate_legacy_runtime_layout(cwd)
+    try:
+        loaded = load_effective_config(cwd=cwd)
+    except ConfigError as exc:
+        print(f"Config error: {exc}")
+        return 1
+
+    if loaded.effective.swarm is None:
+        print("Config error: missing required [swarm] config block.")
+        return 1
+
+    print("Starting new swarm run...")
+    run_id = _make_run_id()
+    run_dir = runs_root(cwd) / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    provider = OpenAIResponsesProvider.from_loaded_config(loaded)
+    identity = resolve_repo_identity(cwd)
+    insert_run(
+        cwd=cwd,
+        run_id=run_id,
+        repo_key=identity.repo_key,
+        mode="swarm",
+        status="starting",
+        run_dir=run_dir,
+    )
+
+    current = loaded
+    if _confirm("Adjust config-backed settings before swarm startup?", default=False):
+        current, _ = _run_config_override_menu(loaded)
+
+    try:
+        result = _prepare_swarm_danger_map(
+            cwd=cwd,
+            loaded=current,
+            provider=provider,
+            repo_key=identity.repo_key,
+        )
+    except Exception as exc:
+        update_run_status(
+            cwd=cwd,
+            run_id=run_id,
+            status="failed",
+            completed=True,
+        )
+        print(f"Swarm startup failed: {exc}")
+        return 1
+
+    update_run_status(
+        cwd=cwd,
+        run_id=run_id,
+        status="danger_map_ready",
+        completed=False,
+    )
+
+    print("")
+    print("Danger-map preparation complete.")
+    print(f"- Repo danger map: {result.danger_map_md}")
+    print("")
+    print("Swarm startup beyond danger-map approval is not implemented in this checkpoint.")
+    return 0
+
+
+def _prepare_swarm_danger_map(
+    *,
+    cwd: Path,
+    loaded,
+    provider: OpenAIResponsesProvider,
+    repo_key: str,
+):
+    identity = resolve_repo_identity(cwd)
+    print(f"Repository detected: `{identity.repo_name}`")
+
+    result = load_danger_map_result(cwd, repo_key)
+    if result is None:
+        print("No repo danger map exists for this repository yet.")
+        print("Swarm mode requires a repo danger map before launch.")
+        result = _generate_swarm_danger_map(cwd=cwd, loaded=loaded, provider=provider)
+        print("")
+        print("Repo danger map ready:")
+        print(f"  {result.danger_map_md}")
+    else:
+        print("Existing repo danger map found:")
+        print(f"  {result.danger_map_md}")
+        if loaded.effective.repo_memory.confirm_refresh_on_startup and _confirm(
+            "Refresh repo danger map before swarm startup?",
+            default=True,
+        ):
+            result = _generate_swarm_danger_map(cwd=cwd, loaded=loaded, provider=provider)
+            print("")
+            print("Updated repo danger map ready:")
+            print(f"  {result.danger_map_md}")
+
+    guidance_notes: tuple[str, ...] = ()
+    while True:
+        print("Review the map, then choose:")
+        print("  y. Accept it and continue")
+        print("  e. Enter corrections or guidance, then regenerate it")
+        print("  n. Regenerate it without extra guidance")
+        choice = input("Accept / edit / regenerate? [Y/e/n] ").strip().lower()
+        if choice in {"", "y", "yes"}:
+            return result
+        if choice == "e":
+            print("")
+            print("Enter corrections or guidance for danger-map regeneration:")
+            guidance = input("> ").strip()
+            if guidance:
+                append_repo_guidance(result.repo_comments_md, guidance)
+                guidance_notes = (*guidance_notes, guidance)
+            result = _generate_swarm_danger_map(
+                cwd=cwd,
+                loaded=loaded,
+                provider=provider,
+                guidance_notes=guidance_notes,
+            )
+            print("")
+            print("Updated repo danger map ready:")
+            print(f"  {result.danger_map_md}")
+            continue
+        if choice == "n":
+            result = _generate_swarm_danger_map(cwd=cwd, loaded=loaded, provider=provider)
+            print("")
+            print("Updated repo danger map ready:")
+            print(f"  {result.danger_map_md}")
+            continue
+        print("Invalid choice. Use y, e, or n.")
+
+
+def _generate_swarm_danger_map(
+    *,
+    cwd: Path,
+    loaded,
+    provider: OpenAIResponsesProvider,
+    guidance_notes: tuple[str, ...] = (),
+):
+    print("Generating repo danger map...")
+    return generate_danger_map(
+        cwd=cwd,
+        loaded=loaded,
+        provider=provider,
+        guidance_notes=guidance_notes,
+    )
 
 
 def _handle_list_models(_: argparse.Namespace) -> int:

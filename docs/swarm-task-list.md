@@ -8,12 +8,16 @@
   - added repo identity helpers
   - added minimal SQLite run-state helpers
   - added focused config/repo-state tests
+- Checkpoint 2: danger-map flow
+  - added the `awdit swarm` command shell
+  - added repo danger-map generation and loading helpers
+  - added accept, edit-and-regenerate, and regenerate loop support
+  - added CLI coverage for the new danger-map startup flow
 
 ## In Progress
-- Checkpoint 2: danger-map flow
+- Checkpoint 3: swarm startup flow
 
 ## Next
-- Checkpoint 3: swarm startup flow
 - Checkpoint 4: sweep execution
 - Checkpoint 5: artifacts, reports, and polish
 
@@ -23,4 +27,4 @@
 - Proof stage and duplicate grouping are intentionally out of scope for this slice.
 
 ## Latest Checkpoint Commit
-- pending checkpoint 1 commit
+- pending checkpoint 2 commit
