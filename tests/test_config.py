@@ -44,7 +44,9 @@ def _write_prompt_tree(base: Path, prefix: str = "") -> None:
     prompt_dir.mkdir(parents=True, exist_ok=True)
     for slot in ALL_SLOTS:
         (prompt_dir / f"{prefix}{slot}.md").write_text(f"# {slot}\n", encoding="utf-8")
-    (prompt_dir / "swarm.md").write_text("# swarm\n", encoding="utf-8")
+    (prompt_dir / "swarm_danger_map.md").write_text("# swarm danger map\n", encoding="utf-8")
+    (prompt_dir / "swarm_seed.md").write_text("# swarm seed\n", encoding="utf-8")
+    (prompt_dir / "swarm_proof.md").write_text("# swarm proof\n", encoding="utf-8")
 
 
 def _user_config_text() -> str:
@@ -98,12 +100,16 @@ def _user_config_text() -> str:
         prefer_gh = true
 
         [swarm]
-        prompt_file = "prompts/swarm.md"
         sweep_model = "gpt-5.4-mini"
         proof_model = "gpt-5.4"
         eligible_file_profile = "code_config_tests"
         token_budget = 120000
         allow_no_limit = true
+
+        [swarm.prompts]
+        danger_map = "prompts/swarm_danger_map.md"
+        seed = "prompts/swarm_seed.md"
+        proof = "prompts/swarm_proof.md"
         """
         + "\n".join(slot_blocks)
     )
@@ -155,12 +161,16 @@ class ConfigTests(unittest.TestCase):
                 prefer_gh = true
 
                 [swarm]
-                prompt_file = "prompts/swarm.md"
                 sweep_model = "gpt-5.4-mini"
                 proof_model = "gpt-5.4"
                 eligible_file_profile = "code_config_tests"
                 token_budget = 120000
                 allow_no_limit = true
+
+                [swarm.prompts]
+                danger_map = "prompts/swarm_danger_map.md"
+                seed = "prompts/swarm_seed.md"
+                proof = "prompts/swarm_proof.md"
 
                 [slots.hunter_1]
                 default_model = "gpt-5.4-mini"
@@ -237,6 +247,18 @@ class ConfigTests(unittest.TestCase):
             self.assertIsNotNone(loaded.effective.swarm)
             self.assertEqual("gpt-5.4-mini", loaded.effective.swarm.sweep_model)
             self.assertEqual("gpt-5.4", loaded.effective.swarm.proof_model)
+            self.assertEqual(
+                (repo_prompt_dir / "swarm_danger_map.md").resolve(),
+                loaded.effective.swarm.prompts.danger_map,
+            )
+            self.assertEqual(
+                (repo_prompt_dir / "swarm_seed.md").resolve(),
+                loaded.effective.swarm.prompts.seed,
+            )
+            self.assertEqual(
+                (repo_prompt_dir / "swarm_proof.md").resolve(),
+                loaded.effective.swarm.prompts.proof,
+            )
             self.assertEqual(1, len(loaded.effective.validation_checks))
             self.assertEqual("unit", loaded.effective.validation_checks[0].name)
             self.assertEqual("pytest -q", loaded.effective.validation_checks[0].command)
@@ -295,8 +317,8 @@ class ConfigTests(unittest.TestCase):
             _write(
                 config_path,
                 _user_config_text().replace(
-                    'prompt_file = "prompts/swarm.md"',
-                    'prompt_file = "prompts/missing-swarm.md"',
+                    'danger_map = "prompts/swarm_danger_map.md"',
+                    'danger_map = "prompts/missing-swarm.md"',
                 ),
             )
 

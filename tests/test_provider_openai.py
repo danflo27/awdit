@@ -34,6 +34,7 @@ class FakeResponses:
     def __init__(self) -> None:
         self.create_calls = []
         self.retrieve_calls = []
+        self.cancel_calls = []
         self._stream_manager = None
         self._retrieve_results = []
         self._create_results = []
@@ -49,6 +50,10 @@ class FakeResponses:
     def retrieve(self, response_id):
         self.retrieve_calls.append(response_id)
         return self._retrieve_results.pop(0)
+
+    def cancel(self, response_id):
+        self.cancel_calls.append(response_id)
+        return SimpleNamespace(status="cancelled")
 
 
 class FakeClient:
@@ -162,6 +167,45 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual("running", poll_one.status)
         self.assertEqual("completed", poll_two.status)
         self.assertEqual("done", poll_two.final_text)
+
+    def test_background_start_passes_prompt_cache_key_and_text_format(self) -> None:
+        responses = FakeResponses()
+        responses._create_results = [SimpleNamespace(id="bg_schema")]
+        provider = OpenAIResponsesProvider(
+            base_url="https://api.openai.com/v1",
+            api_key="token",
+            client=FakeClient(responses),
+        )
+
+        provider.start_background_turn(
+            model="gpt-5.4-mini",
+            reasoning_effort="low",
+            instructions="system",
+            input_text="input",
+            previous_response_id=None,
+            tools=[],
+            text_format={"type": "json_schema", "name": "x", "schema": {"type": "object"}},
+            prompt_cache_key="cache-key",
+        )
+
+        self.assertEqual("cache-key", responses.create_calls[0]["prompt_cache_key"])
+        self.assertEqual(
+            {"format": {"type": "json_schema", "name": "x", "schema": {"type": "object"}}},
+            responses.create_calls[0]["text"],
+        )
+
+    def test_cancel_background_turn_calls_responses_cancel(self) -> None:
+        responses = FakeResponses()
+        provider = OpenAIResponsesProvider(
+            base_url="https://api.openai.com/v1",
+            api_key="token",
+            client=FakeClient(responses),
+        )
+
+        status = provider.cancel_background_turn(ProviderBackgroundHandle(response_id="bg_123"))
+
+        self.assertEqual("cancelled", status)
+        self.assertEqual(["bg_123"], responses.cancel_calls)
 
     def test_background_usage_event_waits_for_terminal_poll(self) -> None:
         responses = FakeResponses()

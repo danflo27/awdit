@@ -128,8 +128,15 @@ class ResourcesConfig:
 
 
 @dataclass(frozen=True)
+class SwarmPromptsConfig:
+    danger_map: Path
+    seed: Path
+    proof: Path
+
+
+@dataclass(frozen=True)
 class SwarmConfig:
-    prompt_file: Path
+    prompts: SwarmPromptsConfig
     sweep_model: str
     proof_model: str
     eligible_file_profile: str
@@ -418,9 +425,19 @@ def summarize_config(loaded: LoadedConfig) -> list[tuple[str, str, str]]:
                     loaded.source_label("swarm", "proof_model"),
                 ),
                 (
-                    "Swarm prompt",
-                    str(loaded.effective.swarm.prompt_file),
-                    loaded.source_label("swarm", "prompt_file"),
+                    "Swarm danger-map prompt",
+                    str(loaded.effective.swarm.prompts.danger_map),
+                    loaded.source_label("swarm", "prompts", "danger_map"),
+                ),
+                (
+                    "Swarm seed prompt",
+                    str(loaded.effective.swarm.prompts.seed),
+                    loaded.source_label("swarm", "prompts", "seed"),
+                ),
+                (
+                    "Swarm proof prompt",
+                    str(loaded.effective.swarm.prompts.proof),
+                    loaded.source_label("swarm", "prompts", "proof"),
                 ),
             ]
         )
@@ -630,11 +647,34 @@ def _normalize_and_validate(
 
     swarm: SwarmConfig | None = None
     if swarm_raw:
-        prompt_value = _require_string(swarm_raw, ("swarm", "prompt_file"))
-        prompt_source = sources[("swarm", "prompt_file")]
-        prompt_path = _resolve_declared_path(prompt_value, prompt_source)
-        if not prompt_path.exists():
-            raise ConfigError(f"Missing prompt file for swarm: {prompt_path}")
+        if "prompt_file" in swarm_raw:
+            raise ConfigError(
+                "swarm.prompt_file is no longer supported. "
+                "Use [swarm.prompts] with danger_map, seed, and proof entries."
+            )
+
+        prompts_raw = _require_table(raw, ("swarm", "prompts"))
+
+        danger_map_prompt_value = _require_string(prompts_raw, ("swarm", "prompts", "danger_map"))
+        danger_map_prompt_source = sources[("swarm", "prompts", "danger_map")]
+        danger_map_prompt_path = _resolve_declared_path(
+            danger_map_prompt_value,
+            danger_map_prompt_source,
+        )
+        if not danger_map_prompt_path.exists():
+            raise ConfigError(f"Missing prompt file for swarm: {danger_map_prompt_path}")
+
+        seed_prompt_value = _require_string(prompts_raw, ("swarm", "prompts", "seed"))
+        seed_prompt_source = sources[("swarm", "prompts", "seed")]
+        seed_prompt_path = _resolve_declared_path(seed_prompt_value, seed_prompt_source)
+        if not seed_prompt_path.exists():
+            raise ConfigError(f"Missing prompt file for swarm: {seed_prompt_path}")
+
+        proof_prompt_value = _require_string(prompts_raw, ("swarm", "prompts", "proof"))
+        proof_prompt_source = sources[("swarm", "prompts", "proof")]
+        proof_prompt_path = _resolve_declared_path(proof_prompt_value, proof_prompt_source)
+        if not proof_prompt_path.exists():
+            raise ConfigError(f"Missing prompt file for swarm: {proof_prompt_path}")
 
         sweep_model = _require_string(swarm_raw, ("swarm", "sweep_model"))
         proof_model = _require_string(swarm_raw, ("swarm", "proof_model"))
@@ -655,7 +695,11 @@ def _normalize_and_validate(
             raise ConfigError(f"swarm.eligible_file_profile must be one of: {allowed}.")
 
         swarm = SwarmConfig(
-            prompt_file=prompt_path,
+            prompts=SwarmPromptsConfig(
+                danger_map=danger_map_prompt_path,
+                seed=seed_prompt_path,
+                proof=proof_prompt_path,
+            ),
             sweep_model=sweep_model,
             proof_model=proof_model,
             eligible_file_profile=eligible_file_profile,
@@ -850,16 +894,15 @@ def _dump_known_schema_toml(data: dict[str, Any]) -> str:
     swarm = data.get("swarm", {})
     if isinstance(swarm, dict) and swarm:
         lines.extend(["", "[swarm]"])
-        for key in (
-            "prompt_file",
-            "sweep_model",
-            "proof_model",
-            "eligible_file_profile",
-            "token_budget",
-            "allow_no_limit",
-        ):
+        for key in ("sweep_model", "proof_model", "eligible_file_profile", "token_budget", "allow_no_limit"):
             if key in swarm:
                 lines.append(f"{key} = {_format_toml_value(swarm[key])}")
+        prompts = swarm.get("prompts")
+        if isinstance(prompts, dict) and prompts:
+            lines.extend(["", "[swarm.prompts]"])
+            for key in ("danger_map", "seed", "proof"):
+                if key in prompts:
+                    lines.append(f"{key} = {_format_toml_value(prompts[key])}")
 
     return "\n".join(lines).strip() + "\n"
 

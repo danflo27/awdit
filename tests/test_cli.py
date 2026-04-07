@@ -27,7 +27,9 @@ def _write_prompt_tree(base: Path) -> None:
     prompt_dir.mkdir(parents=True, exist_ok=True)
     for slot in SLOT_NAMES:
         (prompt_dir / f"{slot}.md").write_text(f"# {slot}\n", encoding="utf-8")
-    (prompt_dir / "swarm.md").write_text("# swarm\n", encoding="utf-8")
+    (prompt_dir / "swarm_danger_map.md").write_text("# swarm danger map\n", encoding="utf-8")
+    (prompt_dir / "swarm_seed.md").write_text("# swarm seed\n", encoding="utf-8")
+    (prompt_dir / "swarm_proof.md").write_text("# swarm proof\n", encoding="utf-8")
 
 
 def _user_config_text() -> str:
@@ -78,15 +80,52 @@ def _user_config_text() -> str:
         prefer_gh = true
 
         [swarm]
-        prompt_file = "prompts/swarm.md"
         sweep_model = "gpt-5.4-mini"
         proof_model = "gpt-5.4"
         eligible_file_profile = "code_config_tests"
         token_budget = 120000
         allow_no_limit = true
+
+        [swarm.prompts]
+        danger_map = "prompts/swarm_danger_map.md"
+        seed = "prompts/swarm_seed.md"
+        proof = "prompts/swarm_proof.md"
         """
         + "\n".join(slot_blocks)
     )
+
+
+class BackgroundSequenceProvider:
+    def __init__(self, payloads: list[dict[str, object]]) -> None:
+        self._pending_payloads = list(payloads)
+        self._responses: dict[str, dict[str, object]] = {}
+        self.start_calls: list[dict[str, object]] = []
+
+    def start_background_turn(self, **kwargs):
+        if not self._pending_payloads:
+            raise AssertionError("No more background payloads prepared for test provider.")
+        response_id = f"bg_{len(self.start_calls) + 1}"
+        payload = self._pending_payloads.pop(0)
+        self._responses[response_id] = payload
+        self.start_calls.append(kwargs)
+        return ProviderBackgroundHandle(response_id=response_id)
+
+    def poll_background_turn(self, **kwargs):
+        response_id = kwargs["handle"].response_id
+        payload = self._responses.pop(response_id)
+        return BackgroundPollResult(
+            status="completed",
+            response_id=response_id,
+            final_text=json.dumps(payload),
+            tool_traces=(),
+        )
+
+    def cancel_background_turn(self, handle):
+        self._responses.pop(handle.response_id, None)
+        return "cancelled"
+
+    def classify_provider_failure(self, value):
+        return None
 
 
 class ReviewCliTests(unittest.TestCase):
@@ -585,28 +624,6 @@ class SwarmCliTests(unittest.TestCase):
         return result, stdout.getvalue()
 
     def test_swarm_generates_and_accepts_new_danger_map(self) -> None:
-        class DangerMapProvider:
-            def __init__(self) -> None:
-                self.calls = 0
-
-            def start_foreground_turn(self, **kwargs):
-                self.calls += 1
-                return ProviderTurnResult(
-                    response_id=f"resp_{self.calls}",
-                    final_text=json.dumps(
-                        {
-                            "trust_boundaries": ["api boundary"],
-                            "risky_sinks": ["sql write path"],
-                            "auth_assumptions": ["session cookie is trusted"],
-                            "hot_paths": ["app/routes.py"],
-                            "notes": ["watch org scoping"],
-                        }
-                    ),
-                    tool_traces=(),
-                    status="completed",
-                    model=kwargs["model"],
-                )
-
         with tempfile.TemporaryDirectory() as tmp_dir:
             repo_dir = Path(tmp_dir) / "repo"
             loaded = self._loaded_config(repo_dir)
@@ -614,8 +631,18 @@ class SwarmCliTests(unittest.TestCase):
             result, output = self._run_swarm(
                 repo_dir,
                 loaded,
-                DangerMapProvider(),
-                ["n", "y", "y"],
+                BackgroundSequenceProvider(
+                    [
+                        {
+                            "trust_boundaries": ["api boundary"],
+                            "risky_sinks": ["sql write path"],
+                            "auth_assumptions": ["session cookie is trusted"],
+                            "hot_paths": ["app/routes.py"],
+                            "notes": ["watch org scoping"],
+                        }
+                    ]
+                ),
+                ["n", "y", "y", "y"],
             )
 
             self.assertEqual(0, result)
@@ -624,6 +651,8 @@ class SwarmCliTests(unittest.TestCase):
             self.assertIn("Repo danger map ready:", output)
             self.assertIn("Swarm preflight", output)
             self.assertIn("Swarm startup preflight is ready.", output)
+            self.assertIn("Swarm complete.", output)
+            self.assertIn("Duplicate and case groups:", output)
 
             repo_dir_root = repo_dir / "repos" / "repo_deadbeef"
             self.assertTrue((repo_dir_root / "danger_map.md").exists())
@@ -635,39 +664,10 @@ class SwarmCliTests(unittest.TestCase):
                     "SELECT mode, status, completed_at FROM runs WHERE run_id = ?",
                     ("2026-04-06_121500",),
                 ).fetchone()
-            self.assertEqual(("swarm", "preflight_ready"), row[:2])
-            self.assertIsNone(row[2])
+            self.assertEqual(("swarm", "completed"), row[:2])
+            self.assertIsNotNone(row[2])
 
     def test_swarm_edit_regenerates_danger_map_and_appends_guidance(self) -> None:
-        class DangerMapProvider:
-            def __init__(self) -> None:
-                self.payloads = [
-                    {
-                        "trust_boundaries": ["first boundary"],
-                        "risky_sinks": ["first sink"],
-                        "auth_assumptions": ["first auth"],
-                        "hot_paths": ["first/path.py"],
-                        "notes": ["first note"],
-                    },
-                    {
-                        "trust_boundaries": ["updated boundary"],
-                        "risky_sinks": ["updated sink"],
-                        "auth_assumptions": ["updated auth"],
-                        "hot_paths": ["updated/path.py"],
-                        "notes": ["updated note"],
-                    },
-                ]
-
-            def start_foreground_turn(self, **kwargs):
-                payload = self.payloads.pop(0)
-                return ProviderTurnResult(
-                    response_id=f"resp_{len(self.payloads)}",
-                    final_text=json.dumps(payload),
-                    tool_traces=(),
-                    status="completed",
-                    model=kwargs["model"],
-                )
-
         with tempfile.TemporaryDirectory() as tmp_dir:
             repo_dir = Path(tmp_dir) / "repo"
             loaded = self._loaded_config(repo_dir)
@@ -675,8 +675,25 @@ class SwarmCliTests(unittest.TestCase):
             result, output = self._run_swarm(
                 repo_dir,
                 loaded,
-                DangerMapProvider(),
-                ["n", "e", "focus on auth boundaries", "y", "y"],
+                BackgroundSequenceProvider(
+                    [
+                        {
+                            "trust_boundaries": ["first boundary"],
+                            "risky_sinks": ["first sink"],
+                            "auth_assumptions": ["first auth"],
+                            "hot_paths": ["first/path.py"],
+                            "notes": ["first note"],
+                        },
+                        {
+                            "trust_boundaries": ["updated boundary"],
+                            "risky_sinks": ["updated sink"],
+                            "auth_assumptions": ["updated auth"],
+                            "hot_paths": ["updated/path.py"],
+                            "notes": ["updated note"],
+                        },
+                    ]
+                ),
+                ["n", "e", "focus on auth boundaries", "y", "y", "y"],
             )
 
             self.assertEqual(0, result)
@@ -691,25 +708,11 @@ class SwarmCliTests(unittest.TestCase):
             self.assertIn("focus on auth boundaries", comments)
 
     def test_swarm_refresh_reuses_saved_repo_guidance(self) -> None:
-        class DangerMapProvider:
-            def __init__(self, payloads: list[dict[str, object]]) -> None:
-                self.payloads = list(payloads)
-
-            def start_foreground_turn(self, **kwargs):
-                payload = self.payloads.pop(0)
-                return ProviderTurnResult(
-                    response_id=f"resp_{len(self.payloads)}",
-                    final_text=json.dumps(payload),
-                    tool_traces=(),
-                    status="completed",
-                    model=kwargs["model"],
-                )
-
         with tempfile.TemporaryDirectory() as tmp_dir:
             repo_dir = Path(tmp_dir) / "repo"
             loaded = self._loaded_config(repo_dir)
 
-            first_provider = DangerMapProvider(
+            first_provider = BackgroundSequenceProvider(
                 [
                     {
                         "trust_boundaries": ["first boundary"],
@@ -727,7 +730,7 @@ class SwarmCliTests(unittest.TestCase):
                     },
                 ]
             )
-            second_provider = DangerMapProvider(
+            second_provider = BackgroundSequenceProvider(
                 [
                     {
                         "trust_boundaries": ["refreshed boundary"],
@@ -743,7 +746,7 @@ class SwarmCliTests(unittest.TestCase):
                 repo_dir,
                 loaded,
                 first_provider,
-                ["n", "e", "focus on auth boundaries", "y", "y"],
+                ["n", "e", "focus on auth boundaries", "y", "y", "y"],
                 run_id="2026-04-06_121500",
             )
             self.assertEqual(0, first_result)
@@ -752,7 +755,7 @@ class SwarmCliTests(unittest.TestCase):
                 repo_dir,
                 loaded,
                 second_provider,
-                ["n", "y", "y", "y"],
+                ["n", "y", "y", "y", "y"],
                 run_id="2026-04-06_121600",
             )
 
@@ -768,24 +771,6 @@ class SwarmCliTests(unittest.TestCase):
             self.assertEqual(["focus on auth boundaries"], payload["guidance"])
 
     def test_swarm_stages_shared_resources_and_writes_preflight_artifacts(self) -> None:
-        class DangerMapProvider:
-            def start_foreground_turn(self, **kwargs):
-                return ProviderTurnResult(
-                    response_id="resp_1",
-                    final_text=json.dumps(
-                        {
-                            "trust_boundaries": ["api boundary"],
-                            "risky_sinks": ["sql write path"],
-                            "auth_assumptions": ["session cookie is trusted"],
-                            "hot_paths": ["app/routes.py"],
-                            "notes": ["watch org scoping"],
-                        }
-                    ),
-                    tool_traces=(),
-                    status="completed",
-                    model=kwargs["model"],
-                )
-
         with tempfile.TemporaryDirectory() as tmp_dir:
             repo_dir = Path(tmp_dir) / "repo"
             _write(
@@ -797,19 +782,35 @@ class SwarmCliTests(unittest.TestCase):
             result, output = self._run_swarm(
                 repo_dir,
                 loaded,
-                DangerMapProvider(),
-                ["n", "y", "y"],
+                BackgroundSequenceProvider(
+                    [
+                        {
+                            "trust_boundaries": ["api boundary"],
+                            "risky_sinks": ["sql write path"],
+                            "auth_assumptions": ["session cookie is trusted"],
+                            "hot_paths": ["app/routes.py"],
+                            "notes": ["watch org scoping"],
+                        }
+                    ]
+                ),
+                ["n", "y", "y", "y"],
             )
 
             self.assertEqual(0, result)
             self.assertIn("Swarm preflight", output)
             self.assertIn("Shared resources available for this run", output)
-            self.assertIn("Sweep execution is not implemented in this checkpoint.", output)
+            self.assertIn("Launching swarm batch...", output)
+            self.assertIn("proof-filtered findings, grouped duplicates", output)
 
             run_dir = runs_root(repo_dir) / "2026-04-06_121500"
-            self.assertTrue((run_dir / "prompts" / "swarm.md").exists())
+            self.assertTrue((run_dir / "prompts" / "swarm_danger_map.md").exists())
+            self.assertTrue((run_dir / "prompts" / "swarm_seed.md").exists())
+            self.assertTrue((run_dir / "prompts" / "swarm_proof.md").exists())
+            self.assertTrue((run_dir / "prompts" / "swarm_prompt_bundle.json").exists())
             self.assertTrue((run_dir / "resources" / "shared" / "manifest.md").exists())
             self.assertTrue((run_dir / "derived_context" / "swarm_digest.md").exists())
+            self.assertTrue((run_dir / "swarm" / "reports" / "case_groups.md").exists())
+            self.assertTrue((run_dir / "swarm" / "reports" / "final_summary.md").exists())
 
             shared_manifest = (run_dir / "resources" / "shared" / "manifest.md").read_text(
                 encoding="utf-8"
@@ -823,26 +824,9 @@ class SwarmCliTests(unittest.TestCase):
             self.assertIn("shared-reference", shared_manifest)
             self.assertIn("Eligible file count", swarm_digest)
             self.assertEqual("swarm", run_json["mode"])
+            self.assertIn("prompt_bundle", run_json["swarm"])
 
     def test_swarm_preflight_failure_marks_run_failed(self) -> None:
-        class DangerMapProvider:
-            def start_foreground_turn(self, **kwargs):
-                return ProviderTurnResult(
-                    response_id="resp_1",
-                    final_text=json.dumps(
-                        {
-                            "trust_boundaries": ["api boundary"],
-                            "risky_sinks": ["sql write path"],
-                            "auth_assumptions": ["session cookie is trusted"],
-                            "hot_paths": ["app/routes.py"],
-                            "notes": ["watch org scoping"],
-                        }
-                    ),
-                    tool_traces=(),
-                    status="completed",
-                    model=kwargs["model"],
-                )
-
         with tempfile.TemporaryDirectory() as tmp_dir:
             repo_dir = Path(tmp_dir) / "repo"
             loaded = self._loaded_config(repo_dir)
@@ -860,7 +844,17 @@ class SwarmCliTests(unittest.TestCase):
                 mock.patch("cli._make_run_id", return_value="2026-04-06_121500"),
                 mock.patch(
                     "cli.OpenAIResponsesProvider.from_loaded_config",
-                    return_value=DangerMapProvider(),
+                    return_value=BackgroundSequenceProvider(
+                        [
+                            {
+                                "trust_boundaries": ["api boundary"],
+                                "risky_sinks": ["sql write path"],
+                                "auth_assumptions": ["session cookie is trusted"],
+                                "hot_paths": ["app/routes.py"],
+                                "notes": ["watch org scoping"],
+                            }
+                        ]
+                    ),
                 ),
                 mock.patch("cli.resolve_repo_identity", return_value=identity),
                 mock.patch("swarm.resolve_repo_identity", return_value=identity),
@@ -870,7 +864,7 @@ class SwarmCliTests(unittest.TestCase):
                 ),
                 mock.patch(
                     "builtins.input",
-                    side_effect=self._input_mock(["n", "y", "y"], stdout),
+                    side_effect=self._input_mock(["n", "y", "y", "y"], stdout),
                 ),
                 mock.patch("sys.stdout", stdout),
             ):
@@ -887,24 +881,6 @@ class SwarmCliTests(unittest.TestCase):
             self.assertIsNotNone(row[1])
 
     def test_swarm_preflight_handles_git_tracked_symlink_entries(self) -> None:
-        class DangerMapProvider:
-            def start_foreground_turn(self, **kwargs):
-                return ProviderTurnResult(
-                    response_id="resp_1",
-                    final_text=json.dumps(
-                        {
-                            "trust_boundaries": ["api boundary"],
-                            "risky_sinks": ["sql write path"],
-                            "auth_assumptions": ["session cookie is trusted"],
-                            "hot_paths": ["app/link.py"],
-                            "notes": ["watch symlink handling"],
-                        }
-                    ),
-                    tool_traces=(),
-                    status="completed",
-                    model=kwargs["model"],
-                )
-
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
             repo_dir = root / "repo"
@@ -919,8 +895,26 @@ class SwarmCliTests(unittest.TestCase):
                 result, output = self._run_swarm(
                     repo_dir,
                     loaded,
-                    DangerMapProvider(),
-                    ["n", "y", "y"],
+                    BackgroundSequenceProvider(
+                        [
+                            {
+                                "trust_boundaries": ["api boundary"],
+                                "risky_sinks": ["sql write path"],
+                                "auth_assumptions": ["session cookie is trusted"],
+                                "hot_paths": ["app/link.py"],
+                                "notes": ["watch symlink handling"],
+                            },
+                            {
+                                "outcome": "no_finding",
+                                "severity_bucket": "none",
+                                "claim": "",
+                                "evidence": [],
+                                "related_files": [],
+                                "notes": [],
+                            },
+                        ]
+                    ),
+                    ["n", "y", "y", "y"],
                 )
 
             self.assertEqual(0, result)
@@ -935,8 +929,14 @@ class SwarmCliTests(unittest.TestCase):
 
     def test_swarm_generation_failure_marks_run_failed_and_returns_error(self) -> None:
         class FailingDangerMapProvider:
-            def start_foreground_turn(self, **kwargs):
+            def start_background_turn(self, **kwargs):
                 raise RuntimeError("synthetic swarm failure")
+
+            def cancel_background_turn(self, handle):
+                return "cancelled"
+
+            def classify_provider_failure(self, value):
+                return None
 
         with tempfile.TemporaryDirectory() as tmp_dir:
             repo_dir = Path(tmp_dir) / "repo"
@@ -950,7 +950,10 @@ class SwarmCliTests(unittest.TestCase):
             )
 
             self.assertEqual(1, result)
-            self.assertIn("Swarm startup failed: synthetic swarm failure", output)
+            self.assertIn(
+                "Swarm startup failed: Swarm worker failure: danger_map (repo:repo_deadbeef): synthetic swarm failure",
+                output,
+            )
             with sqlite3.connect(repo_dir / "state" / "awdit.db") as connection:
                 row = connection.execute(
                     "SELECT status FROM runs WHERE run_id = ?",

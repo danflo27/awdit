@@ -39,9 +39,11 @@ from state_db import insert_run, update_run_status
 from swarm import (
     append_repo_guidance,
     display_repo_path,
+    freeze_swarm_prompt_bundle,
     generate_danger_map,
     list_eligible_swarm_files,
     load_danger_map_result,
+    run_swarm_sweep,
 )
 
 
@@ -68,7 +70,7 @@ class SwarmStartupSnapshot:
     run_dir: Path
     run_json: Path
     prompts_dir: Path
-    prompt_snapshot: Path
+    prompt_bundle_manifest: Path
     shared_manifest: Path
     swarm_digest: Path
 
@@ -205,10 +207,12 @@ def _handle_swarm(_: argparse.Namespace) -> int:
         current, _ = _run_config_override_menu(loaded)
 
     try:
+        prompt_bundle = freeze_swarm_prompt_bundle(run_dir=run_dir, loaded=current)
         result = _prepare_swarm_danger_map(
             cwd=cwd,
             loaded=current,
             provider=provider,
+            prompt_bundle=prompt_bundle,
             repo_key=identity.repo_key,
         )
         effective_resources = _build_effective_resource_defaults(current, cwd)
@@ -232,6 +236,7 @@ def _handle_swarm(_: argparse.Namespace) -> int:
             shared_resources=shared_resources,
             danger_map_result=result,
             eligible_files=eligible_files,
+            prompt_bundle=prompt_bundle,
         )
         _print_swarm_preflight(current, snapshot, result, eligible_files)
 
@@ -253,7 +258,59 @@ def _handle_swarm(_: argparse.Namespace) -> int:
 
     print("")
     print("Swarm startup preflight is ready.")
-    print("Sweep execution is not implemented in this checkpoint.")
+    if not _confirm("Launch swarm?", default=True):
+        update_run_status(
+            cwd=cwd,
+            run_id=run_id,
+            status="canceled",
+            completed=True,
+        )
+        print("Swarm canceled before launch.")
+        return 0
+
+    try:
+        print("Launching swarm batch...")
+        print(f"Sweep stage started: {len(eligible_files)} file workers queued.")
+        sweep_result = run_swarm_sweep(
+            cwd=cwd,
+            loaded=current,
+            provider=provider,
+            prompt_bundle=prompt_bundle,
+            run_dir=run_dir,
+            swarm_digest_path=snapshot.swarm_digest,
+            shared_manifest_path=snapshot.shared_manifest,
+            eligible_files=eligible_files,
+        )
+        update_run_status(
+            cwd=cwd,
+            run_id=run_id,
+            status="completed",
+            completed=True,
+        )
+    except Exception as exc:
+        update_run_status(
+            cwd=cwd,
+            run_id=run_id,
+            status="failed",
+            completed=True,
+        )
+        print(f"Swarm execution failed: {exc}")
+        return 1
+
+    print("")
+    print("Swarm complete.")
+    print("")
+    print("Final artifacts")
+    print("  Ranked findings:")
+    print(f"    {sweep_result.final_ranked_findings}")
+    print("  Seed ledger:")
+    print(f"    {sweep_result.seed_ledger}")
+    print("  Duplicate and case groups:")
+    print(f"    {sweep_result.case_groups}")
+    print("  Proof artifacts:")
+    print(f"    {sweep_result.proofs_dir}")
+    print("  Shared resource manifest:")
+    print(f"    {snapshot.shared_manifest}")
     return 0
 
 
@@ -262,6 +319,7 @@ def _prepare_swarm_danger_map(
     cwd: Path,
     loaded,
     provider: OpenAIResponsesProvider,
+    prompt_bundle,
     repo_key: str,
 ):
     identity = resolve_repo_identity(cwd)
@@ -271,7 +329,12 @@ def _prepare_swarm_danger_map(
     if result is None:
         print("No repo danger map exists for this repository yet.")
         print("Swarm mode requires a repo danger map before launch.")
-        result = _generate_swarm_danger_map(cwd=cwd, loaded=loaded, provider=provider)
+        result = _generate_swarm_danger_map(
+            cwd=cwd,
+            loaded=loaded,
+            provider=provider,
+            prompt_bundle=prompt_bundle,
+        )
         print("")
         print("Repo danger map ready:")
         print(f"  {result.danger_map_md}")
@@ -282,7 +345,12 @@ def _prepare_swarm_danger_map(
             "Refresh repo danger map before swarm startup?",
             default=True,
         ):
-            result = _generate_swarm_danger_map(cwd=cwd, loaded=loaded, provider=provider)
+            result = _generate_swarm_danger_map(
+                cwd=cwd,
+                loaded=loaded,
+                provider=provider,
+                prompt_bundle=prompt_bundle,
+            )
             print("")
             print("Updated repo danger map ready:")
             print(f"  {result.danger_map_md}")
@@ -307,6 +375,7 @@ def _prepare_swarm_danger_map(
                 cwd=cwd,
                 loaded=loaded,
                 provider=provider,
+                prompt_bundle=prompt_bundle,
                 guidance_notes=guidance_notes,
             )
             print("")
@@ -314,7 +383,12 @@ def _prepare_swarm_danger_map(
             print(f"  {result.danger_map_md}")
             continue
         if choice == "n":
-            result = _generate_swarm_danger_map(cwd=cwd, loaded=loaded, provider=provider)
+            result = _generate_swarm_danger_map(
+                cwd=cwd,
+                loaded=loaded,
+                provider=provider,
+                prompt_bundle=prompt_bundle,
+            )
             print("")
             print("Updated repo danger map ready:")
             print(f"  {result.danger_map_md}")
@@ -327,6 +401,7 @@ def _generate_swarm_danger_map(
     cwd: Path,
     loaded,
     provider: OpenAIResponsesProvider,
+    prompt_bundle,
     guidance_notes: tuple[str, ...] = (),
 ):
     print("Generating repo danger map...")
@@ -334,6 +409,7 @@ def _generate_swarm_danger_map(
         cwd=cwd,
         loaded=loaded,
         provider=provider,
+        prompt_bundle=prompt_bundle,
         guidance_notes=guidance_notes,
     )
 
@@ -366,6 +442,7 @@ def _persist_swarm_startup_snapshot(
     shared_resources: tuple[str, ...],
     danger_map_result,
     eligible_files: list[Path],
+    prompt_bundle,
 ) -> SwarmStartupSnapshot:
     prompts_dir = run_dir / "prompts"
     derived_context_dir = run_dir / "derived_context"
@@ -377,9 +454,6 @@ def _persist_swarm_startup_snapshot(
 
     if loaded.effective.swarm is None:
         raise RuntimeError("Swarm config is not available.")
-
-    prompt_snapshot = prompts_dir / "swarm.md"
-    shutil.copy2(loaded.effective.swarm.prompt_file, prompt_snapshot)
 
     shared_records = _stage_resource_items(shared_resources, shared_dir / "staged")
     shared_manifest = shared_dir / "manifest.md"
@@ -410,7 +484,7 @@ def _persist_swarm_startup_snapshot(
                     "eligible_file_profile": loaded.effective.swarm.eligible_file_profile,
                     "token_budget": loaded.effective.swarm.token_budget,
                     "allow_no_limit": loaded.effective.swarm.allow_no_limit,
-                    "prompt_snapshot": str(prompt_snapshot),
+                    "prompt_bundle": prompt_bundle.to_dict(),
                 },
                 "resources": {
                     "shared": list(shared_resources),
@@ -432,7 +506,7 @@ def _persist_swarm_startup_snapshot(
         run_dir=run_dir,
         run_json=run_json,
         prompts_dir=prompts_dir,
-        prompt_snapshot=prompt_snapshot,
+        prompt_bundle_manifest=prompt_bundle.manifest_path,
         shared_manifest=shared_manifest,
         swarm_digest=swarm_digest,
     )
@@ -497,13 +571,15 @@ def _print_swarm_preflight(loaded, snapshot, danger_map_result, eligible_files: 
         print(f"  Token budget: {loaded.effective.swarm.token_budget}")
     print(f"  Sweep model: {loaded.effective.swarm.sweep_model}")
     print(f"  Proof model: {loaded.effective.swarm.proof_model}")
-    print("  Final report style: ranked seed findings")
+    print("  Final report style: proof-filtered findings, grouped duplicates")
     print("  Repo danger map:")
     print(f"    {danger_map_result.danger_map_md}")
     print("  Shared resource manifest:")
     print(f"    {snapshot.shared_manifest}")
     print("  Swarm digest:")
     print(f"    {snapshot.swarm_digest}")
+    print("  Prompt bundle manifest:")
+    print(f"    {snapshot.prompt_bundle_manifest}")
 
 
 def _handle_list_models(_: argparse.Namespace) -> int:

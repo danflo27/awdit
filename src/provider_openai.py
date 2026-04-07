@@ -77,6 +77,8 @@ class OpenAIResponsesProvider:
         previous_response_id: str | None,
         tools: Iterable[dict[str, Any]],
         tool_executor: ToolExecutor,
+        text_format: dict[str, Any] | None = None,
+        prompt_cache_key: str | None = None,
         event_callback: ProviderEventCallback | None = None,
     ) -> ProviderTurnResult:
         current_input: Any = input_text
@@ -92,6 +94,8 @@ class OpenAIResponsesProvider:
                 instructions=current_instructions,
                 input=current_input,
                 previous_response_id=current_previous_response_id,
+                text={"format": text_format} if text_format is not None else NOT_GIVEN,
+                prompt_cache_key=prompt_cache_key if prompt_cache_key is not None else NOT_GIVEN,
                 tools=list(tools),
                 store=True,
             ) as stream:
@@ -163,6 +167,8 @@ class OpenAIResponsesProvider:
         input_text: str,
         previous_response_id: str | None,
         tools: Iterable[dict[str, Any]],
+        text_format: dict[str, Any] | None = None,
+        prompt_cache_key: str | None = None,
     ) -> ProviderBackgroundHandle:
         response = self._client.responses.create(
             model=model,
@@ -170,6 +176,8 @@ class OpenAIResponsesProvider:
             instructions=instructions,
             input=input_text,
             previous_response_id=previous_response_id,
+            text={"format": text_format} if text_format is not None else NOT_GIVEN,
+            prompt_cache_key=prompt_cache_key if prompt_cache_key is not None else NOT_GIVEN,
             tools=list(tools),
             background=True,
             store=True,
@@ -183,6 +191,7 @@ class OpenAIResponsesProvider:
         model: str,
         tools: Iterable[dict[str, Any]],
         tool_executor: ToolExecutor,
+        text_format: dict[str, Any] | None = None,
         event_callback: ProviderEventCallback | None = None,
     ) -> BackgroundPollResult:
         response = self._client.responses.retrieve(handle.response_id)
@@ -238,6 +247,7 @@ class OpenAIResponsesProvider:
                 model=model,
                 previous_response_id=response_id,
                 input=tool_outputs,
+                text={"format": text_format} if text_format is not None else NOT_GIVEN,
                 tools=list(tools),
                 background=True,
                 store=True,
@@ -256,6 +266,10 @@ class OpenAIResponsesProvider:
             final_text=final_text,
             tool_traces=(),
         )
+
+    def cancel_background_turn(self, handle: ProviderBackgroundHandle) -> str:
+        response = self._client.responses.cancel(handle.response_id)
+        return str(getattr(response, "status", "unknown"))
 
     def classify_provider_failure(self, value: Any) -> str | None:
         if isinstance(value, BaseException):
@@ -333,6 +347,9 @@ class OpenAIResponsesProvider:
         return tool_outputs, tool_traces
 
     def _response_text(self, response: Any, stream_text: str) -> str:
+        refusal = self._extract_refusal_text(response)
+        if refusal:
+            raise RuntimeError(f"provider refusal: {refusal}")
         output_text = getattr(response, "output_text", None)
         if isinstance(output_text, str) and output_text:
             return output_text
@@ -346,6 +363,24 @@ class OpenAIResponsesProvider:
                 if isinstance(text, str) and text:
                     text_blocks.append(text)
         return "\n".join(text_blocks).strip()
+
+    def _extract_refusal_text(self, response: Any) -> str | None:
+        output = getattr(response, "output", None) or []
+        for item in output:
+            refusal = getattr(item, "refusal", None)
+            if isinstance(refusal, str) and refusal.strip():
+                return refusal.strip()
+            content = getattr(item, "content", None) or []
+            for block in content:
+                refusal = getattr(block, "refusal", None)
+                if isinstance(refusal, str) and refusal.strip():
+                    return refusal.strip()
+                if getattr(block, "type", "") != "refusal":
+                    continue
+                text = getattr(block, "text", None)
+                if isinstance(text, str) and text.strip():
+                    return text.strip()
+        return None
 
     def _emit_usage_event(
         self,
