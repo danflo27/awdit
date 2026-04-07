@@ -93,11 +93,11 @@ auto_update_on_completion = true
 
 [resources.shared]
 include = [
-  "README.md",
-  "docs/architecture.md",
-  "docs/agent-isolation-workflow.md",
-  "docs/PROPOSED_FILE_STRUCTURE_CONFIG_BEHAVIOUR.txt",
-  "docs/e2e-cli-walkthrough.txt",
+  "../README.md",
+  "../docs/architecture.md",
+  "../docs/agent-isolation-workflow.md",
+  "../docs/PROPOSED_FILE_STRUCTURE_CONFIG_BEHAVIOUR.txt",
+  "../docs/e2e-cli-walkthrough.txt",
 ]
 exclude = []
 

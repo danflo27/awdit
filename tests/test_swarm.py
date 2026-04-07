@@ -5,14 +5,17 @@ import tempfile
 import textwrap
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from config import load_effective_config
 from provider_openai import BackgroundPollResult, ProviderBackgroundHandle
 from swarm import (
+    RepoReadOnlyTools,
     SwarmSeedResult,
     SwarmWorkerJob,
     freeze_swarm_prompt_bundle,
     generate_danger_map,
+    list_eligible_swarm_files,
     promote_issue_candidates,
     run_background_swarm_workers,
     run_swarm_sweep,
@@ -491,6 +494,89 @@ class SwarmTests(unittest.TestCase):
             self.assertIn("debug-only branch", ranked)
             self.assertIn("- Written proofs: `1`", summary)
             self.assertIn("- Findings kept after proof: `0`", summary)
+
+    def test_swarm_filters_contradictory_reportable_written_proof(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_dir = Path(tmp_dir) / "repo"
+            _write(repo_dir / "app" / "service.py", "print('hello')\n")
+            loaded = self._loaded_config(repo_dir)
+            run_dir = repo_dir / "runs" / "run_1"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            prompt_bundle = freeze_swarm_prompt_bundle(run_dir=run_dir, loaded=loaded)
+
+            swarm_digest = run_dir / "derived_context" / "swarm_digest.md"
+            shared_manifest = run_dir / "resources" / "shared" / "manifest.md"
+            _write(swarm_digest, "# digest\n")
+            _write(shared_manifest, "# shared\n")
+
+            provider = SequenceProvider(
+                [
+                    {
+                        "outcome": "finding",
+                        "severity_bucket": "medium",
+                        "claim": "Possible auth bypass.",
+                        "evidence": ["app/service.py:1"],
+                        "related_files": [],
+                        "notes": [],
+                    },
+                    {
+                        "outcome": "reportable",
+                        "proof_state": "written_proof",
+                        "claim": "Possible auth bypass.",
+                        "summary": "This does not meet the report bar and is only a hardening concern.",
+                        "preconditions": ["Debug mode enabled."],
+                        "repro_steps": ["Inspect the local-only branch."],
+                        "citations": ["app/service.py:1"],
+                        "notes": ["Theoretical only."],
+                        "filter_reason": "",
+                    },
+                ]
+            )
+
+            result = run_swarm_sweep(
+                cwd=repo_dir,
+                loaded=loaded,
+                provider=provider,
+                prompt_bundle=prompt_bundle,
+                run_dir=run_dir,
+                swarm_digest_path=swarm_digest,
+                shared_manifest_path=shared_manifest,
+                eligible_files=[(repo_dir / "app" / "service.py").resolve()],
+            )
+
+            proof_result = result.proof_results[0]
+            ranked = result.final_ranked_findings.read_text(encoding="utf-8")
+            summary = result.final_summary.read_text(encoding="utf-8")
+            self.assertEqual("not_reportable", proof_result.outcome)
+            self.assertEqual("path_grounded", proof_result.proof_state)
+            self.assertIn("proof summary contradicts reportable outcome", proof_result.filter_reason)
+            self.assertIn("No findings cleared the proof-stage report bar.", ranked)
+            self.assertIn("contradicts reportable outcome", ranked)
+            self.assertIn("- Proof stage mode: `read-only validation`", summary)
+
+    def test_repo_tools_reject_tracked_symlink_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            repo_dir = root / "repo"
+            outside_file = root / "shared" / "linked.py"
+            _write(outside_file, "print('linked')\n")
+            (repo_dir / "app").mkdir(parents=True, exist_ok=True)
+            (repo_dir / "app" / "link.py").symlink_to(outside_file)
+            loaded = self._loaded_config(repo_dir)
+            tools = RepoReadOnlyTools(
+                cwd=repo_dir,
+                scope_include=loaded.effective.scope.include,
+                scope_exclude=loaded.effective.scope.exclude,
+            )
+
+            git_result = mock.Mock(returncode=0, stdout="app/link.py\n")
+            with mock.patch("swarm.subprocess.run", return_value=git_result):
+                self.assertEqual([], list_eligible_swarm_files(repo_dir, loaded))
+                listing = json.loads(tools.run("list_scope_files", {}))
+
+                self.assertEqual(0, listing["count"])
+                with self.assertRaisesRegex(RuntimeError, "outside the configured readable repo scope"):
+                    tools.run("read_file", {"path": "app/link.py"})
 
     def test_background_scheduler_serializes_duplicate_lease_keys(self) -> None:
         provider = SequenceProvider(

@@ -10,7 +10,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from cli import main
+from cli import _allocate_run_dir, main
 from config import SLOT_NAMES, load_effective_config
 from paths import runs_root
 from provider_openai import BackgroundPollResult, ProviderBackgroundHandle, ProviderTurnResult
@@ -152,6 +152,31 @@ class ReviewCliTests(unittest.TestCase):
         _write_prompt_tree(config_dir)
         _write(config_path, _user_config_text())
         _write(repo_dir / "config" / "manual" / "hunter-note.md", "manual hunter note")
+        return load_effective_config(
+            cwd=repo_dir,
+            config_path=config_path,
+            env={"OPENAI_API_KEY": "token"},
+        )
+
+    def _loaded_config_from_text(self, repo_dir: Path, config_text: str):
+        config_dir = repo_dir / "config"
+        config_path = config_dir / "config.toml"
+
+        _write_prompt_tree(config_dir)
+        _write(config_path, config_text)
+        _write(repo_dir / "config" / "manual" / "hunter-note.md", "manual hunter note")
+        return load_effective_config(
+            cwd=repo_dir,
+            config_path=config_path,
+            env={"OPENAI_API_KEY": "token"},
+        )
+
+    def _loaded_config_from_text(self, repo_dir: Path, config_text: str):
+        config_dir = repo_dir / "config"
+        config_path = config_dir / "config.toml"
+
+        _write_prompt_tree(config_dir)
+        _write(config_path, config_text)
         return load_effective_config(
             cwd=repo_dir,
             config_path=config_path,
@@ -506,6 +531,24 @@ class ReviewCliTests(unittest.TestCase):
             self.assertTrue((run_dir / "prompts" / "hunter_1.md").exists())
             self.assertIn("prompt_snapshot", run_json["slots"]["hunter_1"])
 
+    def test_review_blocks_missing_local_shared_resources(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_dir = Path(tmp_dir) / "repo"
+            loaded = self._loaded_config_from_text(
+                repo_dir,
+                _user_config_text().replace(
+                    'include = ["https://example.com/shared-reference"]',
+                    'include = ["missing/shared-note.md"]',
+                ),
+            )
+
+            result, output = self._run_review(repo_dir, loaded, ["n", "y", "n"])
+
+            self.assertEqual(0, result)
+            self.assertIn("Cannot continue with missing local resources:", output)
+            self.assertIn("Review canceled before launch.", output)
+            self.assertFalse((runs_root(repo_dir) / "2026-03-29_101530").exists())
+
     def test_review_edit_replaces_effective_lists_for_the_run(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             repo_dir = Path(tmp_dir) / "repo"
@@ -593,6 +636,19 @@ class SwarmCliTests(unittest.TestCase):
             env={"OPENAI_API_KEY": "token"},
         )
 
+    def _loaded_config_from_text(self, repo_dir: Path, config_text: str):
+        config_dir = repo_dir / "config"
+        config_path = config_dir / "config.toml"
+
+        _write_prompt_tree(config_dir)
+        _write(config_path, config_text)
+        _write(repo_dir / "config" / "manual" / "hunter-note.md", "manual hunter note")
+        return load_effective_config(
+            cwd=repo_dir,
+            config_path=config_path,
+            env={"OPENAI_API_KEY": "token"},
+        )
+
     def _run_swarm(
         self,
         repo_dir: Path,
@@ -622,6 +678,18 @@ class SwarmCliTests(unittest.TestCase):
         ):
             result = main(["swarm"])
         return result, stdout.getvalue()
+
+    def test_allocate_run_dir_retries_until_unique(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_dir = Path(tmp_dir) / "repo"
+            (runs_root(repo_dir) / "duplicate").mkdir(parents=True, exist_ok=True)
+
+            with mock.patch("cli._make_run_id", side_effect=["duplicate", "duplicate", "unique"]):
+                run_id, run_dir = _allocate_run_dir(repo_dir)
+
+            self.assertEqual("unique", run_id)
+            self.assertEqual(runs_root(repo_dir) / "unique", run_dir)
+            self.assertTrue(run_dir.exists())
 
     def test_swarm_generates_and_accepts_new_danger_map(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -798,8 +866,9 @@ class SwarmCliTests(unittest.TestCase):
 
             self.assertEqual(0, result)
             self.assertIn("Swarm preflight", output)
-            self.assertIn("Shared resources available for this run", output)
+            self.assertIn("Shared resources selected for this run", output)
             self.assertIn("Launching swarm batch...", output)
+            self.assertIn("Proof stage: read-only validation", output)
             self.assertIn("proof-filtered findings, grouped duplicates", output)
 
             run_dir = runs_root(repo_dir) / "2026-04-06_121500"
@@ -825,6 +894,90 @@ class SwarmCliTests(unittest.TestCase):
             self.assertIn("Eligible file count", swarm_digest)
             self.assertEqual("swarm", run_json["mode"])
             self.assertIn("prompt_bundle", run_json["swarm"])
+
+    def test_swarm_blocks_missing_local_shared_resources_before_preflight(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_dir = Path(tmp_dir) / "repo"
+            loaded = self._loaded_config_from_text(
+                repo_dir,
+                _user_config_text().replace(
+                    'include = ["https://example.com/shared-reference"]',
+                    'include = ["missing/shared-note.md"]',
+                ),
+            )
+
+            result, output = self._run_swarm(
+                repo_dir,
+                loaded,
+                BackgroundSequenceProvider(
+                    [
+                        {
+                            "trust_boundaries": ["api boundary"],
+                            "risky_sinks": ["sql write path"],
+                            "auth_assumptions": ["session cookie is trusted"],
+                            "hot_paths": ["app/routes.py"],
+                            "notes": ["watch org scoping"],
+                        }
+                    ]
+                ),
+                ["n", "y", "y", "n"],
+            )
+
+            self.assertEqual(0, result)
+            self.assertIn("Cannot continue with missing local resources:", output)
+            self.assertIn("Swarm canceled before launch.", output)
+            self.assertNotIn("Swarm preflight", output)
+
+            with sqlite3.connect(repo_dir / "state" / "awdit.db") as connection:
+                row = connection.execute(
+                    "SELECT status FROM runs WHERE run_id = ?",
+                    ("2026-04-06_121500",),
+                ).fetchone()
+            self.assertEqual(("canceled",), row)
+
+    def test_swarm_stages_config_relative_docs_without_missing_entries(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_dir = Path(tmp_dir) / "repo"
+            _write(repo_dir / "docs" / "architecture.md", "architecture")
+            _write(repo_dir / "docs" / "agent-isolation-workflow.md", "workflow")
+            _write(
+                repo_dir / "docs" / "PROPOSED_FILE_STRUCTURE_CONFIG_BEHAVIOUR.txt",
+                "structure",
+            )
+            config_text = _user_config_text().replace(
+                'include = ["https://example.com/shared-reference"]',
+                'include = ["../docs/architecture.md", "../docs/agent-isolation-workflow.md", "../docs/PROPOSED_FILE_STRUCTURE_CONFIG_BEHAVIOUR.txt"]',
+            )
+            loaded = self._loaded_config_from_text(repo_dir, config_text)
+
+            result, output = self._run_swarm(
+                repo_dir,
+                loaded,
+                BackgroundSequenceProvider(
+                    [
+                        {
+                            "trust_boundaries": ["api boundary"],
+                            "risky_sinks": ["sql write path"],
+                            "auth_assumptions": ["session cookie is trusted"],
+                            "hot_paths": ["app/routes.py"],
+                            "notes": ["watch org scoping"],
+                        }
+                    ]
+                ),
+                ["n", "y", "y", "y"],
+            )
+
+            self.assertEqual(0, result)
+            self.assertIn("Shared resources selected for this run", output)
+
+            run_dir = runs_root(repo_dir) / "2026-04-06_121500"
+            shared_manifest = (run_dir / "resources" / "shared" / "manifest.md").read_text(
+                encoding="utf-8"
+            )
+            self.assertIn("architecture.md", shared_manifest)
+            self.assertIn("agent-isolation-workflow.md", shared_manifest)
+            self.assertIn("PROPOSED_FILE_STRUCTURE_CONFIG_BEHAVIOUR.txt", shared_manifest)
+            self.assertNotIn("(missing)", shared_manifest)
 
     def test_swarm_preflight_failure_marks_run_failed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -880,7 +1033,7 @@ class SwarmCliTests(unittest.TestCase):
             self.assertEqual("failed", row[0])
             self.assertIsNotNone(row[1])
 
-    def test_swarm_preflight_handles_git_tracked_symlink_entries(self) -> None:
+    def test_swarm_preflight_excludes_git_tracked_symlink_entries(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
             repo_dir = root / "repo"
@@ -904,28 +1057,20 @@ class SwarmCliTests(unittest.TestCase):
                                 "hot_paths": ["app/link.py"],
                                 "notes": ["watch symlink handling"],
                             },
-                            {
-                                "outcome": "no_finding",
-                                "severity_bucket": "none",
-                                "claim": "",
-                                "evidence": [],
-                                "related_files": [],
-                                "notes": [],
-                            },
                         ]
                     ),
                     ["n", "y", "y", "y"],
                 )
 
             self.assertEqual(0, result)
-            self.assertIn("Eligible files discovered: 1", output)
+            self.assertIn("Eligible files discovered: 0", output)
 
             run_json = json.loads(
                 ((runs_root(repo_dir) / "2026-04-06_121500") / "run.json").read_text(
                     encoding="utf-8"
                 )
             )
-            self.assertEqual(["app/link.py"], run_json["eligible_files"])
+            self.assertEqual([], run_json["eligible_files"])
 
     def test_swarm_generation_failure_marks_run_failed_and_returns_error(self) -> None:
         class FailingDangerMapProvider:

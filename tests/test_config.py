@@ -18,7 +18,7 @@ from config import (
     resolve_resource_section_items,
     save_repo_overrides,
 )
-from repo_memory import resolve_repo_identity
+from repo_memory import legacy_repo_key, migrate_legacy_repo_memory_dir, resolve_repo_identity
 from state_db import ensure_state_db, insert_run, update_run_status
 
 
@@ -546,6 +546,32 @@ class ConfigTests(unittest.TestCase):
                 ),
             )
 
+    def test_resource_auto_discovery_ignores_symlinked_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            repo_dir = root / "repo"
+            repo_config = repo_dir / "config" / "config.toml"
+
+            _write_prompt_tree(repo_dir / "config")
+            _write(repo_config, _user_config_text())
+
+            shared_dir = default_shared_resources_path(repo_dir)
+            outside_file = root / "outside" / "secret.md"
+            _write(outside_file, "secret")
+            _write(shared_dir / "kept.md", "kept")
+            (shared_dir / "linked.md").symlink_to(outside_file)
+
+            loaded = load_effective_config(
+                cwd=repo_dir,
+                config_path=repo_config,
+                env={"OPENAI_API_KEY": "token"},
+            )
+
+            self.assertEqual(
+                ((shared_dir / "kept.md").resolve(),),
+                discover_resource_files(shared_dir, exclude=loaded.effective.resources.shared.exclude),
+            )
+
     def test_repo_identity_prefers_remote_url(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             repo_dir = Path(tmp_dir) / "repo"
@@ -558,6 +584,7 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual("git_remote", identity.source_kind)
             self.assertEqual("https://example.com/acme/repo.git", identity.source_value)
             self.assertTrue(identity.repo_key.startswith("repo_"))
+            self.assertEqual(37, len(identity.repo_key))
 
     def test_repo_identity_falls_back_to_repo_path(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -570,6 +597,26 @@ class ConfigTests(unittest.TestCase):
 
             self.assertEqual("repo_path", identity.source_kind)
             self.assertEqual(str(repo_dir.resolve()), identity.source_value)
+
+    def test_repo_identity_migrates_legacy_repo_memory_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_dir = Path(tmp_dir) / "repo"
+            repo_dir.mkdir(parents=True)
+
+            result = mock.Mock(returncode=0, stdout="https://example.com/acme/repo.git\n")
+            with mock.patch("repo_memory.subprocess.run", return_value=result):
+                identity = resolve_repo_identity(repo_dir)
+
+            legacy_dir = repo_dir / "repos" / legacy_repo_key(identity)
+            _write(legacy_dir / "danger_map.md", "legacy map")
+            _write(legacy_dir / "memory" / "repo_comments.md", "legacy comments")
+
+            migrate_legacy_repo_memory_dir(repo_dir, identity)
+
+            current_dir = repo_dir / "repos" / identity.repo_key
+            self.assertTrue((current_dir / "danger_map.md").exists())
+            self.assertTrue((current_dir / "memory" / "repo_comments.md").exists())
+            self.assertFalse(legacy_dir.exists())
 
     def test_state_db_tracks_run_lifecycle(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

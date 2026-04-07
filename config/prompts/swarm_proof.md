@@ -10,6 +10,8 @@ Rules:
 - prefer executable proof when feasible
 - otherwise provide a tight written exploit path with explicit preconditions and citations
 - filter out findings that remain merely suspicious
+- only mark `outcome=reportable` when the issue clearly clears the final report bar
+- if the issue is theoretical, hardening-only, insufficiently proven, or does not clear the report bar, set `outcome=not_reportable`
 - do not invent files, routes, flags, or behaviors
 
 Output expectations:

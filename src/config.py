@@ -235,6 +235,8 @@ def discover_resource_files(
         return ()
     discovered: list[Path] = []
     for path in sorted(base_dir.rglob("*")):
+        if path.is_symlink():
+            continue
         if not path.is_file():
             continue
         relative = path.relative_to(base_dir)

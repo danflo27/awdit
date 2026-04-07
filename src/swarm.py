@@ -16,7 +16,12 @@ from provider_openai import (
     ProviderTurnResult,
     ToolTraceRecord,
 )
-from repo_memory import RepoIdentity, danger_map_paths, resolve_repo_identity
+from repo_memory import (
+    RepoIdentity,
+    danger_map_paths,
+    migrate_legacy_repo_memory_dir,
+    resolve_repo_identity,
+)
 
 CODE_EXTENSIONS = {
     ".c",
@@ -75,6 +80,13 @@ PROOF_STATE_VALUES = (
     "executed_proof",
 )
 REPORTABLE_PROOF_STATES = {"written_proof", "executed_proof"}
+PROOF_CONTRADICTION_PHRASES = (
+    "not reportable",
+    "does not meet the report bar",
+    "insufficient proof",
+    "theoretical only",
+    "hardening concern",
+)
 
 
 @dataclass(frozen=True)
@@ -531,6 +543,7 @@ def generate_danger_map(
         raise RuntimeError("Swarm config is not available.")
 
     identity = resolve_repo_identity(cwd)
+    migrate_legacy_repo_memory_dir(cwd, identity)
     artifact_paths = danger_map_paths(cwd, identity.repo_key)
     artifact_paths["memory_dir"].mkdir(parents=True, exist_ok=True)
     _ensure_repo_comments_file(artifact_paths["repo_comments_md"])
@@ -819,6 +832,13 @@ def normalize_proof_payload(
 
     claim = str(payload.get("claim", "") or "").strip() or issue_candidate.claim
     summary = str(payload.get("summary", "") or "").strip()
+    notes = tuple(_string_list(payload.get("notes")))
+
+    contradiction_phrase = _reportable_contradiction(summary=summary, notes=notes)
+    if outcome == "reportable" and contradiction_phrase is not None:
+        outcome = "not_reportable"
+        proof_state = "path_grounded"
+        filter_reason = f"proof summary contradicts reportable outcome: {contradiction_phrase}"
 
     return SwarmProofResult(
         case_id=issue_candidate.case_id,
@@ -834,7 +854,7 @@ def normalize_proof_payload(
         preconditions=tuple(_string_list(payload.get("preconditions"))),
         repro_steps=tuple(_string_list(payload.get("repro_steps"))),
         citations=tuple(_string_list(payload.get("citations"))),
-        notes=tuple(_string_list(payload.get("notes"))),
+        notes=notes,
         filter_reason=filter_reason,
     )
 
@@ -1093,8 +1113,8 @@ def write_final_summary(
         f"- Promoted issue candidates: `{len(issue_candidates)}`",
         f"- Findings kept after proof: `{len(findings)}`",
         f"- Filtered after proof: `{len(filtered)}`",
+        "- Proof stage mode: `read-only validation`",
         f"- Written proofs: `{proof_state_counts['written_proof']}`",
-        f"- Executed proofs: `{proof_state_counts['executed_proof']}`",
         f"- Path-grounded only: `{proof_state_counts['path_grounded']}`",
         f"- Hypothesized only: `{proof_state_counts['hypothesized']}`",
         f"- Seed ledger: `{seed_ledger}`",
@@ -1245,6 +1265,8 @@ def list_repo_file_entries(cwd: Path) -> list[RepoFileEntry]:
 
     files: list[RepoFileEntry] = []
     for path in sorted(repo_dir.rglob("*")):
+        if path.is_symlink():
+            continue
         if not path.is_file():
             continue
         relative = path.relative_to(repo_dir).as_posix()
@@ -1569,9 +1591,19 @@ def _git_tracked_files(repo_dir: Path) -> list[RepoFileEntry] | None:
         if not value:
             continue
         path = repo_dir / value
+        if path.is_symlink():
+            continue
         if path.is_file():
             files.append(RepoFileEntry(relative_path=value, path=path))
     return sorted(files, key=lambda entry: entry.relative_path)
+
+
+def _reportable_contradiction(*, summary: str, notes: tuple[str, ...]) -> str | None:
+    haystack = " ".join([summary, *notes]).lower()
+    for phrase in PROOF_CONTRADICTION_PHRASES:
+        if phrase in haystack:
+            return phrase
+    return None
 
 
 def _parse_json_object(text: str) -> dict[str, Any]:

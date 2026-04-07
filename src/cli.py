@@ -12,6 +12,7 @@ import argparse
 import builtins
 import contextlib
 import json
+import secrets
 import shutil
 import sys
 import textwrap
@@ -33,7 +34,7 @@ from config import (
 )
 from paths import migrate_legacy_runtime_layout, runs_root
 from provider_openai import OpenAIResponsesProvider
-from repo_memory import resolve_repo_identity
+from repo_memory import migrate_legacy_repo_memory_dir, resolve_repo_identity
 from runtime import OneSlotRuntime
 from state_db import insert_run, update_run_status
 from swarm import (
@@ -73,6 +74,13 @@ class SwarmStartupSnapshot:
     prompt_bundle_manifest: Path
     shared_manifest: Path
     swarm_digest: Path
+
+
+@dataclass(frozen=True)
+class ResourceItemInfo:
+    original: str
+    resolved: str
+    kind: str
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -188,9 +196,7 @@ def _handle_swarm(_: argparse.Namespace) -> int:
         return 1
 
     print("Starting new swarm run...")
-    run_id = _make_run_id()
-    run_dir = runs_root(cwd) / run_id
-    run_dir.mkdir(parents=True, exist_ok=True)
+    run_id, run_dir = _allocate_run_dir(cwd)
     provider = OpenAIResponsesProvider.from_loaded_config(loaded)
     identity = resolve_repo_identity(cwd)
     insert_run(
@@ -323,6 +329,7 @@ def _prepare_swarm_danger_map(
     repo_key: str,
 ):
     identity = resolve_repo_identity(cwd)
+    migrate_legacy_repo_memory_dir(cwd, identity)
     print(f"Repository detected: `{identity.repo_name}`")
 
     result = load_danger_map_result(cwd, repo_key)
@@ -421,7 +428,7 @@ def _review_swarm_shared_resources(
     return _review_resource_list(
         current_items,
         cwd=cwd,
-        title="Shared resources available for this run",
+        title="Shared resources selected for this run",
         note_lines=[
             "Everything under config/resources/shared/ is included by default.",
             "Repo config usually only needs [resources.shared] exclude = [...].",
@@ -455,6 +462,7 @@ def _persist_swarm_startup_snapshot(
     if loaded.effective.swarm is None:
         raise RuntimeError("Swarm config is not available.")
 
+    _ensure_local_resources_present(shared_resources, cwd=cwd, label="shared resources")
     shared_records = _stage_resource_items(shared_resources, shared_dir / "staged")
     shared_manifest = shared_dir / "manifest.md"
     _write_resource_manifest(shared_manifest, "Shared resources", shared_records)
@@ -571,6 +579,7 @@ def _print_swarm_preflight(loaded, snapshot, danger_map_result, eligible_files: 
         print(f"  Token budget: {loaded.effective.swarm.token_budget}")
     print(f"  Sweep model: {loaded.effective.swarm.sweep_model}")
     print(f"  Proof model: {loaded.effective.swarm.proof_model}")
+    print("  Proof stage: read-only validation")
     print("  Final report style: proof-filtered findings, grouped duplicates")
     print("  Repo danger map:")
     print(f"    {danger_map_result.danger_map_md}")
@@ -891,6 +900,14 @@ def _review_resource_list(
         _print_resource_section(title, current_items, cwd=cwd, note_lines=note_lines)
         raw = input(prompt).strip().lower()
         if raw in {"", "y", "yes"}:
+            missing = _missing_local_resources(current_items)
+            if missing:
+                print("")
+                print("Cannot continue with missing local resources:")
+                for item in missing:
+                    print(f"  - `{_display_resource_item(item.resolved, cwd)}`")
+                print("Edit the list or exit.")
+                continue
             return current_items
         if raw == "e":
             print("")
@@ -932,8 +949,14 @@ def _persist_run_resource_snapshot(
     resources: RuntimeResources,
 ) -> RunResourceSnapshot:
     migrate_legacy_runtime_layout(cwd)
-    run_id = _make_run_id()
-    run_dir = runs_root(cwd) / run_id
+    _ensure_local_resources_present(resources.shared, cwd=cwd, label="shared resources")
+    for slot_name, items in resources.slots.items():
+        _ensure_local_resources_present(
+            items,
+            cwd=cwd,
+            label=f"{slot_name.replace('_', ' ')} resources",
+        )
+    run_id, run_dir = _allocate_run_dir(cwd)
     prompts_dir = run_dir / "prompts"
     resources_dir = run_dir / "resources"
     shared_dir = resources_dir / "shared"
@@ -1012,24 +1035,25 @@ def _stage_resource_items(items: tuple[str, ...], staged_dir: Path) -> list[dict
     records: list[dict[str, str]] = []
     staged_dir.mkdir(parents=True, exist_ok=True)
     for index, item in enumerate(items, start=1):
-        if _looks_like_url(item):
+        resource = _classify_resource_item(item)
+        if resource.kind == "url":
             records.append(
                 {
                     "kind": "url",
-                    "original": item,
-                    "resolved": item,
+                    "original": resource.original,
+                    "resolved": resource.resolved,
                     "staged": "(not fetched)",
                 }
             )
             continue
 
-        source_path = Path(item)
-        if not source_path.exists():
+        source_path = Path(resource.original)
+        if resource.kind == "missing":
             records.append(
                 {
                     "kind": "missing",
-                    "original": item,
-                    "resolved": item,
+                    "original": resource.original,
+                    "resolved": resource.resolved,
                     "staged": "(missing)",
                 }
             )
@@ -1046,8 +1070,8 @@ def _stage_resource_items(items: tuple[str, ...], staged_dir: Path) -> list[dict
         records.append(
             {
                 "kind": kind,
-                "original": item,
-                "resolved": str(source_path.resolve()),
+                "original": resource.original,
+                "resolved": resource.resolved,
                 "staged": str(target_path),
             }
         )
@@ -1139,8 +1163,53 @@ def _looks_like_url(value: str) -> bool:
     return lowered.startswith("http://") or lowered.startswith("https://")
 
 
+def _classify_resource_item(item: str) -> ResourceItemInfo:
+    if _looks_like_url(item):
+        return ResourceItemInfo(original=item, resolved=item, kind="url")
+
+    path = Path(item).expanduser()
+    resolved = str(path.resolve())
+    if not path.exists():
+        return ResourceItemInfo(original=item, resolved=resolved, kind="missing")
+    if path.is_dir():
+        return ResourceItemInfo(original=item, resolved=resolved, kind="directory")
+    if path.is_file():
+        return ResourceItemInfo(original=item, resolved=resolved, kind="file")
+    return ResourceItemInfo(original=item, resolved=resolved, kind="missing")
+
+
+def _classify_resource_items(items: tuple[str, ...]) -> tuple[ResourceItemInfo, ...]:
+    return tuple(_classify_resource_item(item) for item in items)
+
+
+def _missing_local_resources(items: tuple[str, ...]) -> tuple[ResourceItemInfo, ...]:
+    return tuple(item for item in _classify_resource_items(items) if item.kind == "missing")
+
+
+def _ensure_local_resources_present(items: tuple[str, ...], *, cwd: Path, label: str) -> None:
+    missing = _missing_local_resources(items)
+    if not missing:
+        return
+    rendered = ", ".join(_display_resource_item(item.resolved, cwd) for item in missing)
+    raise RuntimeError(f"Cannot stage {label}; missing local resources: {rendered}")
+
+
 def _make_run_id() -> str:
-    return datetime.now().strftime("%Y-%m-%d_%H%M%S")
+    return datetime.now().strftime("%Y-%m-%d_%H%M%S_%f") + f"_{secrets.token_hex(4)}"
+
+
+def _allocate_run_dir(cwd: Path, *, max_attempts: int = 20) -> tuple[str, Path]:
+    root = runs_root(cwd)
+    root.mkdir(parents=True, exist_ok=True)
+    for _ in range(max_attempts):
+        run_id = _make_run_id()
+        run_dir = root / run_id
+        try:
+            run_dir.mkdir(parents=False, exist_ok=False)
+        except FileExistsError:
+            continue
+        return run_id, run_dir
+    raise RuntimeError("Failed to allocate a unique run directory.")
 
 
 def _prototype_transcript_path(snapshot: RunResourceSnapshot) -> Path:
@@ -1245,8 +1314,8 @@ def _print_resource_items(items: tuple[str, ...], cwd: Path) -> None:
     if not items:
         print("  (none)")
         return
-    for index, item in enumerate(items, start=1):
-        print(f"  {index}. `{_display_resource_item(item, cwd)}`")
+    for index, item in enumerate(_classify_resource_items(items), start=1):
+        print(f"  {index}. `{_display_resource_item(item.resolved, cwd)}` [{item.kind}]")
 
 
 def _print_resource_section(
