@@ -26,6 +26,9 @@ DEFAULT_SWARM_REASONING_EFFORTS = {
     "seed": "low",
     "proof": "medium",
 }
+DEFAULT_SWARM_SEED_MAX_PARALLEL = 2
+DEFAULT_SWARM_PROOF_MAX_PARALLEL = 1
+DEFAULT_SWARM_RATE_LIMIT_MAX_RETRIES = 3
 
 BUILTIN_DEFAULTS: dict[str, Any] = {
     "active_provider": "openai",
@@ -155,6 +158,9 @@ class SwarmConfig:
     eligible_file_profile: str
     token_budget: int
     allow_no_limit: bool
+    seed_max_parallel: int
+    proof_max_parallel: int
+    rate_limit_max_retries: int
 
 
 @dataclass(frozen=True)
@@ -430,6 +436,9 @@ def summarize_config(loaded: LoadedConfig) -> list[tuple[str, str, str]]:
         danger_map_reasoning_source = loaded.sources.get(("swarm", "reasoning", "danger_map"))
         seed_reasoning_source = loaded.sources.get(("swarm", "reasoning", "seed"))
         proof_reasoning_source = loaded.sources.get(("swarm", "reasoning", "proof"))
+        seed_max_parallel_source = loaded.sources.get(("swarm", "seed_max_parallel"))
+        proof_max_parallel_source = loaded.sources.get(("swarm", "proof_max_parallel"))
+        rate_limit_retries_source = loaded.sources.get(("swarm", "rate_limit_max_retries"))
         rows.extend(
             [
                 (
@@ -441,6 +450,27 @@ def summarize_config(loaded: LoadedConfig) -> list[tuple[str, str, str]]:
                     "Swarm proof model",
                     loaded.effective.swarm.proof_model,
                     loaded.source_label("swarm", "proof_model"),
+                ),
+                (
+                    "Swarm seed max parallel",
+                    str(loaded.effective.swarm.seed_max_parallel),
+                    seed_max_parallel_source.label
+                    if seed_max_parallel_source
+                    else "built-in default",
+                ),
+                (
+                    "Swarm proof max parallel",
+                    str(loaded.effective.swarm.proof_max_parallel),
+                    proof_max_parallel_source.label
+                    if proof_max_parallel_source
+                    else "built-in default",
+                ),
+                (
+                    "Swarm rate-limit retries",
+                    str(loaded.effective.swarm.rate_limit_max_retries),
+                    rate_limit_retries_source.label
+                    if rate_limit_retries_source
+                    else "built-in default",
                 ),
                 (
                     "Swarm danger-map reasoning",
@@ -761,6 +791,14 @@ def _normalize_and_validate(
             eligible_file_profile=eligible_file_profile,
             token_budget=_require_positive_int(swarm_raw, ("swarm", "token_budget")),
             allow_no_limit=_require_bool(swarm_raw, ("swarm", "allow_no_limit")),
+            seed_max_parallel=_optional_positive_int(swarm_raw, ("swarm", "seed_max_parallel"))
+            or DEFAULT_SWARM_SEED_MAX_PARALLEL,
+            proof_max_parallel=_optional_positive_int(swarm_raw, ("swarm", "proof_max_parallel"))
+            or DEFAULT_SWARM_PROOF_MAX_PARALLEL,
+            rate_limit_max_retries=_optional_positive_int(
+                swarm_raw, ("swarm", "rate_limit_max_retries")
+            )
+            or DEFAULT_SWARM_RATE_LIMIT_MAX_RETRIES,
         )
 
     return EffectiveConfig(
@@ -825,6 +863,16 @@ def _require_bool(container: dict[str, Any], path: PathKey) -> bool:
     value = container.get(path[-1])
     if not isinstance(value, bool):
         raise ConfigError(f"Missing or invalid boolean for {dotted}.")
+    return value
+
+
+def _optional_positive_int(container: dict[str, Any], path: PathKey) -> int | None:
+    value = container.get(path[-1])
+    if value is None:
+        return None
+    if not isinstance(value, int) or value <= 0:
+        dotted = ".".join(path)
+        raise ConfigError(f"{dotted} must be a positive integer.")
     return value
 
 
@@ -950,7 +998,16 @@ def _dump_known_schema_toml(data: dict[str, Any]) -> str:
     swarm = data.get("swarm", {})
     if isinstance(swarm, dict) and swarm:
         lines.extend(["", "[swarm]"])
-        for key in ("sweep_model", "proof_model", "eligible_file_profile", "token_budget", "allow_no_limit"):
+        for key in (
+            "sweep_model",
+            "proof_model",
+            "eligible_file_profile",
+            "token_budget",
+            "allow_no_limit",
+            "seed_max_parallel",
+            "proof_max_parallel",
+            "rate_limit_max_retries",
+        ):
             if key in swarm:
                 lines.append(f"{key} = {_format_toml_value(swarm[key])}")
         reasoning = swarm.get("reasoning")

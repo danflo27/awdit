@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import subprocess
 import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, Callable
 
 from paths import managed_runtime_root_names
 from provider_openai import (
@@ -72,7 +73,9 @@ CONFIG_FILENAMES = {
 }
 DEFAULT_SWARM_MAX_PARALLEL = 8
 DEFAULT_SWARM_MAX_RETRIES = 1
+DEFAULT_SWARM_RATE_LIMIT_COOLDOWN_SECONDS = 5.0
 DEFAULT_SWARM_POLL_INTERVAL_SECONDS = 0.05
+DEFAULT_SWARM_ESTIMATED_CHARS_PER_TOKEN = 4
 PROOF_STATE_VALUES = (
     "hypothesized",
     "path_grounded",
@@ -86,6 +89,10 @@ PROOF_CONTRADICTION_PHRASES = (
     "insufficient proof",
     "theoretical only",
     "hardening concern",
+)
+RATE_LIMIT_RETRY_PATTERN = re.compile(
+    r"please try again in\s+([0-9]+(?:\.[0-9]+)?)s",
+    re.IGNORECASE,
 )
 
 
@@ -284,6 +291,15 @@ class ActiveSwarmWorker:
     job: SwarmWorkerJob
     handle: ProviderBackgroundHandle
     tool_traces: list[ToolTraceRecord]
+
+
+@dataclass(frozen=True)
+class SwarmSeedRequestVolume:
+    job_count: int
+    total_estimated_tokens: int
+    peak_parallel_estimated_tokens: int
+    max_job_estimated_tokens: int
+    max_job_target_file: str
 
 
 DANGER_MAP_RESPONSE_FORMAT = {
@@ -579,6 +595,7 @@ def generate_danger_map(
             tools=tuple(tools.schemas()),
         ),
         tool_executor=tools.run,
+        rate_limit_max_retries=swarm_config.rate_limit_max_retries,
     )
     payload = _parse_json_object(result.final_text)
     normalized = parse_danger_map_payload(
@@ -742,6 +759,133 @@ def build_seed_input(
         "target_file_numbered_content": _with_line_numbers(target_text),
     }
     return json.dumps(payload, indent=2)
+
+
+def render_seed_instructions(
+    *,
+    template: str,
+    target_file: str,
+    output_path: str,
+) -> str:
+    return (
+        template.replace("{{target_file}}", target_file).replace("{{output_path}}", output_path)
+    )
+
+
+def _estimate_text_tokens(text: str) -> int:
+    if not text:
+        return 0
+    return max(1, (len(text) + DEFAULT_SWARM_ESTIMATED_CHARS_PER_TOKEN - 1) // DEFAULT_SWARM_ESTIMATED_CHARS_PER_TOKEN)
+
+
+def _estimate_job_request_tokens(job: SwarmWorkerJob) -> int:
+    return _estimate_text_tokens(job.instructions) + _estimate_text_tokens(job.input_text)
+
+
+def _rate_limit_retry_delay_seconds(message: str | None) -> float | None:
+    text = str(message or "").strip()
+    if not text:
+        return None
+    lowered = text.lower()
+    is_rate_limited = (
+        "rate_limit_exceeded" in lowered
+        or "rate limit reached" in lowered
+        or "tokens per min" in lowered
+        or " tpm" in lowered
+    )
+    if not is_rate_limited:
+        return None
+    match = RATE_LIMIT_RETRY_PATTERN.search(text)
+    if match is not None:
+        return max(float(match.group(1)), DEFAULT_SWARM_POLL_INTERVAL_SECONDS)
+    return DEFAULT_SWARM_RATE_LIMIT_COOLDOWN_SECONDS
+
+
+def _build_seed_worker_jobs(
+    *,
+    cwd: Path,
+    loaded,
+    prompt_asset: SwarmPromptAsset,
+    eligible_files: list[Path],
+    swarm_digest_text: str,
+    shared_manifest_text: str,
+    seed_output_path: str,
+    tool_schemas: tuple[dict[str, Any], ...],
+) -> tuple[list[SwarmWorkerJob], list[tuple[str, str]]]:
+    template = prompt_asset.read_text()
+    jobs: list[SwarmWorkerJob] = []
+    ordered_seed_metadata: list[tuple[str, str]] = []
+    for index, target_path in enumerate(eligible_files, start=1):
+        seed_id = f"SEED-{index:03d}"
+        target_file = display_repo_path(cwd, target_path)
+        ordered_seed_metadata.append((seed_id, target_file))
+        target_text = target_path.read_text(encoding="utf-8", errors="replace")
+        jobs.append(
+            SwarmWorkerJob(
+                worker_id=seed_id,
+                worker_type="seed_file",
+                lease_key=f"file:{target_file}",
+                model=loaded.effective.swarm.sweep_model,
+                reasoning_effort=loaded.effective.swarm.reasoning.seed,
+                instructions=render_seed_instructions(
+                    template=template,
+                    target_file=target_file,
+                    output_path=seed_output_path,
+                ),
+                input_text=build_seed_input(
+                    seed_id=seed_id,
+                    target_file=target_file,
+                    target_text=target_text,
+                    swarm_digest_text=swarm_digest_text,
+                    shared_manifest_text=shared_manifest_text,
+                ),
+                prompt_cache_key=prompt_asset.prompt_cache_key,
+                text_format=SEED_RESPONSE_FORMAT,
+                tools=tool_schemas,
+            )
+        )
+    return jobs, ordered_seed_metadata
+
+
+def summarize_seed_request_volume(
+    *,
+    cwd: Path,
+    loaded,
+    prompt_bundle: SwarmPromptBundle,
+    run_dir: Path,
+    swarm_digest_path: Path,
+    shared_manifest_path: Path,
+    eligible_files: list[Path],
+) -> SwarmSeedRequestVolume:
+    swarm_digest_text = swarm_digest_path.read_text(encoding="utf-8")
+    shared_manifest_text = shared_manifest_path.read_text(encoding="utf-8")
+    seed_output_path = (run_dir / "swarm" / "seeds").relative_to(cwd).as_posix()
+    jobs, ordered_seed_metadata = _build_seed_worker_jobs(
+        cwd=cwd,
+        loaded=loaded,
+        prompt_asset=prompt_bundle.seed,
+        eligible_files=eligible_files,
+        swarm_digest_text=swarm_digest_text,
+        shared_manifest_text=shared_manifest_text,
+        seed_output_path=seed_output_path,
+        tool_schemas=(),
+    )
+    estimates = [_estimate_job_request_tokens(job) for job in jobs]
+    peak_count = max(1, loaded.effective.swarm.seed_max_parallel)
+    peak_parallel_estimate = sum(sorted(estimates, reverse=True)[:peak_count])
+    max_job_target_file = ""
+    max_job_estimate = 0
+    for estimate, (_, target_file) in zip(estimates, ordered_seed_metadata, strict=False):
+        if estimate > max_job_estimate:
+            max_job_estimate = estimate
+            max_job_target_file = target_file
+    return SwarmSeedRequestVolume(
+        job_count=len(jobs),
+        total_estimated_tokens=sum(estimates),
+        peak_parallel_estimated_tokens=peak_parallel_estimate,
+        max_job_estimated_tokens=max_job_estimate,
+        max_job_target_file=max_job_target_file,
+    )
 
 
 def normalize_seed_payload(
@@ -1329,45 +1473,51 @@ def run_swarm_sweep(
         scope_exclude=loaded.effective.scope.exclude,
     )
     prompt_asset = prompt_bundle.seed
-    jobs: list[SwarmWorkerJob] = []
-    ordered_seed_metadata: list[tuple[str, str]] = []
-    for index, target_path in enumerate(eligible_files, start=1):
-        seed_id = f"SEED-{index:03d}"
-        target_file = display_repo_path(cwd, target_path)
-        ordered_seed_metadata.append((seed_id, target_file))
-        target_text = target_path.read_text(encoding="utf-8", errors="replace")
-        jobs.append(
-            SwarmWorkerJob(
-                worker_id=seed_id,
-                worker_type="seed_file",
-                lease_key=f"file:{target_file}",
-                model=loaded.effective.swarm.sweep_model,
-                reasoning_effort=loaded.effective.swarm.reasoning.seed,
-                instructions=prompt_asset.read_text(),
-                input_text=build_seed_input(
-                    seed_id=seed_id,
-                    target_file=target_file,
-                    target_text=target_text,
-                    swarm_digest_text=swarm_digest_text,
-                    shared_manifest_text=shared_manifest_text,
-                ),
-                prompt_cache_key=prompt_asset.prompt_cache_key,
-                text_format=SEED_RESPONSE_FORMAT,
-                tools=tuple(tools.schemas()),
-            )
+    seed_output_path = seeds_dir.relative_to(cwd).as_posix()
+    jobs, ordered_seed_metadata = _build_seed_worker_jobs(
+        cwd=cwd,
+        loaded=loaded,
+        prompt_asset=prompt_asset,
+        eligible_files=eligible_files,
+        swarm_digest_text=swarm_digest_text,
+        shared_manifest_text=shared_manifest_text,
+        seed_output_path=seed_output_path,
+        tool_schemas=tuple(tools.schemas()),
+    )
+    seed_results_by_id: dict[str, SwarmSeedResult] = {}
+    target_files_by_seed_id = dict(ordered_seed_metadata)
+
+    def _persist_seed_result(job: SwarmWorkerJob, result: ProviderTurnResult) -> None:
+        seed_result = parse_seed_payload(
+            payload=_parse_json_object(result.final_text),
+            seed_id=job.worker_id,
+            target_file=target_files_by_seed_id[job.worker_id],
         )
+        _write_seed_artifacts(seeds_dir, seed_result)
+        seed_results_by_id[job.worker_id] = seed_result
 
     provider_results = run_background_swarm_workers(
         provider=provider,
         jobs=jobs,
         tool_executor=tools.run,
+        max_parallel=loaded.effective.swarm.seed_max_parallel,
+        max_retries=DEFAULT_SWARM_MAX_RETRIES,
+        rate_limit_max_retries=loaded.effective.swarm.rate_limit_max_retries,
+        max_inflight_estimated_tokens=(
+            None
+            if loaded.effective.swarm.allow_no_limit
+            else loaded.effective.swarm.token_budget
+        ),
+        on_worker_completed=_persist_seed_result,
     )
     seed_results: list[SwarmSeedResult] = []
     for seed_id, target_file in ordered_seed_metadata:
-        result = provider_results[seed_id]
-        payload = _parse_json_object(result.final_text)
-        seed_result = parse_seed_payload(payload=payload, seed_id=seed_id, target_file=target_file)
-        _write_seed_artifacts(seeds_dir, seed_result)
+        seed_result = seed_results_by_id.get(seed_id)
+        if seed_result is None:
+            result = provider_results[seed_id]
+            payload = _parse_json_object(result.final_text)
+            seed_result = parse_seed_payload(payload=payload, seed_id=seed_id, target_file=target_file)
+            _write_seed_artifacts(seeds_dir, seed_result)
         seed_results.append(seed_result)
 
     issue_candidates = promote_issue_candidates(seed_results)
@@ -1376,7 +1526,9 @@ def run_swarm_sweep(
         proof_prompt_asset = prompt_bundle.proof
         seed_lookup = {result.seed_id: result for result in seed_results}
         proof_jobs: list[SwarmWorkerJob] = []
+        issue_candidates_by_case_id: dict[str, SwarmIssueCandidate] = {}
         for issue_candidate in issue_candidates:
+            issue_candidates_by_case_id[issue_candidate.case_id] = issue_candidate
             issue_seed_results = tuple(seed_lookup[seed_id] for seed_id in issue_candidate.seed_ids)
             proof_jobs.append(
                 SwarmWorkerJob(
@@ -1397,17 +1549,37 @@ def run_swarm_sweep(
                     tools=tuple(tools.schemas()),
                 )
             )
+        proof_results_by_case_id: dict[str, SwarmProofResult] = {}
+
+        def _persist_proof_result(job: SwarmWorkerJob, result: ProviderTurnResult) -> None:
+            proof_result = parse_proof_payload(
+                payload=_parse_json_object(result.final_text),
+                issue_candidate=issue_candidates_by_case_id[job.worker_id],
+            )
+            _write_proof_artifacts(proofs_dir, proof_result)
+            proof_results_by_case_id[job.worker_id] = proof_result
 
         proof_provider_results = run_background_swarm_workers(
             provider=provider,
             jobs=proof_jobs,
             tool_executor=tools.run,
+            max_parallel=loaded.effective.swarm.proof_max_parallel,
+            max_retries=DEFAULT_SWARM_MAX_RETRIES,
+            rate_limit_max_retries=loaded.effective.swarm.rate_limit_max_retries,
+            max_inflight_estimated_tokens=(
+                None
+                if loaded.effective.swarm.allow_no_limit
+                else loaded.effective.swarm.token_budget
+            ),
+            on_worker_completed=_persist_proof_result,
         )
         for issue_candidate in issue_candidates:
-            result = proof_provider_results[issue_candidate.case_id]
-            payload = _parse_json_object(result.final_text)
-            proof_result = parse_proof_payload(payload=payload, issue_candidate=issue_candidate)
-            _write_proof_artifacts(proofs_dir, proof_result)
+            proof_result = proof_results_by_case_id.get(issue_candidate.case_id)
+            if proof_result is None:
+                result = proof_provider_results[issue_candidate.case_id]
+                payload = _parse_json_object(result.final_text)
+                proof_result = parse_proof_payload(payload=payload, issue_candidate=issue_candidate)
+                _write_proof_artifacts(proofs_dir, proof_result)
             proof_results.append(proof_result)
 
     seed_ledger = reports_dir / "seed_ledger.md"
@@ -1449,6 +1621,9 @@ def run_background_swarm_workers(
     max_parallel: int | None = None,
     poll_interval_seconds: float = DEFAULT_SWARM_POLL_INTERVAL_SECONDS,
     max_retries: int = DEFAULT_SWARM_MAX_RETRIES,
+    rate_limit_max_retries: int = DEFAULT_SWARM_MAX_RETRIES,
+    max_inflight_estimated_tokens: int | None = None,
+    on_worker_completed: Callable[[SwarmWorkerJob, ProviderTurnResult], None] | None = None,
 ) -> dict[str, ProviderTurnResult]:
     if not jobs:
         return {}
@@ -1459,19 +1634,38 @@ def run_background_swarm_workers(
     pending: list[SwarmWorkerJob] = list(jobs)
     active: dict[str, ActiveSwarmWorker] = {}
     active_leases: set[str] = set()
-    attempts: dict[str, int] = {job.worker_id: 0 for job in jobs}
+    retry_counts: dict[str, int] = {job.worker_id: 0 for job in jobs}
+    rate_limit_retry_counts: dict[str, int] = {job.worker_id: 0 for job in jobs}
+    estimated_tokens_by_job_id = {
+        job.worker_id: _estimate_job_request_tokens(job) for job in jobs
+    }
     results: dict[str, ProviderTurnResult] = {}
+    cooldown_until = 0.0
 
     while pending or active:
         permanent_failures: list[str] = []
         scan_limit = len(pending)
         while pending and len(active) < parallel_limit and scan_limit > 0:
+            now = time.monotonic()
+            if cooldown_until > now:
+                break
             job = pending.pop(0)
             if job.lease_key in active_leases:
                 pending.append(job)
                 scan_limit -= 1
                 continue
-            attempts[job.worker_id] += 1
+            active_estimated_tokens = sum(
+                estimated_tokens_by_job_id[state.job.worker_id] for state in active.values()
+            )
+            job_estimated_tokens = estimated_tokens_by_job_id[job.worker_id]
+            if (
+                max_inflight_estimated_tokens is not None
+                and active
+                and active_estimated_tokens + job_estimated_tokens > max_inflight_estimated_tokens
+            ):
+                pending.append(job)
+                scan_limit -= 1
+                continue
             try:
                 handle = provider.start_background_turn(
                     model=job.model,
@@ -1485,7 +1679,16 @@ def run_background_swarm_workers(
                 )
             except Exception as exc:
                 failure_message = provider.classify_provider_failure(exc) or str(exc)
-                if attempts[job.worker_id] <= max_retries:
+                rate_limit_delay = _rate_limit_retry_delay_seconds(failure_message)
+                if rate_limit_delay is not None:
+                    rate_limit_retry_counts[job.worker_id] += 1
+                    if rate_limit_retry_counts[job.worker_id] <= rate_limit_max_retries:
+                        pending.append(job)
+                        cooldown_until = max(cooldown_until, time.monotonic() + rate_limit_delay)
+                        scan_limit = len(pending)
+                        continue
+                retry_counts[job.worker_id] += 1
+                if retry_counts[job.worker_id] <= max_retries:
                     pending.append(job)
                     scan_limit = len(pending)
                     continue
@@ -1526,16 +1729,33 @@ def run_background_swarm_workers(
             active_leases.discard(state.job.lease_key)
 
             if poll_result is not None and poll_result.status == "completed":
-                results[worker_id] = ProviderTurnResult(
+                completed_result = ProviderTurnResult(
                     response_id=poll_result.response_id,
                     final_text=poll_result.final_text,
                     tool_traces=tuple(state.tool_traces),
                     status="completed",
                     model=state.job.model,
                 )
+                try:
+                    if on_worker_completed is not None:
+                        on_worker_completed(state.job, completed_result)
+                except Exception as exc:
+                    permanent_failures.append(
+                        f"{state.job.worker_id} ({state.job.lease_key}): {exc}"
+                    )
+                    continue
+                results[worker_id] = completed_result
                 continue
 
-            if attempts[worker_id] <= max_retries:
+            rate_limit_delay = _rate_limit_retry_delay_seconds(failure_message)
+            if rate_limit_delay is not None:
+                rate_limit_retry_counts[worker_id] += 1
+                if rate_limit_retry_counts[worker_id] <= rate_limit_max_retries:
+                    pending.append(state.job)
+                    cooldown_until = max(cooldown_until, time.monotonic() + rate_limit_delay)
+                    continue
+            retry_counts[worker_id] += 1
+            if retry_counts[worker_id] <= max_retries:
                 pending.append(state.job)
                 continue
             permanent_failures.append(
@@ -1551,7 +1771,11 @@ def run_background_swarm_workers(
             raise RuntimeError("Swarm worker failure: " + "; ".join(permanent_failures))
 
         if pending or active:
-            time.sleep(poll_interval_seconds)
+            sleep_for = poll_interval_seconds
+            now = time.monotonic()
+            if not active and cooldown_until > now:
+                sleep_for = max(sleep_for, cooldown_until - now)
+            time.sleep(sleep_for)
 
     return results
 
@@ -1561,12 +1785,14 @@ def _run_swarm_background_worker(
     provider: OpenAIResponsesProvider,
     job: SwarmWorkerJob,
     tool_executor,
+    rate_limit_max_retries: int = DEFAULT_SWARM_MAX_RETRIES,
 ) -> ProviderTurnResult:
     return run_background_swarm_workers(
         provider=provider,
         jobs=[job],
         tool_executor=tool_executor,
         max_parallel=1,
+        rate_limit_max_retries=rate_limit_max_retries,
     )[job.worker_id]
 
 
