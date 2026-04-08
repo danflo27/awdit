@@ -868,6 +868,9 @@ class SwarmCliTests(unittest.TestCase):
             self.assertIn("Swarm preflight", output)
             self.assertIn("Shared resources selected for this run", output)
             self.assertIn("Launching swarm batch...", output)
+            self.assertIn("Danger-map reasoning: high", output)
+            self.assertIn("Seed reasoning: low", output)
+            self.assertIn("Proof reasoning: medium", output)
             self.assertIn("Proof stage: read-only validation", output)
             self.assertIn("proof-filtered findings, grouped duplicates", output)
 
@@ -892,8 +895,19 @@ class SwarmCliTests(unittest.TestCase):
             self.assertIn("refund-boundaries.md", shared_manifest)
             self.assertIn("shared-reference", shared_manifest)
             self.assertIn("Eligible file count", swarm_digest)
+            self.assertIn("Danger-map reasoning: `high`", swarm_digest)
+            self.assertIn("Seed reasoning: `low`", swarm_digest)
+            self.assertIn("Proof reasoning: `medium`", swarm_digest)
             self.assertEqual("swarm", run_json["mode"])
             self.assertIn("prompt_bundle", run_json["swarm"])
+            self.assertEqual(
+                {
+                    "danger_map": "high",
+                    "seed": "low",
+                    "proof": "medium",
+                },
+                run_json["swarm"]["reasoning"],
+            )
 
     def test_swarm_blocks_missing_local_shared_resources_before_preflight(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

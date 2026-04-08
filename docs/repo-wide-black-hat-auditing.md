@@ -307,12 +307,17 @@ Swarm-only section:
 - `swarm`
 
 The `swarm` section should define:
-- `prompt_file`
 - `sweep_model`
 - `proof_model`
 - `eligible_file_profile`
 - `token_budget`
 - `allow_no_limit`
+- `reasoning.danger_map` (optional, defaults to `high`)
+- `reasoning.seed` (optional, defaults to `low`)
+- `reasoning.proof` (optional, defaults to `medium`)
+- `prompts.danger_map`
+- `prompts.seed`
+- `prompts.proof`
 
 Illustrative shape:
 
@@ -346,12 +351,21 @@ prompt_file = "prompts/hunter_1.md"
 
 # Swarm-only path
 [swarm]
-prompt_file = "prompts/swarm.md"
 sweep_model = "gpt-5.4-mini"
 proof_model = "gpt-5.4"
 eligible_file_profile = "code_config_tests"
 token_budget = 120000
 allow_no_limit = true
+
+[swarm.reasoning]
+danger_map = "high"
+seed = "low"
+proof = "medium"
+
+[swarm.prompts]
+danger_map = "prompts/swarm_danger_map.md"
+seed = "prompts/swarm_seed.md"
+proof = "prompts/swarm_proof.md"
 ```
 
 The confirm screen for `awdit swarm` should surface:

@@ -21,6 +21,11 @@ SLOT_NAMES = (
 )
 REASONING_EFFORT_VALUES = ("low", "medium", "high")
 SWARM_ELIGIBLE_FILE_PROFILES = ("code_config_tests", "all_tracked")
+DEFAULT_SWARM_REASONING_EFFORTS = {
+    "danger_map": "high",
+    "seed": "low",
+    "proof": "medium",
+}
 
 BUILTIN_DEFAULTS: dict[str, Any] = {
     "active_provider": "openai",
@@ -135,8 +140,16 @@ class SwarmPromptsConfig:
 
 
 @dataclass(frozen=True)
+class SwarmReasoningConfig:
+    danger_map: str
+    seed: str
+    proof: str
+
+
+@dataclass(frozen=True)
 class SwarmConfig:
     prompts: SwarmPromptsConfig
+    reasoning: SwarmReasoningConfig
     sweep_model: str
     proof_model: str
     eligible_file_profile: str
@@ -414,6 +427,9 @@ def summarize_config(loaded: LoadedConfig) -> list[tuple[str, str, str]]:
         ]
     )
     if loaded.effective.swarm is not None:
+        danger_map_reasoning_source = loaded.sources.get(("swarm", "reasoning", "danger_map"))
+        seed_reasoning_source = loaded.sources.get(("swarm", "reasoning", "seed"))
+        proof_reasoning_source = loaded.sources.get(("swarm", "reasoning", "proof"))
         rows.extend(
             [
                 (
@@ -425,6 +441,21 @@ def summarize_config(loaded: LoadedConfig) -> list[tuple[str, str, str]]:
                     "Swarm proof model",
                     loaded.effective.swarm.proof_model,
                     loaded.source_label("swarm", "proof_model"),
+                ),
+                (
+                    "Swarm danger-map reasoning",
+                    loaded.effective.swarm.reasoning.danger_map,
+                    danger_map_reasoning_source.label if danger_map_reasoning_source else "built-in default",
+                ),
+                (
+                    "Swarm seed reasoning",
+                    loaded.effective.swarm.reasoning.seed,
+                    seed_reasoning_source.label if seed_reasoning_source else "built-in default",
+                ),
+                (
+                    "Swarm proof reasoning",
+                    loaded.effective.swarm.reasoning.proof,
+                    proof_reasoning_source.label if proof_reasoning_source else "built-in default",
                 ),
                 (
                     "Swarm danger-map prompt",
@@ -696,11 +727,34 @@ def _normalize_and_validate(
             allowed = ", ".join(SWARM_ELIGIBLE_FILE_PROFILES)
             raise ConfigError(f"swarm.eligible_file_profile must be one of: {allowed}.")
 
+        reasoning_raw = swarm_raw.get("reasoning", {})
+        if reasoning_raw is None:
+            reasoning_raw = {}
+        if not isinstance(reasoning_raw, dict):
+            raise ConfigError("swarm.reasoning must be a table.")
+
         swarm = SwarmConfig(
             prompts=SwarmPromptsConfig(
                 danger_map=danger_map_prompt_path,
                 seed=seed_prompt_path,
                 proof=proof_prompt_path,
+            ),
+            reasoning=SwarmReasoningConfig(
+                danger_map=_optional_reasoning_effort(
+                    reasoning_raw,
+                    ("swarm", "reasoning", "danger_map"),
+                )
+                or DEFAULT_SWARM_REASONING_EFFORTS["danger_map"],
+                seed=_optional_reasoning_effort(
+                    reasoning_raw,
+                    ("swarm", "reasoning", "seed"),
+                )
+                or DEFAULT_SWARM_REASONING_EFFORTS["seed"],
+                proof=_optional_reasoning_effort(
+                    reasoning_raw,
+                    ("swarm", "reasoning", "proof"),
+                )
+                or DEFAULT_SWARM_REASONING_EFFORTS["proof"],
             ),
             sweep_model=sweep_model,
             proof_model=proof_model,
@@ -899,6 +953,12 @@ def _dump_known_schema_toml(data: dict[str, Any]) -> str:
         for key in ("sweep_model", "proof_model", "eligible_file_profile", "token_budget", "allow_no_limit"):
             if key in swarm:
                 lines.append(f"{key} = {_format_toml_value(swarm[key])}")
+        reasoning = swarm.get("reasoning")
+        if isinstance(reasoning, dict) and reasoning:
+            lines.extend(["", "[swarm.reasoning]"])
+            for key in ("danger_map", "seed", "proof"):
+                if key in reasoning:
+                    lines.append(f"{key} = {_format_toml_value(reasoning[key])}")
         prompts = swarm.get("prompts")
         if isinstance(prompts, dict) and prompts:
             lines.extend(["", "[swarm.prompts]"])

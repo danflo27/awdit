@@ -167,6 +167,11 @@ class ConfigTests(unittest.TestCase):
                 token_budget = 120000
                 allow_no_limit = true
 
+                [swarm.reasoning]
+                danger_map = "low"
+                seed = "high"
+                proof = "medium"
+
                 [swarm.prompts]
                 danger_map = "prompts/swarm_danger_map.md"
                 seed = "prompts/swarm_seed.md"
@@ -247,6 +252,9 @@ class ConfigTests(unittest.TestCase):
             self.assertIsNotNone(loaded.effective.swarm)
             self.assertEqual("gpt-5.4-mini", loaded.effective.swarm.sweep_model)
             self.assertEqual("gpt-5.4", loaded.effective.swarm.proof_model)
+            self.assertEqual("low", loaded.effective.swarm.reasoning.danger_map)
+            self.assertEqual("high", loaded.effective.swarm.reasoning.seed)
+            self.assertEqual("medium", loaded.effective.swarm.reasoning.proof)
             self.assertEqual(
                 (repo_prompt_dir / "swarm_danger_map.md").resolve(),
                 loaded.effective.swarm.prompts.danger_map,
@@ -413,6 +421,71 @@ class ConfigTests(unittest.TestCase):
                     env={"OPENAI_API_KEY": "token"},
                 )
 
+    def test_swarm_reasoning_defaults_when_omitted(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            repo_dir = root / "repo"
+            config_path = repo_dir / "config" / "config.toml"
+            _write_prompt_tree(repo_dir / "config")
+            _write(config_path, _user_config_text())
+
+            loaded = load_effective_config(
+                cwd=repo_dir,
+                config_path=config_path,
+                env={"OPENAI_API_KEY": "token"},
+            )
+
+            self.assertEqual("high", loaded.effective.swarm.reasoning.danger_map)
+            self.assertEqual("low", loaded.effective.swarm.reasoning.seed)
+            self.assertEqual("medium", loaded.effective.swarm.reasoning.proof)
+
+    def test_swarm_reasoning_partial_override_uses_defaults_for_missing_values(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            repo_dir = root / "repo"
+            config_path = repo_dir / "config" / "config.toml"
+            _write_prompt_tree(repo_dir / "config")
+            _write(
+                config_path,
+                _user_config_text().replace(
+                    '[swarm.prompts]',
+                    '[swarm.reasoning]\nseed = "high"\n\n[swarm.prompts]',
+                    1,
+                ),
+            )
+
+            loaded = load_effective_config(
+                cwd=repo_dir,
+                config_path=config_path,
+                env={"OPENAI_API_KEY": "token"},
+            )
+
+            self.assertEqual("high", loaded.effective.swarm.reasoning.danger_map)
+            self.assertEqual("high", loaded.effective.swarm.reasoning.seed)
+            self.assertEqual("medium", loaded.effective.swarm.reasoning.proof)
+
+    def test_invalid_swarm_reasoning_effort_raises(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            repo_dir = root / "repo"
+            config_path = repo_dir / "config" / "config.toml"
+            _write_prompt_tree(repo_dir / "config")
+            _write(
+                config_path,
+                _user_config_text().replace(
+                    '[swarm.prompts]',
+                    '[swarm.reasoning]\nproof = "extreme"\n\n[swarm.prompts]',
+                    1,
+                ),
+            )
+
+            with self.assertRaises(ConfigError):
+                load_effective_config(
+                    cwd=repo_dir,
+                    config_path=config_path,
+                    env={"OPENAI_API_KEY": "token"},
+                )
+
     def test_missing_prompt_file_raises(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
@@ -447,6 +520,7 @@ class ConfigTests(unittest.TestCase):
                 loaded,
                 {
                     "slots": {"solver_2": {"default_model": "gpt-5.4", "reasoning_effort": "high"}},
+                    "swarm": {"reasoning": {"seed": "high"}},
                     "validation": {
                         "checks": [
                             {
@@ -472,6 +546,11 @@ class ConfigTests(unittest.TestCase):
             )
             self.assertEqual("high", overridden.effective.slots["solver_2"].reasoning_effort)
             self.assertEqual(
+                "runtime override",
+                overridden.source_label("swarm", "reasoning", "seed"),
+            )
+            self.assertEqual("high", overridden.effective.swarm.reasoning.seed)
+            self.assertEqual(
                 ("https://example.com/runtime",),
                 overridden.effective.resources.shared.include,
             )
@@ -480,6 +559,7 @@ class ConfigTests(unittest.TestCase):
                 repo_config,
                 {
                     "slots": {"solver_2": {"default_model": "gpt-5.4", "reasoning_effort": "high"}},
+                    "swarm": {"reasoning": {"seed": "high"}},
                     "validation": {
                         "checks": [
                             {
@@ -502,6 +582,8 @@ class ConfigTests(unittest.TestCase):
             self.assertIn("[slots.solver_2]", saved)
             self.assertIn('default_model = "gpt-5.4"', saved)
             self.assertIn('reasoning_effort = "high"', saved)
+            self.assertIn("[swarm.reasoning]", saved)
+            self.assertIn('seed = "high"', saved)
             self.assertIn("[[validation.checks]]", saved)
             self.assertIn("[resources.shared]", saved)
             self.assertIn('include = ["https://example.com/runtime"]', saved)

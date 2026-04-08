@@ -489,6 +489,11 @@ def _persist_swarm_startup_snapshot(
                 "swarm": {
                     "sweep_model": loaded.effective.swarm.sweep_model,
                     "proof_model": loaded.effective.swarm.proof_model,
+                    "reasoning": {
+                        "danger_map": loaded.effective.swarm.reasoning.danger_map,
+                        "seed": loaded.effective.swarm.reasoning.seed,
+                        "proof": loaded.effective.swarm.reasoning.proof,
+                    },
                     "eligible_file_profile": loaded.effective.swarm.eligible_file_profile,
                     "token_budget": loaded.effective.swarm.token_budget,
                     "allow_no_limit": loaded.effective.swarm.allow_no_limit,
@@ -555,6 +560,9 @@ def _write_swarm_digest(
             "## Swarm settings",
             f"- Sweep model: `{loaded.effective.swarm.sweep_model}`",
             f"- Proof model: `{loaded.effective.swarm.proof_model}`",
+            f"- Danger-map reasoning: `{loaded.effective.swarm.reasoning.danger_map}`",
+            f"- Seed reasoning: `{loaded.effective.swarm.reasoning.seed}`",
+            f"- Proof reasoning: `{loaded.effective.swarm.reasoning.proof}`",
             f"- Eligible profile: `{loaded.effective.swarm.eligible_file_profile}`",
         ]
     )
@@ -579,6 +587,9 @@ def _print_swarm_preflight(loaded, snapshot, danger_map_result, eligible_files: 
         print(f"  Token budget: {loaded.effective.swarm.token_budget}")
     print(f"  Sweep model: {loaded.effective.swarm.sweep_model}")
     print(f"  Proof model: {loaded.effective.swarm.proof_model}")
+    print(f"  Danger-map reasoning: {loaded.effective.swarm.reasoning.danger_map}")
+    print(f"  Seed reasoning: {loaded.effective.swarm.reasoning.seed}")
+    print(f"  Proof reasoning: {loaded.effective.swarm.reasoning.proof}")
     print("  Proof stage: read-only validation")
     print("  Final report style: proof-filtered findings, grouped duplicates")
     print("  Repo danger map:")

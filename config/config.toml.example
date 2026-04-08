@@ -143,6 +143,11 @@ eligible_file_profile = "code_config_tests"
 token_budget = 120000
 allow_no_limit = true
 
+[swarm.reasoning]
+danger_map = "high"
+seed = "low"
+proof = "medium"
+
 [swarm.prompts]
 danger_map = "prompts/swarm_danger_map.md"
 seed = "prompts/swarm_seed.md"

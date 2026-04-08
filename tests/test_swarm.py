@@ -201,9 +201,12 @@ class RetryProvider:
 
 class SwarmTests(unittest.TestCase):
     def _loaded_config(self, repo_dir: Path):
+        return self._loaded_config_from_text(repo_dir, _config_text())
+
+    def _loaded_config_from_text(self, repo_dir: Path, config_text: str):
         config_dir = repo_dir / "config"
         _write_prompt_tree(config_dir)
-        _write(config_dir / "config.toml", _config_text())
+        _write(config_dir / "config.toml", config_text)
         return load_effective_config(
             cwd=repo_dir,
             config_path=config_dir / "config.toml",
@@ -265,10 +268,89 @@ class SwarmTests(unittest.TestCase):
             self.assertEqual(1, len(result.proof_results))
             self.assertEqual("# frozen seed prompt\n", provider.start_calls[0]["instructions"])
             self.assertEqual("# frozen proof prompt\n", provider.start_calls[1]["instructions"])
+            self.assertEqual("low", provider.start_calls[0]["reasoning_effort"])
+            self.assertEqual("medium", provider.start_calls[1]["reasoning_effort"])
             self.assertEqual(prompt_bundle.seed.prompt_cache_key, provider.start_calls[0]["prompt_cache_key"])
             self.assertEqual(prompt_bundle.proof.prompt_cache_key, provider.start_calls[1]["prompt_cache_key"])
             self.assertIsNone(provider.start_calls[0]["previous_response_id"])
             self.assertIsNone(provider.start_calls[1]["previous_response_id"])
+
+    def test_swarm_uses_configured_reasoning_levels(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_dir = Path(tmp_dir) / "repo"
+            _write(repo_dir / "app" / "service.py", "print('hello')\n")
+            loaded = self._loaded_config_from_text(
+                repo_dir,
+                _config_text().replace(
+                    '[swarm.prompts]',
+                    '[swarm.reasoning]\ndanger_map = "low"\nseed = "high"\nproof = "low"\n\n[swarm.prompts]',
+                    1,
+                ),
+            )
+            run_dir = repo_dir / "runs" / "run_1"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            prompt_bundle = freeze_swarm_prompt_bundle(run_dir=run_dir, loaded=loaded)
+
+            danger_map_provider = SequenceProvider(
+                [
+                    {
+                        "trust_boundaries": ["api"],
+                        "risky_sinks": ["sql"],
+                        "auth_assumptions": ["cookie"],
+                        "hot_paths": ["app/service.py"],
+                        "notes": ["watch auth"],
+                    }
+                ]
+            )
+            generate_danger_map(
+                cwd=repo_dir,
+                loaded=loaded,
+                provider=danger_map_provider,
+                prompt_bundle=prompt_bundle,
+            )
+            self.assertEqual("low", danger_map_provider.start_calls[0]["reasoning_effort"])
+
+            swarm_digest = run_dir / "derived_context" / "swarm_digest.md"
+            shared_manifest = run_dir / "resources" / "shared" / "manifest.md"
+            _write(swarm_digest, "# digest\n")
+            _write(shared_manifest, "# shared\n")
+
+            sweep_provider = SequenceProvider(
+                [
+                    {
+                        "outcome": "finding",
+                        "severity_bucket": "medium",
+                        "claim": "seed claim",
+                        "evidence": ["app/service.py:1"],
+                        "related_files": [],
+                        "notes": [],
+                    },
+                    {
+                        "outcome": "reportable",
+                        "proof_state": "written_proof",
+                        "claim": "seed claim",
+                        "summary": "Tight written proof.",
+                        "preconditions": ["Reach the vulnerable endpoint."],
+                        "repro_steps": [],
+                        "citations": ["app/service.py:1"],
+                        "notes": [],
+                        "filter_reason": "",
+                    },
+                ]
+            )
+            run_swarm_sweep(
+                cwd=repo_dir,
+                loaded=loaded,
+                provider=sweep_provider,
+                prompt_bundle=prompt_bundle,
+                run_dir=run_dir,
+                swarm_digest_path=swarm_digest,
+                shared_manifest_path=shared_manifest,
+                eligible_files=[(repo_dir / "app" / "service.py").resolve()],
+            )
+
+            self.assertEqual("high", sweep_provider.start_calls[0]["reasoning_effort"])
+            self.assertEqual("low", sweep_provider.start_calls[1]["reasoning_effort"])
 
     def test_swarm_groups_duplicate_seed_findings_into_one_issue_case(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -688,6 +770,7 @@ class SwarmTests(unittest.TestCase):
                     provider=provider,
                     prompt_bundle=prompt_bundle,
                 )
+            self.assertEqual("high", provider.start_calls[0]["reasoning_effort"])
 
 
 if __name__ == "__main__":

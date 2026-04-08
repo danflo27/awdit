@@ -571,7 +571,7 @@ def generate_danger_map(
             worker_type="danger_map",
             lease_key=f"repo:{identity.repo_key}",
             model=swarm_config.sweep_model,
-            reasoning_effort="high",
+            reasoning_effort=swarm_config.reasoning.danger_map,
             instructions=prompt_asset.read_text(),
             input_text=input_text,
             prompt_cache_key=prompt_asset.prompt_cache_key,
@@ -1342,7 +1342,7 @@ def run_swarm_sweep(
                 worker_type="seed_file",
                 lease_key=f"file:{target_file}",
                 model=loaded.effective.swarm.sweep_model,
-                reasoning_effort="low",
+                reasoning_effort=loaded.effective.swarm.reasoning.seed,
                 instructions=prompt_asset.read_text(),
                 input_text=build_seed_input(
                     seed_id=seed_id,
@@ -1384,7 +1384,7 @@ def run_swarm_sweep(
                     worker_type="proof_issue",
                     lease_key=f"issue:{issue_candidate.case_id}",
                     model=loaded.effective.swarm.proof_model,
-                    reasoning_effort="medium",
+                    reasoning_effort=loaded.effective.swarm.reasoning.proof,
                     instructions=proof_prompt_asset.read_text(),
                     input_text=build_proof_input(
                         issue_candidate=issue_candidate,
