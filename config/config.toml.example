@@ -142,6 +142,9 @@ proof_model = "gpt-5.4"
 eligible_file_profile = "code_config_tests"
 token_budget = 120000
 allow_no_limit = true
+seed_max_parallel = 2
+proof_max_parallel = 1
+rate_limit_max_retries = 3
 
 [swarm.reasoning]
 danger_map = "high"

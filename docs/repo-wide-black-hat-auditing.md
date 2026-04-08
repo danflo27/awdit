@@ -312,6 +312,9 @@ The `swarm` section should define:
 - `eligible_file_profile`
 - `token_budget`
 - `allow_no_limit`
+- `seed_max_parallel` (optional, defaults to `2`)
+- `proof_max_parallel` (optional, defaults to `1`)
+- `rate_limit_max_retries` (optional, defaults to `3`)
 - `reasoning.danger_map` (optional, defaults to `high`)
 - `reasoning.seed` (optional, defaults to `low`)
 - `reasoning.proof` (optional, defaults to `medium`)
@@ -356,6 +359,9 @@ proof_model = "gpt-5.4"
 eligible_file_profile = "code_config_tests"
 token_budget = 120000
 allow_no_limit = true
+seed_max_parallel = 2
+proof_max_parallel = 1
+rate_limit_max_retries = 3
 
 [swarm.reasoning]
 danger_map = "high"
@@ -372,6 +378,8 @@ The confirm screen for `awdit swarm` should surface:
 - the eligible-file profile
 - the discovered eligible file count
 - the token budget, or that the run is explicitly no-limit
+- the configured seed and proof parallel limits
+- the configured rate-limit retry count
 - the selected sweep and proof models
 - the danger-map path
 - the shared resource manifest path

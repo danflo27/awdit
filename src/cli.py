@@ -45,6 +45,7 @@ from swarm import (
     list_eligible_swarm_files,
     load_danger_map_result,
     run_swarm_sweep,
+    summarize_seed_request_volume,
 )
 
 
@@ -244,7 +245,7 @@ def _handle_swarm(_: argparse.Namespace) -> int:
             eligible_files=eligible_files,
             prompt_bundle=prompt_bundle,
         )
-        _print_swarm_preflight(current, snapshot, result, eligible_files)
+        _print_swarm_preflight(cwd, current, snapshot, result, prompt_bundle, eligible_files)
 
         update_run_status(
             cwd=cwd,
@@ -497,6 +498,9 @@ def _persist_swarm_startup_snapshot(
                     "eligible_file_profile": loaded.effective.swarm.eligible_file_profile,
                     "token_budget": loaded.effective.swarm.token_budget,
                     "allow_no_limit": loaded.effective.swarm.allow_no_limit,
+                    "seed_max_parallel": loaded.effective.swarm.seed_max_parallel,
+                    "proof_max_parallel": loaded.effective.swarm.proof_max_parallel,
+                    "rate_limit_max_retries": loaded.effective.swarm.rate_limit_max_retries,
                     "prompt_bundle": prompt_bundle.to_dict(),
                 },
                 "resources": {
@@ -569,7 +573,16 @@ def _write_swarm_digest(
     path.write_text("\n".join(lines).strip() + "\n", encoding="utf-8")
 
 
-def _print_swarm_preflight(loaded, snapshot, danger_map_result, eligible_files: list[Path]) -> None:
+def _print_swarm_preflight(cwd: Path, loaded, snapshot, danger_map_result, prompt_bundle, eligible_files: list[Path]) -> None:
+    seed_volume = summarize_seed_request_volume(
+        cwd=cwd,
+        loaded=loaded,
+        prompt_bundle=prompt_bundle,
+        run_dir=snapshot.run_dir,
+        swarm_digest_path=snapshot.swarm_digest,
+        shared_manifest_path=snapshot.shared_manifest,
+        eligible_files=eligible_files,
+    )
     print("")
     print("Swarm preflight")
     print("  Mode: repo-wide black-hat sweep")
@@ -587,9 +600,25 @@ def _print_swarm_preflight(loaded, snapshot, danger_map_result, eligible_files: 
         print(f"  Token budget: {loaded.effective.swarm.token_budget}")
     print(f"  Sweep model: {loaded.effective.swarm.sweep_model}")
     print(f"  Proof model: {loaded.effective.swarm.proof_model}")
+    print(f"  Seed max parallel: {loaded.effective.swarm.seed_max_parallel}")
+    print(f"  Proof max parallel: {loaded.effective.swarm.proof_max_parallel}")
+    print(f"  Rate-limit retries: {loaded.effective.swarm.rate_limit_max_retries}")
     print(f"  Danger-map reasoning: {loaded.effective.swarm.reasoning.danger_map}")
     print(f"  Seed reasoning: {loaded.effective.swarm.reasoning.seed}")
     print(f"  Proof reasoning: {loaded.effective.swarm.reasoning.proof}")
+    print(f"  Estimated peak seed request tokens: {seed_volume.peak_parallel_estimated_tokens}")
+    if (
+        loaded.effective.swarm.allow_no_limit
+        and seed_volume.peak_parallel_estimated_tokens > loaded.effective.swarm.token_budget
+    ):
+        print(
+            "  Warning: estimated peak seed request tokens exceed the configured token budget, "
+            "but allow_no_limit is enabled."
+        )
+        print(
+            "    Largest seed request: "
+            f"{seed_volume.max_job_target_file} (~{seed_volume.max_job_estimated_tokens} tokens)"
+        )
     print("  Proof stage: read-only validation")
     print("  Final report style: proof-filtered findings, grouped duplicates")
     print("  Repo danger map:")
