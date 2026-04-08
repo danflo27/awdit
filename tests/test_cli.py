@@ -871,6 +871,9 @@ class SwarmCliTests(unittest.TestCase):
             self.assertIn("Danger-map reasoning: high", output)
             self.assertIn("Seed reasoning: low", output)
             self.assertIn("Proof reasoning: medium", output)
+            self.assertIn("Seed max parallel: 2", output)
+            self.assertIn("Proof max parallel: 1", output)
+            self.assertIn("Rate-limit retries: 3", output)
             self.assertIn("Proof stage: read-only validation", output)
             self.assertIn("proof-filtered findings, grouped duplicates", output)
 
@@ -900,6 +903,9 @@ class SwarmCliTests(unittest.TestCase):
             self.assertIn("Proof reasoning: `medium`", swarm_digest)
             self.assertEqual("swarm", run_json["mode"])
             self.assertIn("prompt_bundle", run_json["swarm"])
+            self.assertEqual(2, run_json["swarm"]["seed_max_parallel"])
+            self.assertEqual(1, run_json["swarm"]["proof_max_parallel"])
+            self.assertEqual(3, run_json["swarm"]["rate_limit_max_retries"])
             self.assertEqual(
                 {
                     "danger_map": "high",
@@ -908,6 +914,54 @@ class SwarmCliTests(unittest.TestCase):
                 },
                 run_json["swarm"]["reasoning"],
             )
+
+    def test_swarm_preflight_warns_when_peak_seed_estimate_exceeds_budget_in_no_limit_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_dir = Path(tmp_dir) / "repo"
+            _write(
+                repo_dir / "app" / "large.py",
+                "payload = " + repr("A" * 3000),
+            )
+            loaded = self._loaded_config_from_text(
+                repo_dir,
+                _user_config_text().replace(
+                    "token_budget = 120000",
+                    "token_budget = 100",
+                    1,
+                ),
+            )
+
+            result, output = self._run_swarm(
+                repo_dir,
+                loaded,
+                BackgroundSequenceProvider(
+                    [
+                        {
+                            "trust_boundaries": ["api boundary"],
+                            "risky_sinks": ["sql write path"],
+                            "auth_assumptions": ["session cookie is trusted"],
+                            "hot_paths": ["app/large.py"],
+                            "notes": ["watch org scoping"],
+                        },
+                        {
+                            "outcome": "no_finding",
+                            "severity_bucket": "none",
+                            "claim": "",
+                            "evidence": [],
+                            "related_files": [],
+                            "notes": [],
+                        },
+                    ]
+                ),
+                ["n", "y", "y", "y"],
+            )
+
+            self.assertEqual(0, result)
+            self.assertIn(
+                "Warning: estimated peak seed request tokens exceed the configured token budget",
+                output,
+            )
+            self.assertIn("Largest seed request: app/large.py", output)
 
     def test_swarm_blocks_missing_local_shared_resources_before_preflight(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

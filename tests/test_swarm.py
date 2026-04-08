@@ -8,7 +8,7 @@ from pathlib import Path
 from unittest import mock
 
 from config import load_effective_config
-from provider_openai import BackgroundPollResult, ProviderBackgroundHandle
+from provider_openai import BackgroundPollResult, ProviderBackgroundHandle, ProviderTurnResult
 from swarm import (
     RepoReadOnlyTools,
     SwarmSeedResult,
@@ -42,7 +42,17 @@ def _write_prompt_tree(base: Path) -> None:
     ):
         (prompt_dir / f"{slot_name}.md").write_text(f"# {slot_name}\n", encoding="utf-8")
     (prompt_dir / "swarm_danger_map.md").write_text("# frozen danger map\n", encoding="utf-8")
-    (prompt_dir / "swarm_seed.md").write_text("# frozen seed prompt\n", encoding="utf-8")
+    (prompt_dir / "swarm_seed.md").write_text(
+        "\n".join(
+            [
+                "# frozen seed prompt",
+                "Hint: {{target_file}}",
+                "Write to {{output_path}}",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
     (prompt_dir / "swarm_proof.md").write_text("# frozen proof prompt\n", encoding="utf-8")
 
 
@@ -199,6 +209,155 @@ class RetryProvider:
         return None
 
 
+class MaxInFlightProvider:
+    def __init__(self, payloads: list[dict[str, object]]) -> None:
+        self._pending_payloads = list(payloads)
+        self._response_payloads: dict[str, dict[str, object]] = {}
+        self._active_handles: set[str] = set()
+        self.start_calls: list[dict[str, object]] = []
+        self.max_in_flight = 0
+
+    def start_background_turn(self, **kwargs):
+        if not self._pending_payloads:
+            raise AssertionError("No pending payloads left.")
+        response_id = f"bg_{len(self.start_calls) + 1}"
+        self._response_payloads[response_id] = self._pending_payloads.pop(0)
+        self._active_handles.add(response_id)
+        self.max_in_flight = max(self.max_in_flight, len(self._active_handles))
+        self.start_calls.append(kwargs)
+        return ProviderBackgroundHandle(response_id=response_id)
+
+    def poll_background_turn(self, **kwargs):
+        response_id = kwargs["handle"].response_id
+        self._active_handles.discard(response_id)
+        payload = self._response_payloads.pop(response_id)
+        return BackgroundPollResult(
+            status="completed",
+            response_id=response_id,
+            final_text=json.dumps(payload),
+            tool_traces=(),
+        )
+
+    def cancel_background_turn(self, handle):
+        self._active_handles.discard(handle.response_id)
+        return "cancelled"
+
+    def classify_provider_failure(self, value):
+        return None
+
+
+class RateLimitThenSuccessProvider:
+    def __init__(self) -> None:
+        self.start_calls: list[dict[str, object]] = []
+        self._response_payloads: dict[str, dict[str, object]] = {}
+
+    def start_background_turn(self, **kwargs):
+        self.start_calls.append(kwargs)
+        if len(self.start_calls) == 1:
+            raise RuntimeError(
+                "ResponseError(code='rate_limit_exceeded', message='Rate limit reached for "
+                "gpt-5.4-mini on tokens per min (TPM): Limit 200000, Used 188404, Requested "
+                "19721. Please try again in 2.5s.')"
+            )
+        response_id = f"bg_{len(self.start_calls)}"
+        self._response_payloads[response_id] = {"ok": True}
+        return ProviderBackgroundHandle(response_id=response_id)
+
+    def poll_background_turn(self, **kwargs):
+        response_id = kwargs["handle"].response_id
+        payload = self._response_payloads.pop(response_id)
+        return BackgroundPollResult(
+            status="completed",
+            response_id=response_id,
+            final_text=json.dumps(payload),
+            tool_traces=(),
+        )
+
+    def cancel_background_turn(self, handle):
+        self._response_payloads.pop(handle.response_id, None)
+        return "cancelled"
+
+    def classify_provider_failure(self, value):
+        return None
+
+
+class RunningThenFailureProvider:
+    def __init__(self) -> None:
+        self.start_calls: list[dict[str, object]] = []
+        self.cancelled: list[str] = []
+
+    def start_background_turn(self, **kwargs):
+        response_id = f"bg_{len(self.start_calls) + 1}"
+        self.start_calls.append(kwargs)
+        return ProviderBackgroundHandle(response_id=response_id)
+
+    def poll_background_turn(self, **kwargs):
+        response_id = kwargs["handle"].response_id
+        if response_id == "bg_1":
+            return BackgroundPollResult(
+                status="running",
+                response_id=response_id,
+                final_text="",
+                tool_traces=(),
+            )
+        return BackgroundPollResult(
+            status="failed",
+            response_id=response_id,
+            final_text="",
+            tool_traces=(),
+            failure_message="synthetic failure",
+        )
+
+    def cancel_background_turn(self, handle):
+        self.cancelled.append(handle.response_id)
+        return "cancelled"
+
+    def classify_provider_failure(self, value):
+        return None
+
+
+class PartialSeedFailureProvider:
+    def __init__(self) -> None:
+        self.start_calls: list[dict[str, object]] = []
+
+    def start_background_turn(self, **kwargs):
+        response_id = f"bg_{len(self.start_calls) + 1}"
+        self.start_calls.append(kwargs)
+        return ProviderBackgroundHandle(response_id=response_id)
+
+    def poll_background_turn(self, **kwargs):
+        response_id = kwargs["handle"].response_id
+        if response_id == "bg_1":
+            return BackgroundPollResult(
+                status="completed",
+                response_id=response_id,
+                final_text=json.dumps(
+                    {
+                        "outcome": "no_finding",
+                        "severity_bucket": "none",
+                        "claim": "",
+                        "evidence": [],
+                        "related_files": [],
+                        "notes": [],
+                    }
+                ),
+                tool_traces=(),
+            )
+        return BackgroundPollResult(
+            status="failed",
+            response_id=response_id,
+            final_text="",
+            tool_traces=(),
+            failure_message="synthetic failure",
+        )
+
+    def cancel_background_turn(self, handle):
+        return "cancelled"
+
+    def classify_provider_failure(self, value):
+        return None
+
+
 class SwarmTests(unittest.TestCase):
     def _loaded_config(self, repo_dir: Path):
         return self._loaded_config_from_text(repo_dir, _config_text())
@@ -266,7 +425,9 @@ class SwarmTests(unittest.TestCase):
             self.assertEqual(1, len(result.seed_results))
             self.assertEqual(1, len(result.issue_candidates))
             self.assertEqual(1, len(result.proof_results))
-            self.assertEqual("# frozen seed prompt\n", provider.start_calls[0]["instructions"])
+            self.assertIn("# frozen seed prompt", provider.start_calls[0]["instructions"])
+            self.assertIn("Hint: app/service.py", provider.start_calls[0]["instructions"])
+            self.assertIn("Write to runs/run_1/swarm/seeds", provider.start_calls[0]["instructions"])
             self.assertEqual("# frozen proof prompt\n", provider.start_calls[1]["instructions"])
             self.assertEqual("low", provider.start_calls[0]["reasoning_effort"])
             self.assertEqual("medium", provider.start_calls[1]["reasoning_effort"])
@@ -351,6 +512,113 @@ class SwarmTests(unittest.TestCase):
 
             self.assertEqual("high", sweep_provider.start_calls[0]["reasoning_effort"])
             self.assertEqual("low", sweep_provider.start_calls[1]["reasoning_effort"])
+
+    def test_generate_danger_map_passes_configured_rate_limit_retries(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_dir = Path(tmp_dir) / "repo"
+            _write(repo_dir / "app" / "service.py", "print('hello')\n")
+            loaded = self._loaded_config_from_text(
+                repo_dir,
+                _config_text().replace(
+                    '[swarm.prompts]',
+                    'rate_limit_max_retries = 4\n\n[swarm.prompts]',
+                    1,
+                ),
+            )
+            run_dir = repo_dir / "runs" / "run_1"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            prompt_bundle = freeze_swarm_prompt_bundle(run_dir=run_dir, loaded=loaded)
+
+            with mock.patch(
+                "swarm._run_swarm_background_worker",
+                return_value=ProviderTurnResult(
+                    response_id="bg_1",
+                    final_text=json.dumps(
+                        {
+                            "trust_boundaries": ["api"],
+                            "risky_sinks": ["sql"],
+                            "auth_assumptions": ["cookie"],
+                            "hot_paths": ["app/service.py"],
+                            "notes": ["watch auth"],
+                        }
+                    ),
+                    tool_traces=(),
+                    status="completed",
+                    model="gpt-5.4-mini",
+                ),
+            ) as worker:
+                generate_danger_map(
+                    cwd=repo_dir,
+                    loaded=loaded,
+                    provider=SequenceProvider([]),
+                    prompt_bundle=prompt_bundle,
+                )
+
+            self.assertEqual(4, worker.call_args.kwargs["rate_limit_max_retries"])
+
+    def test_swarm_passes_configured_parallel_limits_to_seed_and_proof_batches(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_dir = Path(tmp_dir) / "repo"
+            _write(repo_dir / "app" / "service.py", "print('hello')\n")
+            loaded = self._loaded_config_from_text(
+                repo_dir,
+                _config_text().replace(
+                    '[swarm.prompts]',
+                    'seed_max_parallel = 3\nproof_max_parallel = 2\nrate_limit_max_retries = 4\n\n[swarm.prompts]',
+                    1,
+                ),
+            )
+            run_dir = repo_dir / "runs" / "run_1"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            prompt_bundle = freeze_swarm_prompt_bundle(run_dir=run_dir, loaded=loaded)
+
+            swarm_digest = run_dir / "derived_context" / "swarm_digest.md"
+            shared_manifest = run_dir / "resources" / "shared" / "manifest.md"
+            _write(swarm_digest, "# digest\n")
+            _write(shared_manifest, "# shared\n")
+
+            provider = SequenceProvider(
+                [
+                    {
+                        "outcome": "finding",
+                        "severity_bucket": "medium",
+                        "claim": "seed claim",
+                        "evidence": ["app/service.py:1"],
+                        "related_files": [],
+                        "notes": [],
+                    },
+                    {
+                        "outcome": "reportable",
+                        "proof_state": "written_proof",
+                        "claim": "seed claim",
+                        "summary": "Tight written proof.",
+                        "preconditions": ["Reach the vulnerable endpoint."],
+                        "repro_steps": [],
+                        "citations": ["app/service.py:1"],
+                        "notes": [],
+                        "filter_reason": "",
+                    },
+                ]
+            )
+
+            with mock.patch("swarm.run_background_swarm_workers", wraps=run_background_swarm_workers) as wrapped:
+                result = run_swarm_sweep(
+                    cwd=repo_dir,
+                    loaded=loaded,
+                    provider=provider,
+                    prompt_bundle=prompt_bundle,
+                    run_dir=run_dir,
+                    swarm_digest_path=swarm_digest,
+                    shared_manifest_path=shared_manifest,
+                    eligible_files=[(repo_dir / "app" / "service.py").resolve()],
+                )
+
+            self.assertEqual(1, len(result.proof_results))
+            self.assertEqual(2, wrapped.call_count)
+            self.assertEqual(3, wrapped.call_args_list[0].kwargs["max_parallel"])
+            self.assertEqual(2, wrapped.call_args_list[1].kwargs["max_parallel"])
+            self.assertEqual(4, wrapped.call_args_list[0].kwargs["rate_limit_max_retries"])
+            self.assertEqual(4, wrapped.call_args_list[1].kwargs["rate_limit_max_retries"])
 
     def test_swarm_groups_duplicate_seed_findings_into_one_issue_case(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -714,6 +982,60 @@ class SwarmTests(unittest.TestCase):
         self.assertEqual(["a1", "b1", "a2"], [call["input_text"] for call in provider.start_calls])
         self.assertEqual({"job_a1", "job_a2", "job_b1"}, set(results))
 
+    def test_background_scheduler_respects_parallel_limit(self) -> None:
+        provider = MaxInFlightProvider(
+            [{"ok": 1}, {"ok": 2}, {"ok": 3}]
+        )
+        jobs = [
+            SwarmWorkerJob(
+                worker_id="job_a",
+                worker_type="seed_file",
+                lease_key="file:app/a.py",
+                model="gpt-5.4-mini",
+                reasoning_effort="low",
+                instructions="seed",
+                input_text="a",
+                prompt_cache_key="cache",
+                text_format=None,
+                tools=(),
+            ),
+            SwarmWorkerJob(
+                worker_id="job_b",
+                worker_type="seed_file",
+                lease_key="file:app/b.py",
+                model="gpt-5.4-mini",
+                reasoning_effort="low",
+                instructions="seed",
+                input_text="b",
+                prompt_cache_key="cache",
+                text_format=None,
+                tools=(),
+            ),
+            SwarmWorkerJob(
+                worker_id="job_c",
+                worker_type="seed_file",
+                lease_key="file:app/c.py",
+                model="gpt-5.4-mini",
+                reasoning_effort="low",
+                instructions="seed",
+                input_text="c",
+                prompt_cache_key="cache",
+                text_format=None,
+                tools=(),
+            ),
+        ]
+
+        results = run_background_swarm_workers(
+            provider=provider,
+            jobs=jobs,
+            tool_executor=lambda name, arguments: "",
+            max_parallel=2,
+            poll_interval_seconds=0.0,
+        )
+
+        self.assertEqual({"job_a", "job_b", "job_c"}, set(results))
+        self.assertEqual(2, provider.max_in_flight)
+
     def test_background_scheduler_retries_once(self) -> None:
         provider = RetryProvider()
         jobs = [
@@ -742,6 +1064,131 @@ class SwarmTests(unittest.TestCase):
 
         self.assertEqual({"job_retry"}, set(results))
         self.assertEqual(2, len(provider.start_calls))
+
+    def test_background_scheduler_waits_and_retries_rate_limited_workers(self) -> None:
+        provider = RateLimitThenSuccessProvider()
+        jobs = [
+            SwarmWorkerJob(
+                worker_id="job_retry",
+                worker_type="seed_file",
+                lease_key="file:app/a.py",
+                model="gpt-5.4-mini",
+                reasoning_effort="low",
+                instructions="seed",
+                input_text="retry",
+                prompt_cache_key="cache",
+                text_format=None,
+                tools=(),
+            )
+        ]
+
+        current_time = 10.0
+        sleeps: list[float] = []
+
+        def fake_monotonic() -> float:
+            return current_time
+
+        def fake_sleep(seconds: float) -> None:
+            nonlocal current_time
+            sleeps.append(seconds)
+            current_time += seconds
+
+        with (
+            mock.patch("swarm.time.monotonic", side_effect=fake_monotonic),
+            mock.patch("swarm.time.sleep", side_effect=fake_sleep),
+        ):
+            results = run_background_swarm_workers(
+                provider=provider,
+                jobs=jobs,
+                tool_executor=lambda name, arguments: "",
+                max_parallel=1,
+                poll_interval_seconds=0.0,
+                max_retries=0,
+                rate_limit_max_retries=1,
+            )
+
+        self.assertEqual({"job_retry"}, set(results))
+        self.assertEqual(2, len(provider.start_calls))
+        self.assertTrue(any(seconds >= 2.5 for seconds in sleeps))
+
+    def test_background_scheduler_cancels_active_workers_after_non_rate_limit_failure(self) -> None:
+        provider = RunningThenFailureProvider()
+        jobs = [
+            SwarmWorkerJob(
+                worker_id="job_running",
+                worker_type="seed_file",
+                lease_key="file:app/a.py",
+                model="gpt-5.4-mini",
+                reasoning_effort="low",
+                instructions="seed",
+                input_text="a",
+                prompt_cache_key="cache",
+                text_format=None,
+                tools=(),
+            ),
+            SwarmWorkerJob(
+                worker_id="job_fail",
+                worker_type="seed_file",
+                lease_key="file:app/b.py",
+                model="gpt-5.4-mini",
+                reasoning_effort="low",
+                instructions="seed",
+                input_text="b",
+                prompt_cache_key="cache",
+                text_format=None,
+                tools=(),
+            ),
+        ]
+
+        with self.assertRaisesRegex(RuntimeError, "job_fail"):
+            run_background_swarm_workers(
+                provider=provider,
+                jobs=jobs,
+                tool_executor=lambda name, arguments: "",
+                max_parallel=2,
+                poll_interval_seconds=0.0,
+                max_retries=0,
+            )
+
+        self.assertEqual(["bg_1"], provider.cancelled)
+
+    def test_swarm_persists_completed_seed_artifacts_before_later_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_dir = Path(tmp_dir) / "repo"
+            _write(repo_dir / "app" / "a.py", "print('a')\n")
+            _write(repo_dir / "app" / "b.py", "print('b')\n")
+            loaded = self._loaded_config(repo_dir)
+            run_dir = repo_dir / "runs" / "run_1"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            prompt_bundle = freeze_swarm_prompt_bundle(run_dir=run_dir, loaded=loaded)
+
+            swarm_digest = run_dir / "derived_context" / "swarm_digest.md"
+            shared_manifest = run_dir / "resources" / "shared" / "manifest.md"
+            _write(swarm_digest, "# digest\n")
+            _write(shared_manifest, "# shared\n")
+
+            provider = PartialSeedFailureProvider()
+
+            with (
+                self.assertRaisesRegex(RuntimeError, "Swarm worker failure"),
+                mock.patch("swarm.DEFAULT_SWARM_MAX_RETRIES", 0),
+            ):
+                run_swarm_sweep(
+                    cwd=repo_dir,
+                    loaded=loaded,
+                    provider=provider,
+                    prompt_bundle=prompt_bundle,
+                    run_dir=run_dir,
+                    swarm_digest_path=swarm_digest,
+                    shared_manifest_path=shared_manifest,
+                    eligible_files=[
+                        (repo_dir / "app" / "a.py").resolve(),
+                        (repo_dir / "app" / "b.py").resolve(),
+                    ],
+                )
+
+            self.assertTrue((run_dir / "swarm" / "seeds" / "seed_001.json").exists())
+            self.assertTrue((run_dir / "swarm" / "seeds" / "seed_001.md").exists())
 
     def test_generate_danger_map_rejects_missing_structured_keys(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

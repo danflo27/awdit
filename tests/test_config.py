@@ -166,6 +166,9 @@ class ConfigTests(unittest.TestCase):
                 eligible_file_profile = "code_config_tests"
                 token_budget = 120000
                 allow_no_limit = true
+                seed_max_parallel = 4
+                proof_max_parallel = 2
+                rate_limit_max_retries = 5
 
                 [swarm.reasoning]
                 danger_map = "low"
@@ -252,6 +255,9 @@ class ConfigTests(unittest.TestCase):
             self.assertIsNotNone(loaded.effective.swarm)
             self.assertEqual("gpt-5.4-mini", loaded.effective.swarm.sweep_model)
             self.assertEqual("gpt-5.4", loaded.effective.swarm.proof_model)
+            self.assertEqual(4, loaded.effective.swarm.seed_max_parallel)
+            self.assertEqual(2, loaded.effective.swarm.proof_max_parallel)
+            self.assertEqual(5, loaded.effective.swarm.rate_limit_max_retries)
             self.assertEqual("low", loaded.effective.swarm.reasoning.danger_map)
             self.assertEqual("high", loaded.effective.swarm.reasoning.seed)
             self.assertEqual("medium", loaded.effective.swarm.reasoning.proof)
@@ -438,6 +444,9 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual("high", loaded.effective.swarm.reasoning.danger_map)
             self.assertEqual("low", loaded.effective.swarm.reasoning.seed)
             self.assertEqual("medium", loaded.effective.swarm.reasoning.proof)
+            self.assertEqual(2, loaded.effective.swarm.seed_max_parallel)
+            self.assertEqual(1, loaded.effective.swarm.proof_max_parallel)
+            self.assertEqual(3, loaded.effective.swarm.rate_limit_max_retries)
 
     def test_swarm_reasoning_partial_override_uses_defaults_for_missing_values(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
