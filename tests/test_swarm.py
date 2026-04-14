@@ -1149,6 +1149,45 @@ class SwarmTests(unittest.TestCase):
         self.assertEqual({"job_a", "job_b", "job_c"}, set(results))
         self.assertEqual(2, provider.max_in_flight)
 
+    def test_background_scheduler_emits_progress_events(self) -> None:
+        provider = SequenceProvider([{"ok": True}])
+        jobs = [
+            SwarmWorkerJob(
+                worker_id="job_a",
+                worker_type="seed_file",
+                lease_key="file:app/a.py",
+                model="gpt-5.4-mini",
+                reasoning_effort="low",
+                instructions="seed",
+                input_text="a",
+                prompt_cache_key="cache",
+                text_format=None,
+                tools=(),
+            )
+        ]
+        progress_events: list[tuple[str, dict[str, object]]] = []
+
+        results = run_background_swarm_workers(
+            provider=provider,
+            jobs=jobs,
+            tool_executor=lambda name, arguments: "",
+            stage_name="seed",
+            max_parallel=1,
+            poll_interval_seconds=0.0,
+            progress_callback=lambda event_type, data: progress_events.append((event_type, dict(data))),
+        )
+
+        self.assertEqual({"job_a"}, set(results))
+        self.assertEqual(
+            ["stage_started", "worker_started", "worker_completed", "stage_completed"],
+            [event_type for event_type, _ in progress_events],
+        )
+        self.assertEqual("seed", progress_events[0][1]["stage_name"])
+        self.assertEqual("app/a.py", progress_events[1][1]["label"])
+        self.assertEqual("inspect app/a.py", progress_events[1][1]["action"])
+        self.assertGreaterEqual(float(progress_events[2][1]["elapsed_seconds"]), 0.0)
+        self.assertEqual(1, progress_events[3][1]["completed_workers"])
+
     def test_background_scheduler_retries_once(self) -> None:
         provider = RetryProvider()
         jobs = [

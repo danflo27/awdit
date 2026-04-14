@@ -735,6 +735,58 @@ class SwarmCliTests(unittest.TestCase):
             self.assertEqual(("swarm", "completed"), row[:2])
             self.assertIsNotNone(row[2])
 
+    def test_swarm_prints_live_worker_progress(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_dir = Path(tmp_dir) / "repo"
+            _write(repo_dir / "app" / "service.py", "print('hello')\n")
+            loaded = self._loaded_config(repo_dir)
+
+            result, output = self._run_swarm(
+                repo_dir,
+                loaded,
+                BackgroundSequenceProvider(
+                    [
+                        {
+                            "trust_boundaries": ["api boundary"],
+                            "risky_sinks": ["sql write path"],
+                            "auth_assumptions": ["session cookie is trusted"],
+                            "hot_paths": ["app/service.py"],
+                            "notes": ["watch org scoping"],
+                        },
+                        {
+                            "outcome": "finding",
+                            "severity_bucket": "medium",
+                            "claim": "seed claim",
+                            "evidence": ["app/service.py:1"],
+                            "related_files": [],
+                            "notes": [],
+                        },
+                        {
+                            "outcome": "reportable",
+                            "proof_state": "written_proof",
+                            "claim": "seed claim",
+                            "summary": "proof summary",
+                            "preconditions": [],
+                            "repro_steps": ["step 1"],
+                            "citations": ["app/service.py:1"],
+                            "notes": [],
+                            "filter_reason": "",
+                        },
+                    ]
+                ),
+                ["n", "y", "y", "y"],
+            )
+
+            self.assertEqual(0, result)
+            self.assertIn("[* seed worker SEED-001 started: inspect app/service.py *]", output)
+            self.assertIn("[* seed worker SEED-001 completed: app/service.py (", output)
+            self.assertIn("Proof stage started: 1 issue worker queued.", output)
+            self.assertIn(
+                "[* proof worker SWM-001 started: validate promoted finding for app/service.py *]",
+                output,
+            )
+            self.assertIn("[* proof worker SWM-001 completed: app/service.py (", output)
+
     def test_swarm_edit_regenerates_danger_map_and_appends_guidance(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             repo_dir = Path(tmp_dir) / "repo"

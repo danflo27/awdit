@@ -20,6 +20,7 @@ import threading
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 from config import (
     SLOT_NAMES,
@@ -291,6 +292,7 @@ def _handle_swarm(_: argparse.Namespace) -> int:
             swarm_digest_path=snapshot.swarm_digest,
             shared_manifest_path=snapshot.shared_manifest,
             eligible_files=eligible_files,
+            progress_callback=_print_swarm_progress,
         )
         update_run_status(
             cwd=cwd,
@@ -696,6 +698,102 @@ def _print_swarm_preflight(cwd: Path, loaded, snapshot, danger_map_result, promp
     print(f"    {snapshot.swarm_digest}")
     print("  Prompt bundle manifest:")
     print(f"    {snapshot.prompt_bundle_manifest}")
+
+
+def _print_swarm_progress(event_type: str, data: dict[str, Any]) -> None:
+    stage_name = str(data.get("stage_name", "") or "").strip()
+    worker_id = str(data.get("worker_id", "") or "").strip()
+    label = str(data.get("label", "") or "").strip() or worker_id
+    action = str(data.get("action", "") or "").strip() or f"work on {label}"
+
+    if event_type == "stage_started":
+        if stage_name == "seed":
+            return
+        worker_count = _coerce_progress_int(data.get("worker_count"))
+        print(
+            f"{_swarm_stage_title(stage_name)} stage started: "
+            f"{worker_count} {_swarm_worker_noun(stage_name, worker_count)} queued.",
+            flush=True,
+        )
+        return
+
+    if event_type == "stage_completed":
+        if stage_name == "seed":
+            return
+        completed_workers = _coerce_progress_int(data.get("completed_workers"))
+        print(
+            f"{_swarm_stage_title(stage_name)} stage complete: "
+            f"{completed_workers} {_swarm_worker_noun(stage_name, completed_workers)} finished.",
+            flush=True,
+        )
+        return
+
+    if event_type == "worker_started":
+        print(f"[* {stage_name} worker {worker_id} started: {action} *]", flush=True)
+        return
+
+    if event_type == "worker_tool_calls_requested":
+        count = _coerce_progress_int(data.get("count"))
+        noun = "tool call" if count == 1 else "tool calls"
+        print(
+            f"[* {stage_name} worker {worker_id} requested {count} {noun} while working on {label} *]",
+            flush=True,
+        )
+        return
+
+    if event_type == "worker_retry":
+        reason = str(data.get("reason", "") or "").strip()
+        delay_seconds = data.get("delay_seconds")
+        if reason == "rate_limit" and isinstance(delay_seconds, (int, float)):
+            print(
+                f"[* {stage_name} worker {worker_id} retrying {label} after rate limit "
+                f"({float(delay_seconds):.2f}s cooldown) *]",
+                flush=True,
+            )
+            return
+        print(f"[* {stage_name} worker {worker_id} retrying {label} after {reason or 'failure'} *]", flush=True)
+        return
+
+    if event_type == "worker_completed":
+        elapsed_seconds = data.get("elapsed_seconds")
+        elapsed_suffix = ""
+        if isinstance(elapsed_seconds, (int, float)):
+            elapsed_suffix = f" ({float(elapsed_seconds):.2f}s)"
+        print(f"[* {stage_name} worker {worker_id} completed: {label}{elapsed_suffix} *]", flush=True)
+        return
+
+    if event_type == "worker_failed":
+        failure_message = str(data.get("failure_message", "") or "").strip()
+        if failure_message:
+            print(
+                f"[* {stage_name} worker {worker_id} failed: {label} ({failure_message}) *]",
+                flush=True,
+            )
+            return
+        print(f"[* {stage_name} worker {worker_id} failed: {label} *]", flush=True)
+
+
+def _swarm_stage_title(stage_name: str) -> str:
+    if stage_name == "seed":
+        return "Sweep"
+    return stage_name.replace("_", " ").title() or "Swarm"
+
+
+def _swarm_worker_noun(stage_name: str, count: int) -> str:
+    if stage_name == "proof":
+        singular = "issue worker"
+    elif stage_name == "seed":
+        singular = "file worker"
+    else:
+        singular = "worker"
+    return singular if count == 1 else f"{singular}s"
+
+
+def _coerce_progress_int(value: object) -> int:
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return 0
 
 
 def _handle_list_models(_: argparse.Namespace) -> int:
