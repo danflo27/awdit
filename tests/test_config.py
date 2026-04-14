@@ -19,7 +19,14 @@ from config import (
     save_repo_overrides,
 )
 from repo_memory import legacy_repo_key, migrate_legacy_repo_memory_dir, resolve_repo_identity
-from state_db import ensure_state_db, insert_run, record_run_failure, update_run_status
+from state_db import (
+    ensure_state_db,
+    insert_run,
+    load_learned_model_limit,
+    record_run_failure,
+    save_learned_model_limit,
+    update_run_status,
+)
 
 
 ALL_SLOTS = (
@@ -776,6 +783,31 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual("SEED-014", row[1])
             self.assertIn("missing keys: notes", row[2])
             self.assertTrue(row[3].endswith("failure_diagnostic.json"))
+
+    def test_state_db_persists_learned_model_limits(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_dir = Path(tmp_dir) / "repo"
+            repo_dir.mkdir(parents=True)
+
+            save_learned_model_limit(
+                cwd=repo_dir,
+                provider="openai",
+                model="gpt-5.4-mini",
+                learned_tpm_limit=200000,
+                headroom_fraction=0.85,
+                observed_peak_input_tokens={"seed_file": 40, "proof_issue": 25},
+            )
+
+            record = load_learned_model_limit(
+                cwd=repo_dir,
+                provider="openai",
+                model="gpt-5.4-mini",
+            )
+
+            self.assertIsNotNone(record)
+            self.assertEqual(200000, record.learned_tpm_limit)
+            self.assertEqual(0.85, record.headroom_fraction)
+            self.assertEqual({"seed_file": 40, "proof_issue": 25}, record.observed_peak_input_tokens)
 
 
 if __name__ == "__main__":

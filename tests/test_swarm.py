@@ -10,9 +10,12 @@ from unittest import mock
 
 from config import load_effective_config
 from provider_openai import BackgroundPollResult, ProviderBackgroundHandle, ProviderTurnResult
+from state_db import load_learned_model_limit, save_learned_model_limit
 from swarm import (
     RepoReadOnlyTools,
+    SwarmRunMetrics,
     SwarmSeedResult,
+    SwarmStageAbort,
     SwarmWorkerFailure,
     SwarmWorkerJob,
     freeze_swarm_prompt_bundle,
@@ -440,6 +443,189 @@ class UsageEventProvider:
 
     def classify_provider_failure(self, value):
         return None
+
+
+class MaxInFlightUsageProvider:
+    def __init__(self, usage_tokens: int) -> None:
+        self._usage_tokens = usage_tokens
+        self._response_payloads: dict[str, dict[str, object]] = {}
+        self._active_handles: set[str] = set()
+        self.start_calls: list[dict[str, object]] = []
+        self.start_usage_emitted_flags: list[bool] = []
+        self.max_in_flight = 0
+        self.usage_emitted = False
+
+    def start_background_turn(self, **kwargs):
+        response_id = f"bg_{len(self.start_calls) + 1}"
+        self._response_payloads[response_id] = {"ok": kwargs["input_text"]}
+        self._active_handles.add(response_id)
+        self.max_in_flight = max(self.max_in_flight, len(self._active_handles))
+        self.start_usage_emitted_flags.append(self.usage_emitted)
+        self.start_calls.append(kwargs)
+        return ProviderBackgroundHandle(response_id=response_id)
+
+    def poll_background_turn(self, **kwargs):
+        response_id = kwargs["handle"].response_id
+        event_callback = kwargs.get("event_callback")
+        if event_callback is not None:
+            event_callback(
+                "provider_usage",
+                {
+                    "response_id": response_id,
+                    "model": kwargs["model"],
+                    "input_tokens": self._usage_tokens,
+                    "output_tokens": 5,
+                    "total_tokens": self._usage_tokens + 5,
+                    "cached_input_tokens": 0,
+                    "reasoning_output_tokens": 0,
+                },
+            )
+        self.usage_emitted = True
+        self._active_handles.discard(response_id)
+        payload = self._response_payloads.pop(response_id)
+        return BackgroundPollResult(
+            status="completed",
+            response_id=response_id,
+            final_text=json.dumps(payload),
+            tool_traces=(),
+        )
+
+    def cancel_background_turn(self, handle):
+        self._active_handles.discard(handle.response_id)
+        self._response_payloads.pop(handle.response_id, None)
+        return "cancelled"
+
+    def classify_provider_failure(self, value):
+        return None
+
+
+class RateLimitThenUsageProvider:
+    def __init__(self, *, usage_tokens: int, message: str) -> None:
+        self._usage_tokens = usage_tokens
+        self._message = message
+        self._response_payloads: dict[str, dict[str, object]] = {}
+        self.start_calls: list[dict[str, object]] = []
+
+    def start_background_turn(self, **kwargs):
+        self.start_calls.append(kwargs)
+        if len(self.start_calls) == 1:
+            raise RuntimeError(self._message)
+        response_id = f"bg_{len(self.start_calls)}"
+        self._response_payloads[response_id] = {"ok": kwargs["input_text"]}
+        return ProviderBackgroundHandle(response_id=response_id)
+
+    def poll_background_turn(self, **kwargs):
+        response_id = kwargs["handle"].response_id
+        event_callback = kwargs.get("event_callback")
+        if event_callback is not None:
+            event_callback(
+                "provider_usage",
+                {
+                    "response_id": response_id,
+                    "model": kwargs["model"],
+                    "input_tokens": self._usage_tokens,
+                    "output_tokens": 5,
+                    "total_tokens": self._usage_tokens + 5,
+                    "cached_input_tokens": 0,
+                    "reasoning_output_tokens": 0,
+                },
+            )
+        payload = self._response_payloads.pop(response_id)
+        return BackgroundPollResult(
+            status="completed",
+            response_id=response_id,
+            final_text=json.dumps(payload),
+            tool_traces=(),
+        )
+
+    def cancel_background_turn(self, handle):
+        self._response_payloads.pop(handle.response_id, None)
+        return "cancelled"
+
+    def classify_provider_failure(self, value):
+        return None
+
+
+class DrainAfterAbortProvider:
+    def __init__(
+        self,
+        *,
+        failure_message: str,
+        completed_payload: dict[str, object] | None = None,
+        running_polls: int = 2,
+    ) -> None:
+        self._failure_message = failure_message
+        self._completed_payload = completed_payload or {"ok": True}
+        self._running_polls = max(1, running_polls)
+        self.start_calls: list[dict[str, object]] = []
+        self._poll_counts: dict[str, int] = {}
+        self.cancelled: list[str] = []
+
+    def start_background_turn(self, **kwargs):
+        response_id = f"bg_{len(self.start_calls) + 1}"
+        self.start_calls.append(kwargs)
+        return ProviderBackgroundHandle(response_id=response_id)
+
+    def poll_background_turn(self, **kwargs):
+        response_id = kwargs["handle"].response_id
+        self._poll_counts[response_id] = self._poll_counts.get(response_id, 0) + 1
+        event_callback = kwargs.get("event_callback")
+        if response_id == "bg_1":
+            if self._poll_counts[response_id] <= self._running_polls:
+                if event_callback is not None and self._poll_counts[response_id] == 1:
+                    event_callback(
+                        "provider_usage",
+                        {
+                            "response_id": response_id,
+                            "model": kwargs["model"],
+                            "input_tokens": 20,
+                            "output_tokens": 5,
+                            "total_tokens": 25,
+                            "cached_input_tokens": 0,
+                            "reasoning_output_tokens": 0,
+                        },
+                    )
+                return BackgroundPollResult(
+                    status="running",
+                    response_id=response_id,
+                    final_text="",
+                    tool_traces=(),
+                )
+            return BackgroundPollResult(
+                status="completed",
+                response_id=response_id,
+                final_text=json.dumps(self._completed_payload),
+                tool_traces=(),
+            )
+        return BackgroundPollResult(
+            status="failed",
+            response_id=response_id,
+            final_text="",
+            tool_traces=(),
+            failure_message=self._failure_message,
+        )
+
+    def cancel_background_turn(self, handle):
+        self.cancelled.append(handle.response_id)
+        return "cancelled"
+
+    def classify_provider_failure(self, value):
+        return None
+
+
+class SeedStageAbortProvider(DrainAfterAbortProvider):
+    def __init__(self, *, failure_message: str) -> None:
+        super().__init__(
+            failure_message=failure_message,
+            completed_payload={
+                "outcome": "no_finding",
+                "severity_bucket": "none",
+                "claim": "",
+                "evidence": [],
+                "related_files": [],
+                "notes": [],
+            },
+        )
 
 
 class SwarmTests(unittest.TestCase):
@@ -1309,6 +1495,324 @@ class SwarmTests(unittest.TestCase):
         self.assertEqual(2, len(provider.start_calls))
         self.assertTrue(any(seconds >= 0.93 for seconds in sleeps), sleeps)
 
+    def test_background_scheduler_bootstraps_at_one_worker_then_opens_parallelism(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_dir = Path(tmp_dir) / "repo"
+            repo_dir.mkdir(parents=True)
+            save_learned_model_limit(
+                cwd=repo_dir,
+                provider="openai",
+                model="gpt-5.4-mini",
+                learned_tpm_limit=200,
+                headroom_fraction=0.85,
+                observed_peak_input_tokens={"seed_file": 30},
+            )
+            provider = MaxInFlightUsageProvider(usage_tokens=20)
+            jobs = [
+                SwarmWorkerJob(
+                    worker_id="job_a",
+                    worker_type="seed_file",
+                    lease_key="file:app/a.py",
+                    model="gpt-5.4-mini",
+                    reasoning_effort="low",
+                    instructions="seed",
+                    input_text="a",
+                    prompt_cache_key="cache",
+                    text_format=None,
+                    tools=(),
+                ),
+                SwarmWorkerJob(
+                    worker_id="job_b",
+                    worker_type="seed_file",
+                    lease_key="file:app/b.py",
+                    model="gpt-5.4-mini",
+                    reasoning_effort="low",
+                    instructions="seed",
+                    input_text="b",
+                    prompt_cache_key="cache",
+                    text_format=None,
+                    tools=(),
+                ),
+                SwarmWorkerJob(
+                    worker_id="job_c",
+                    worker_type="seed_file",
+                    lease_key="file:app/c.py",
+                    model="gpt-5.4-mini",
+                    reasoning_effort="low",
+                    instructions="seed",
+                    input_text="c",
+                    prompt_cache_key="cache",
+                    text_format=None,
+                    tools=(),
+                ),
+            ]
+
+            results = run_background_swarm_workers(
+                provider=provider,
+                jobs=jobs,
+                tool_executor=lambda name, arguments: "",
+                max_parallel=2,
+                poll_interval_seconds=0.0,
+                cwd=repo_dir,
+                provider_name="openai",
+            )
+
+            self.assertEqual({"job_a", "job_b", "job_c"}, set(results))
+            self.assertEqual(2, provider.max_in_flight)
+            self.assertEqual([False, True, True], provider.start_usage_emitted_flags)
+
+    def test_background_scheduler_blocks_launch_when_window_exceeds_headroom(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_dir = Path(tmp_dir) / "repo"
+            repo_dir.mkdir(parents=True)
+            save_learned_model_limit(
+                cwd=repo_dir,
+                provider="openai",
+                model="gpt-5.4-mini",
+                learned_tpm_limit=100,
+                headroom_fraction=0.85,
+                observed_peak_input_tokens={"seed_file": 60},
+            )
+            provider = MaxInFlightUsageProvider(usage_tokens=60)
+            jobs = [
+                SwarmWorkerJob(
+                    worker_id="job_a",
+                    worker_type="seed_file",
+                    lease_key="file:app/a.py",
+                    model="gpt-5.4-mini",
+                    reasoning_effort="low",
+                    instructions="seed",
+                    input_text="a",
+                    prompt_cache_key="cache",
+                    text_format=None,
+                    tools=(),
+                ),
+                SwarmWorkerJob(
+                    worker_id="job_b",
+                    worker_type="seed_file",
+                    lease_key="file:app/b.py",
+                    model="gpt-5.4-mini",
+                    reasoning_effort="low",
+                    instructions="seed",
+                    input_text="b",
+                    prompt_cache_key="cache",
+                    text_format=None,
+                    tools=(),
+                ),
+                SwarmWorkerJob(
+                    worker_id="job_c",
+                    worker_type="seed_file",
+                    lease_key="file:app/c.py",
+                    model="gpt-5.4-mini",
+                    reasoning_effort="low",
+                    instructions="seed",
+                    input_text="c",
+                    prompt_cache_key="cache",
+                    text_format=None,
+                    tools=(),
+                ),
+            ]
+
+            results = run_background_swarm_workers(
+                provider=provider,
+                jobs=jobs,
+                tool_executor=lambda name, arguments: "",
+                max_parallel=2,
+                poll_interval_seconds=0.0,
+                cwd=repo_dir,
+                provider_name="openai",
+            )
+
+            self.assertEqual({"job_a", "job_b", "job_c"}, set(results))
+            self.assertEqual(1, provider.max_in_flight)
+            self.assertEqual([False, True, True], provider.start_usage_emitted_flags)
+
+    def test_background_scheduler_reuses_persisted_learned_limit_on_later_runs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_dir = Path(tmp_dir) / "repo"
+            repo_dir.mkdir(parents=True)
+            first_provider = RateLimitThenUsageProvider(
+                usage_tokens=30,
+                message=(
+                    "ResponseError(code='rate_limit_exceeded', message='Rate limit reached for "
+                    "gpt-5.4-mini on tokens per min (TPM): Limit 200000, Used 188404, Requested "
+                    "19721. Please try again in 10ms.')"
+                ),
+            )
+            first_job = SwarmWorkerJob(
+                worker_id="job_a",
+                worker_type="seed_file",
+                lease_key="file:app/a.py",
+                model="gpt-5.4-mini",
+                reasoning_effort="low",
+                instructions="seed",
+                input_text="a",
+                prompt_cache_key="cache",
+                text_format=None,
+                tools=(),
+            )
+
+            results = run_background_swarm_workers(
+                provider=first_provider,
+                jobs=[first_job],
+                tool_executor=lambda name, arguments: "",
+                max_parallel=1,
+                poll_interval_seconds=0.0,
+                rate_limit_max_retries=1,
+                cwd=repo_dir,
+                provider_name="openai",
+            )
+
+            self.assertEqual({"job_a"}, set(results))
+            learned = load_learned_model_limit(
+                cwd=repo_dir,
+                provider="openai",
+                model="gpt-5.4-mini",
+            )
+            self.assertIsNotNone(learned)
+            self.assertEqual(200000, learned.learned_tpm_limit)
+            self.assertEqual(30, learned.observed_peak_input_tokens["seed_file"])
+
+            second_provider = MaxInFlightUsageProvider(usage_tokens=30)
+            second_jobs = [
+                SwarmWorkerJob(
+                    worker_id="job_b",
+                    worker_type="seed_file",
+                    lease_key="file:app/b.py",
+                    model="gpt-5.4-mini",
+                    reasoning_effort="low",
+                    instructions="seed",
+                    input_text="b",
+                    prompt_cache_key="cache",
+                    text_format=None,
+                    tools=(),
+                ),
+                SwarmWorkerJob(
+                    worker_id="job_c",
+                    worker_type="seed_file",
+                    lease_key="file:app/c.py",
+                    model="gpt-5.4-mini",
+                    reasoning_effort="low",
+                    instructions="seed",
+                    input_text="c",
+                    prompt_cache_key="cache",
+                    text_format=None,
+                    tools=(),
+                ),
+                SwarmWorkerJob(
+                    worker_id="job_d",
+                    worker_type="seed_file",
+                    lease_key="file:app/d.py",
+                    model="gpt-5.4-mini",
+                    reasoning_effort="low",
+                    instructions="seed",
+                    input_text="d",
+                    prompt_cache_key="cache",
+                    text_format=None,
+                    tools=(),
+                ),
+            ]
+
+            second_results = run_background_swarm_workers(
+                provider=second_provider,
+                jobs=second_jobs,
+                tool_executor=lambda name, arguments: "",
+                max_parallel=2,
+                poll_interval_seconds=0.0,
+                cwd=repo_dir,
+                provider_name="openai",
+            )
+
+            self.assertEqual({"job_b", "job_c", "job_d"}, set(second_results))
+            self.assertEqual(2, second_provider.max_in_flight)
+            self.assertEqual([False, True, True], second_provider.start_usage_emitted_flags)
+
+    def test_background_scheduler_aborts_stage_after_exhausted_rate_limits_and_drains_active_workers(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_dir = Path(tmp_dir) / "repo"
+            repo_dir.mkdir(parents=True)
+            save_learned_model_limit(
+                cwd=repo_dir,
+                provider="openai",
+                model="gpt-5.4-mini",
+                learned_tpm_limit=200,
+                headroom_fraction=0.85,
+                observed_peak_input_tokens={"seed_file": 20},
+            )
+            provider = DrainAfterAbortProvider(
+                failure_message=(
+                    "ResponseError(code='rate_limit_exceeded', message='Rate limit reached for "
+                    "gpt-5.4-mini on tokens per min (TPM): Limit 200000, Used 184418, Requested "
+                    "43593. Please try again in 8.403s.')"
+                ),
+            )
+            metrics = SwarmRunMetrics(path=repo_dir / "runs" / "run_1" / "swarm" / "usage_summary.json")
+            metrics.write()
+            completed_workers: list[str] = []
+            jobs = [
+                SwarmWorkerJob(
+                    worker_id="job_a",
+                    worker_type="seed_file",
+                    lease_key="file:app/a.py",
+                    model="gpt-5.4-mini",
+                    reasoning_effort="low",
+                    instructions="seed",
+                    input_text="a",
+                    prompt_cache_key="cache",
+                    text_format=None,
+                    tools=(),
+                ),
+                SwarmWorkerJob(
+                    worker_id="job_b",
+                    worker_type="seed_file",
+                    lease_key="file:app/b.py",
+                    model="gpt-5.4-mini",
+                    reasoning_effort="low",
+                    instructions="seed",
+                    input_text="b",
+                    prompt_cache_key="cache",
+                    text_format=None,
+                    tools=(),
+                ),
+                SwarmWorkerJob(
+                    worker_id="job_c",
+                    worker_type="seed_file",
+                    lease_key="file:app/c.py",
+                    model="gpt-5.4-mini",
+                    reasoning_effort="low",
+                    instructions="seed",
+                    input_text="c",
+                    prompt_cache_key="cache",
+                    text_format=None,
+                    tools=(),
+                ),
+            ]
+
+            with self.assertRaises(SwarmStageAbort) as exc_info:
+                run_background_swarm_workers(
+                    provider=provider,
+                    jobs=jobs,
+                    tool_executor=lambda name, arguments: "",
+                    max_parallel=2,
+                    poll_interval_seconds=0.0,
+                    rate_limit_max_retries=0,
+                    on_worker_completed=lambda job, result: completed_workers.append(job.worker_id),
+                    metrics_tracker=metrics,
+                    stage_name="seed",
+                    cwd=repo_dir,
+                    provider_name="openai",
+                )
+
+            self.assertEqual(["job_a"], completed_workers)
+            self.assertEqual(("job_c",), exc_info.exception.skipped_worker_ids)
+            self.assertEqual(["a", "b"], [call["input_text"] for call in provider.start_calls])
+            self.assertEqual([], provider.cancelled)
+            summary = json.loads(metrics.path.read_text(encoding="utf-8"))
+            self.assertEqual(1, summary["stages"]["seed"]["skipped_workers"])
+            self.assertTrue(summary["stages"]["seed"]["aborted"])
+            self.assertTrue(summary["limiter"]["stage_degraded_after_rate_limit"])
+            self.assertEqual(1, summary["limiter"]["current_stage_parallel_ceiling"])
+
     def test_background_scheduler_cancels_active_workers_after_non_rate_limit_failure(self) -> None:
         provider = RunningThenFailureProvider()
         jobs = [
@@ -1391,6 +1895,64 @@ class SwarmTests(unittest.TestCase):
             self.assertEqual("failed", usage_summary["status"])
             self.assertEqual("seed", usage_summary["failure_stage"])
 
+    def test_swarm_seed_stage_abort_writes_partial_summary_and_skips_proof(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_dir = Path(tmp_dir) / "repo"
+            _write(repo_dir / "app" / "a.py", "print('a')\n")
+            _write(repo_dir / "app" / "b.py", "print('b')\n")
+            _write(repo_dir / "app" / "c.py", "print('c')\n")
+            loaded = self._loaded_config(repo_dir)
+            save_learned_model_limit(
+                cwd=repo_dir,
+                provider="openai",
+                model="gpt-5.4-mini",
+                learned_tpm_limit=200,
+                headroom_fraction=0.85,
+                observed_peak_input_tokens={"seed_file": 20},
+            )
+            run_dir = repo_dir / "runs" / "run_1"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            prompt_bundle = freeze_swarm_prompt_bundle(run_dir=run_dir, loaded=loaded)
+
+            swarm_digest = run_dir / "derived_context" / "swarm_digest.md"
+            shared_manifest = run_dir / "resources" / "shared" / "manifest.md"
+            _write(swarm_digest, "# digest\n")
+            _write(shared_manifest, "# shared\n")
+
+            provider = SeedStageAbortProvider(
+                failure_message=(
+                    "ResponseError(code='rate_limit_exceeded', message='Rate limit reached for "
+                    "gpt-5.4-mini on tokens per min (TPM): Limit 200000, Used 184418, Requested "
+                    "43593. Please try again in 1ms.')"
+                )
+            )
+
+            with self.assertRaises(SwarmStageAbort):
+                run_swarm_sweep(
+                    cwd=repo_dir,
+                    loaded=loaded,
+                    provider=provider,
+                    prompt_bundle=prompt_bundle,
+                    run_dir=run_dir,
+                    swarm_digest_path=swarm_digest,
+                    shared_manifest_path=shared_manifest,
+                    eligible_files=[
+                        (repo_dir / "app" / "a.py").resolve(),
+                        (repo_dir / "app" / "b.py").resolve(),
+                        (repo_dir / "app" / "c.py").resolve(),
+                    ],
+                )
+
+            partial_summary = run_dir / "swarm" / "reports" / "partial_summary.md"
+            self.assertTrue(partial_summary.exists())
+            partial_text = partial_summary.read_text(encoding="utf-8")
+            self.assertIn("Stage aborted: `seed`", partial_text)
+            self.assertIn("Completed workers: `1`", partial_text)
+            self.assertIn("Skipped workers: `1`", partial_text)
+            self.assertTrue((run_dir / "swarm" / "reports" / "seed_ledger.md").exists())
+            self.assertFalse((run_dir / "swarm" / "reports" / "final_summary.md").exists())
+            self.assertFalse((run_dir / "swarm" / "proofs" / "swm_001.json").exists())
+
     def test_swarm_persists_usage_summary_with_worker_timings(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             repo_dir = Path(tmp_dir) / "repo"
@@ -1463,10 +2025,16 @@ class SwarmTests(unittest.TestCase):
             self.assertEqual("completed", summary["status"])
             self.assertEqual(2, summary["totals"]["responses"])
             self.assertEqual(450, summary["totals"]["total_tokens"])
+            self.assertIn("limiter", summary)
             self.assertIn("seed", summary["stages"])
             self.assertIn("proof", summary["stages"])
             self.assertEqual(1, summary["stages"]["seed"]["completed_workers"])
             self.assertEqual(1, summary["stages"]["proof"]["completed_workers"])
+            self.assertIn("avg_input_tpm", summary["limiter"])
+            self.assertIn("top_token_workers", summary["limiter"])
+            self.assertIn("current_stage_parallel_ceiling", summary["limiter"])
+            self.assertGreater(summary["wall_clock_seconds"], 0.0)
+            self.assertGreater(summary["stages"]["seed"]["elapsed_seconds"], 0.0)
 
             seed_worker = next(worker for worker in summary["workers"] if worker["worker_id"] == "SEED-001")
             proof_worker = next(worker for worker in summary["workers"] if worker["worker_id"] == "SWM-001")
