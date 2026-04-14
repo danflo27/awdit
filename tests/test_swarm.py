@@ -12,6 +12,7 @@ from provider_openai import BackgroundPollResult, ProviderBackgroundHandle, Prov
 from swarm import (
     RepoReadOnlyTools,
     SwarmSeedResult,
+    SwarmWorkerFailure,
     SwarmWorkerJob,
     freeze_swarm_prompt_bundle,
     generate_danger_map,
@@ -928,6 +929,35 @@ class SwarmTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "outside the configured readable repo scope"):
                     tools.run("read_file", {"path": "app/link.py"})
 
+    def test_repo_tools_allow_only_current_run_staged_shared_resources(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_dir = Path(tmp_dir) / "repo"
+            run_dir = repo_dir / "runs" / "run_1"
+            staged_file = run_dir / "resources" / "shared" / "staged" / "01_architecture.md"
+            unrelated_run_file = repo_dir / "runs" / "other_run" / "secret.txt"
+            _write(repo_dir / "app" / "service.py", "print('hello')\n")
+            _write(staged_file, "shared architecture notes\n")
+            _write(unrelated_run_file, "should stay hidden\n")
+            loaded = self._loaded_config(repo_dir)
+            tools = RepoReadOnlyTools(
+                cwd=repo_dir,
+                scope_include=loaded.effective.scope.include,
+                scope_exclude=loaded.effective.scope.exclude,
+                extra_allowed_paths=(staged_file,),
+            )
+
+            listing = json.loads(tools.run("list_scope_files", {}))
+            self.assertIn("app/service.py", listing["paths"])
+            self.assertIn("runs/run_1/resources/shared/staged/01_architecture.md", listing["paths"])
+            self.assertNotIn("runs/other_run/secret.txt", listing["paths"])
+
+            staged_data = json.loads(
+                tools.run("read_file", {"path": "runs/run_1/resources/shared/staged/01_architecture.md"})
+            )
+            self.assertIn("shared architecture notes", staged_data["content"])
+            with self.assertRaisesRegex(RuntimeError, "outside the configured readable repo scope"):
+                tools.run("read_file", {"path": "runs/other_run/secret.txt"})
+
     def test_background_scheduler_serializes_duplicate_lease_keys(self) -> None:
         provider = SequenceProvider(
             [{"ok": 1}, {"ok": 2}, {"ok": 3}]
@@ -1189,6 +1219,53 @@ class SwarmTests(unittest.TestCase):
 
             self.assertTrue((run_dir / "swarm" / "seeds" / "seed_001.json").exists())
             self.assertTrue((run_dir / "swarm" / "seeds" / "seed_001.md").exists())
+
+    def test_swarm_worker_failure_captures_invalid_payload_text(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_dir = Path(tmp_dir) / "repo"
+            _write(repo_dir / "app" / "service.py", "print('hello')\n")
+            loaded = self._loaded_config(repo_dir)
+            run_dir = repo_dir / "runs" / "run_1"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            prompt_bundle = freeze_swarm_prompt_bundle(run_dir=run_dir, loaded=loaded)
+
+            swarm_digest = run_dir / "derived_context" / "swarm_digest.md"
+            shared_manifest = run_dir / "resources" / "shared" / "manifest.md"
+            staged_doc = run_dir / "resources" / "shared" / "staged" / "01_architecture.md"
+            _write(swarm_digest, "# digest\n")
+            _write(shared_manifest, "# shared\n")
+            _write(staged_doc, "shared doc\n")
+
+            provider = SequenceProvider(
+                [
+                    {
+                        "outcome": "finding",
+                        "severity_bucket": "medium",
+                        "claim": "seed claim",
+                        "evidence": ["app/service.py:1"],
+                        "related_files": [],
+                    }
+                ]
+            )
+
+            with self.assertRaises(SwarmWorkerFailure) as ctx:
+                run_swarm_sweep(
+                    cwd=repo_dir,
+                    loaded=loaded,
+                    provider=provider,
+                    prompt_bundle=prompt_bundle,
+                    run_dir=run_dir,
+                    swarm_digest_path=swarm_digest,
+                    shared_manifest_path=shared_manifest,
+                    eligible_files=[(repo_dir / "app" / "service.py").resolve()],
+                )
+
+            failure = ctx.exception.primary_diagnostic
+            self.assertIsNotNone(failure)
+            self.assertEqual("seed", failure.stage)
+            self.assertEqual("SEED-001", failure.worker_id)
+            self.assertIn("missing keys: notes", failure.failure_message)
+            self.assertIn('"claim": "seed claim"', failure.raw_final_text)
 
     def test_generate_danger_map_rejects_missing_structured_keys(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

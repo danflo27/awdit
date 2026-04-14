@@ -139,7 +139,7 @@ prefer_gh = true
 
 [swarm]
 sweep_model = "gpt-5.4-mini"
-proof_model = "gpt-5.4-mini"
+proof_model = "gpt-5.4"
 eligible_file_profile = "code_config_tests"
 token_budget = 120000
 allow_no_limit = true
@@ -149,7 +149,7 @@ rate_limit_max_retries = 3
 
 [swarm.reasoning]
 danger_map = "high"
-seed = "medium"
+seed = "low"
 proof = "medium"
 
 [swarm.prompts]

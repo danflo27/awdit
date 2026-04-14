@@ -1167,12 +1167,28 @@ class SwarmCliTests(unittest.TestCase):
                 "Swarm startup failed: Swarm worker failure: danger_map (repo:repo_deadbeef): synthetic swarm failure",
                 output,
             )
+            self.assertIn("Failure diagnostics:", output)
+            diagnostic_path = runs_root(repo_dir) / "2026-04-06_121500" / "swarm" / "failure_diagnostic.json"
+            self.assertTrue(diagnostic_path.exists())
+            diagnostic = json.loads(diagnostic_path.read_text(encoding="utf-8"))
+            self.assertEqual(1, diagnostic["failure_count"])
+            self.assertEqual("danger_map", diagnostic["failures"][0]["stage"])
+            self.assertEqual("danger_map", diagnostic["failures"][0]["worker_id"])
+            self.assertIn("synthetic swarm failure", diagnostic["failures"][0]["failure_message"])
             with sqlite3.connect(repo_dir / "state" / "awdit.db") as connection:
                 row = connection.execute(
-                    "SELECT status FROM runs WHERE run_id = ?",
+                    """
+                    SELECT status, failure_stage, failure_worker_id, failure_message, failure_artifact
+                    FROM runs
+                    WHERE run_id = ?
+                    """,
                     ("2026-04-06_121500",),
                 ).fetchone()
-            self.assertEqual(("failed",), row)
+            self.assertEqual("failed", row[0])
+            self.assertEqual("danger_map", row[1])
+            self.assertEqual("danger_map", row[2])
+            self.assertIn("synthetic swarm failure", row[3])
+            self.assertTrue(row[4].endswith("failure_diagnostic.json"))
 
 
 if __name__ == "__main__":

@@ -206,7 +206,7 @@ class OpenAIResponsesProvider:
             return BackgroundPollResult(
                 status="failed",
                 response_id=handle.response_id,
-                final_text="",
+                final_text=self._safe_response_text(response),
                 tool_traces=(),
                 failure_message=failure_message,
             )
@@ -363,6 +363,12 @@ class OpenAIResponsesProvider:
                 if isinstance(text, str) and text:
                     text_blocks.append(text)
         return "\n".join(text_blocks).strip()
+
+    def _safe_response_text(self, response: Any) -> str:
+        try:
+            return self._response_text(response, "")
+        except Exception:
+            return ""
 
     def _extract_refusal_text(self, response: Any) -> str | None:
         output = getattr(response, "output", None) or []

@@ -236,7 +236,11 @@ class SwarmProofResult:
 
     @property
     def meets_report_bar(self) -> bool:
-        return self.outcome == "reportable" and self.proof_state in REPORTABLE_PROOF_STATES
+        return (
+            self.outcome == "reportable"
+            and self.proof_state in REPORTABLE_PROOF_STATES
+            and _reportable_contradiction(summary=self.summary, notes=self.notes) is None
+        )
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -300,6 +304,44 @@ class SwarmSeedRequestVolume:
     peak_parallel_estimated_tokens: int
     max_job_estimated_tokens: int
     max_job_target_file: str
+
+
+@dataclass(frozen=True)
+class SwarmWorkerFailureDiagnostic:
+    stage: str
+    worker_id: str
+    lease_key: str
+    failure_message: str
+    response_id: str | None = None
+    raw_final_text: str = ""
+
+    def render_summary(self) -> str:
+        return f"{self.worker_id} ({self.lease_key}): {self.failure_message}"
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "stage": self.stage,
+            "worker_id": self.worker_id,
+            "lease_key": self.lease_key,
+            "failure_message": self.failure_message,
+            "response_id": self.response_id,
+            "raw_final_text": self.raw_final_text,
+        }
+
+
+class SwarmWorkerFailure(RuntimeError):
+    def __init__(self, diagnostics: list[SwarmWorkerFailureDiagnostic]) -> None:
+        self.diagnostics = tuple(diagnostics)
+        super().__init__(
+            "Swarm worker failure: "
+            + "; ".join(item.render_summary() for item in self.diagnostics)
+        )
+
+    @property
+    def primary_diagnostic(self) -> SwarmWorkerFailureDiagnostic | None:
+        if not self.diagnostics:
+            return None
+        return self.diagnostics[0]
 
 
 DANGER_MAP_RESPONSE_FORMAT = {
@@ -459,17 +501,25 @@ def display_repo_path(cwd: Path, path: Path) -> str:
 
 
 class RepoReadOnlyTools:
-    def __init__(self, *, cwd: Path, scope_include: tuple[str, ...], scope_exclude: tuple[str, ...]) -> None:
+    def __init__(
+        self,
+        *,
+        cwd: Path,
+        scope_include: tuple[str, ...],
+        scope_exclude: tuple[str, ...],
+        extra_allowed_paths: tuple[Path, ...] = (),
+    ) -> None:
         self.cwd = cwd.resolve()
         self.scope_include = scope_include
         self.scope_exclude = scope_exclude
+        self.extra_allowed_paths = tuple(path.resolve() for path in extra_allowed_paths)
 
     def schemas(self) -> list[dict[str, Any]]:
         return [
             {
                 "type": "function",
                 "name": "list_scope_files",
-                "description": "List allowed repo files that are in scope for swarm inspection.",
+                "description": "List allowed repo files and run-staged shared resources that are in scope for swarm inspection.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -481,7 +531,7 @@ class RepoReadOnlyTools:
             {
                 "type": "function",
                 "name": "read_file",
-                "description": "Read an allowed repo file inside the current repo scope.",
+                "description": "Read an allowed repo file or current-run staged shared resource inside the current swarm scope.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -528,7 +578,22 @@ class RepoReadOnlyTools:
             if path_glob and not PurePosixPath(entry.relative_path).match(path_glob):
                 continue
             allowed.append(entry.path)
-        return allowed
+        for path in self.extra_allowed_paths:
+            if not path.exists() or not path.is_file():
+                continue
+            display_path = self._display_path(path)
+            if path_glob and not PurePosixPath(display_path).match(path_glob):
+                continue
+            allowed.append(path)
+        unique_allowed: list[Path] = []
+        seen: set[str] = set()
+        for path in allowed:
+            display_path = self._display_path(path)
+            if display_path in seen:
+                continue
+            seen.add(display_path)
+            unique_allowed.append(path)
+        return unique_allowed
 
     def resolve_allowed_path(self, raw_path: str) -> Path:
         relative = _normalize_repo_relative_path(raw_path)
@@ -596,6 +661,7 @@ def generate_danger_map(
         ),
         tool_executor=tools.run,
         rate_limit_max_retries=swarm_config.rate_limit_max_retries,
+        stage_name="danger_map",
     )
     payload = _parse_json_object(result.final_text)
     normalized = parse_danger_map_payload(
@@ -759,6 +825,19 @@ def build_seed_input(
         "target_file_numbered_content": _with_line_numbers(target_text),
     }
     return json.dumps(payload, indent=2)
+
+
+def _staged_shared_resource_files(shared_manifest_path: Path) -> tuple[Path, ...]:
+    staged_root = shared_manifest_path.parent / "staged"
+    if not staged_root.exists():
+        return ()
+
+    staged_files: list[Path] = []
+    for path in sorted(staged_root.rglob("*")):
+        if path.is_symlink() or not path.is_file():
+            continue
+        staged_files.append(path.resolve())
+    return tuple(staged_files)
 
 
 def render_seed_instructions(
@@ -1471,6 +1550,7 @@ def run_swarm_sweep(
         cwd=cwd,
         scope_include=loaded.effective.scope.include,
         scope_exclude=loaded.effective.scope.exclude,
+        extra_allowed_paths=_staged_shared_resource_files(shared_manifest_path),
     )
     prompt_asset = prompt_bundle.seed
     seed_output_path = seeds_dir.relative_to(cwd).as_posix()
@@ -1509,6 +1589,7 @@ def run_swarm_sweep(
             else loaded.effective.swarm.token_budget
         ),
         on_worker_completed=_persist_seed_result,
+        stage_name="seed",
     )
     seed_results: list[SwarmSeedResult] = []
     for seed_id, target_file in ordered_seed_metadata:
@@ -1572,6 +1653,7 @@ def run_swarm_sweep(
                 else loaded.effective.swarm.token_budget
             ),
             on_worker_completed=_persist_proof_result,
+            stage_name="proof",
         )
         for issue_candidate in issue_candidates:
             proof_result = proof_results_by_case_id.get(issue_candidate.case_id)
@@ -1618,6 +1700,7 @@ def run_background_swarm_workers(
     provider: OpenAIResponsesProvider,
     jobs: list[SwarmWorkerJob],
     tool_executor,
+    stage_name: str = "swarm",
     max_parallel: int | None = None,
     poll_interval_seconds: float = DEFAULT_SWARM_POLL_INTERVAL_SECONDS,
     max_retries: int = DEFAULT_SWARM_MAX_RETRIES,
@@ -1643,7 +1726,7 @@ def run_background_swarm_workers(
     cooldown_until = 0.0
 
     while pending or active:
-        permanent_failures: list[str] = []
+        permanent_failures: list[SwarmWorkerFailureDiagnostic] = []
         scan_limit = len(pending)
         while pending and len(active) < parallel_limit and scan_limit > 0:
             now = time.monotonic()
@@ -1693,7 +1776,12 @@ def run_background_swarm_workers(
                     scan_limit = len(pending)
                     continue
                 permanent_failures.append(
-                    f"{job.worker_id} ({job.lease_key}): {failure_message or 'worker start failed'}"
+                    SwarmWorkerFailureDiagnostic(
+                        stage=stage_name,
+                        worker_id=job.worker_id,
+                        lease_key=job.lease_key,
+                        failure_message=failure_message or "worker start failed",
+                    )
                 )
                 scan_limit = len(pending)
                 continue
@@ -1741,7 +1829,14 @@ def run_background_swarm_workers(
                         on_worker_completed(state.job, completed_result)
                 except Exception as exc:
                     permanent_failures.append(
-                        f"{state.job.worker_id} ({state.job.lease_key}): {exc}"
+                        SwarmWorkerFailureDiagnostic(
+                            stage=stage_name,
+                            worker_id=state.job.worker_id,
+                            lease_key=state.job.lease_key,
+                            failure_message=str(exc),
+                            response_id=completed_result.response_id,
+                            raw_final_text=completed_result.final_text,
+                        )
                     )
                     continue
                 results[worker_id] = completed_result
@@ -1759,7 +1854,14 @@ def run_background_swarm_workers(
                 pending.append(state.job)
                 continue
             permanent_failures.append(
-                f"{state.job.worker_id} ({state.job.lease_key}): {failure_message or 'background turn failed'}"
+                SwarmWorkerFailureDiagnostic(
+                    stage=stage_name,
+                    worker_id=state.job.worker_id,
+                    lease_key=state.job.lease_key,
+                    failure_message=failure_message or "background turn failed",
+                    response_id=poll_result.response_id if poll_result is not None else state.handle.response_id,
+                    raw_final_text=poll_result.final_text if poll_result is not None else "",
+                )
             )
 
         if permanent_failures:
@@ -1768,7 +1870,7 @@ def run_background_swarm_workers(
                     provider.cancel_background_turn(state.handle)
                 except Exception:
                     pass
-            raise RuntimeError("Swarm worker failure: " + "; ".join(permanent_failures))
+            raise SwarmWorkerFailure(permanent_failures)
 
         if pending or active:
             sleep_for = poll_interval_seconds
@@ -1785,12 +1887,14 @@ def _run_swarm_background_worker(
     provider: OpenAIResponsesProvider,
     job: SwarmWorkerJob,
     tool_executor,
+    stage_name: str = "swarm",
     rate_limit_max_retries: int = DEFAULT_SWARM_MAX_RETRIES,
 ) -> ProviderTurnResult:
     return run_background_swarm_workers(
         provider=provider,
         jobs=[job],
         tool_executor=tool_executor,
+        stage_name=stage_name,
         max_parallel=1,
         rate_limit_max_retries=rate_limit_max_retries,
     )[job.worker_id]

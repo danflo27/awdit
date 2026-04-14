@@ -19,7 +19,7 @@ from config import (
     save_repo_overrides,
 )
 from repo_memory import legacy_repo_key, migrate_legacy_repo_memory_dir, resolve_repo_identity
-from state_db import ensure_state_db, insert_run, update_run_status
+from state_db import ensure_state_db, insert_run, record_run_failure, update_run_status
 
 
 ALL_SLOTS = (
@@ -738,6 +738,44 @@ class ConfigTests(unittest.TestCase):
 
             self.assertEqual(("repo_deadbeef", "swarm", "completed"), row[:3])
             self.assertIsNotNone(row[3])
+
+    def test_state_db_persists_failure_diagnostics(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_dir = Path(tmp_dir) / "repo"
+            repo_dir.mkdir(parents=True)
+
+            db_path = ensure_state_db(repo_dir)
+            insert_run(
+                cwd=repo_dir,
+                run_id="2026-04-06_120000",
+                repo_key="repo_deadbeef",
+                mode="swarm",
+                status="starting",
+                run_dir=repo_dir / "runs" / "2026-04-06_120000",
+            )
+            record_run_failure(
+                cwd=repo_dir,
+                run_id="2026-04-06_120000",
+                failure_stage="seed",
+                failure_worker_id="SEED-014",
+                failure_message="Structured swarm response missing keys: notes",
+                failure_artifact=repo_dir / "runs" / "2026-04-06_120000" / "swarm" / "failure_diagnostic.json",
+            )
+
+            with sqlite3.connect(db_path) as connection:
+                row = connection.execute(
+                    """
+                    SELECT failure_stage, failure_worker_id, failure_message, failure_artifact
+                    FROM runs
+                    WHERE run_id = ?
+                    """,
+                    ("2026-04-06_120000",),
+                ).fetchone()
+
+            self.assertEqual("seed", row[0])
+            self.assertEqual("SEED-014", row[1])
+            self.assertIn("missing keys: notes", row[2])
+            self.assertTrue(row[3].endswith("failure_diagnostic.json"))
 
 
 if __name__ == "__main__":

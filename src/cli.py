@@ -36,7 +36,7 @@ from paths import migrate_legacy_runtime_layout, runs_root
 from provider_openai import OpenAIResponsesProvider
 from repo_memory import migrate_legacy_repo_memory_dir, resolve_repo_identity
 from runtime import OneSlotRuntime
-from state_db import insert_run, update_run_status
+from state_db import insert_run, record_run_failure, update_run_status
 from swarm import (
     append_repo_guidance,
     display_repo_path,
@@ -46,6 +46,7 @@ from swarm import (
     load_danger_map_result,
     run_swarm_sweep,
     summarize_seed_request_volume,
+    SwarmWorkerFailure,
 )
 
 
@@ -254,13 +255,16 @@ def _handle_swarm(_: argparse.Namespace) -> int:
             completed=False,
         )
     except Exception as exc:
+        diagnostic_path = _persist_swarm_failure_diagnostic(run_id=run_id, run_dir=run_dir, exc=exc)
         update_run_status(
             cwd=cwd,
             run_id=run_id,
             status="failed",
             completed=True,
         )
+        _record_swarm_failure_state(cwd=cwd, run_id=run_id, diagnostic_path=diagnostic_path, exc=exc)
         print(f"Swarm startup failed: {exc}")
+        print(f"Failure diagnostics: {diagnostic_path}")
         return 1
 
     print("")
@@ -295,13 +299,16 @@ def _handle_swarm(_: argparse.Namespace) -> int:
             completed=True,
         )
     except Exception as exc:
+        diagnostic_path = _persist_swarm_failure_diagnostic(run_id=run_id, run_dir=run_dir, exc=exc)
         update_run_status(
             cwd=cwd,
             run_id=run_id,
             status="failed",
             completed=True,
         )
+        _record_swarm_failure_state(cwd=cwd, run_id=run_id, diagnostic_path=diagnostic_path, exc=exc)
         print(f"Swarm execution failed: {exc}")
+        print(f"Failure diagnostics: {diagnostic_path}")
         return 1
 
     print("")
@@ -319,6 +326,63 @@ def _handle_swarm(_: argparse.Namespace) -> int:
     print("  Shared resource manifest:")
     print(f"    {snapshot.shared_manifest}")
     return 0
+
+
+def _persist_swarm_failure_diagnostic(*, run_id: str, run_dir: Path, exc: Exception) -> Path:
+    diagnostic_path = run_dir / "swarm" / "failure_diagnostic.json"
+    diagnostic_path.parent.mkdir(parents=True, exist_ok=True)
+    if isinstance(exc, SwarmWorkerFailure):
+        failures = [item.to_dict() for item in exc.diagnostics]
+    else:
+        failures = [
+            {
+                "stage": "unknown",
+                "worker_id": None,
+                "lease_key": None,
+                "failure_message": str(exc),
+                "response_id": None,
+                "raw_final_text": "",
+            }
+        ]
+    diagnostic_payload = {
+        "run_id": run_id,
+        "generated_at": datetime.now().isoformat(timespec="seconds"),
+        "failure_count": len(failures),
+        "failures": failures,
+    }
+    diagnostic_path.write_text(
+        json.dumps(diagnostic_payload, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    return diagnostic_path
+
+
+def _record_swarm_failure_state(
+    *,
+    cwd: Path,
+    run_id: str,
+    diagnostic_path: Path,
+    exc: Exception,
+) -> None:
+    if isinstance(exc, SwarmWorkerFailure) and exc.primary_diagnostic is not None:
+        primary = exc.primary_diagnostic
+        record_run_failure(
+            cwd=cwd,
+            run_id=run_id,
+            failure_stage=primary.stage,
+            failure_worker_id=primary.worker_id,
+            failure_message=primary.failure_message,
+            failure_artifact=diagnostic_path,
+        )
+        return
+    record_run_failure(
+        cwd=cwd,
+        run_id=run_id,
+        failure_stage=None,
+        failure_worker_id=None,
+        failure_message=str(exc),
+        failure_artifact=diagnostic_path,
+    )
 
 
 def _prepare_swarm_danger_map(
