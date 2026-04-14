@@ -876,6 +876,7 @@ class SwarmCliTests(unittest.TestCase):
             self.assertIn("Rate-limit retries: 3", output)
             self.assertIn("Proof stage: read-only validation", output)
             self.assertIn("proof-filtered findings, grouped duplicates", output)
+            self.assertIn("Usage summary:", output)
 
             run_dir = runs_root(repo_dir) / "2026-04-06_121500"
             self.assertTrue((run_dir / "prompts" / "swarm_danger_map.md").exists())
@@ -884,6 +885,7 @@ class SwarmCliTests(unittest.TestCase):
             self.assertTrue((run_dir / "prompts" / "swarm_prompt_bundle.json").exists())
             self.assertTrue((run_dir / "resources" / "shared" / "manifest.md").exists())
             self.assertTrue((run_dir / "derived_context" / "swarm_digest.md").exists())
+            self.assertTrue((run_dir / "swarm" / "usage_summary.json").exists())
             self.assertTrue((run_dir / "swarm" / "reports" / "case_groups.md").exists())
             self.assertTrue((run_dir / "swarm" / "reports" / "final_summary.md").exists())
 
@@ -906,6 +908,10 @@ class SwarmCliTests(unittest.TestCase):
             self.assertEqual(2, run_json["swarm"]["seed_max_parallel"])
             self.assertEqual(1, run_json["swarm"]["proof_max_parallel"])
             self.assertEqual(3, run_json["swarm"]["rate_limit_max_retries"])
+            self.assertEqual(
+                str(run_dir / "swarm" / "usage_summary.json"),
+                run_json["swarm"]["usage_summary"],
+            )
             self.assertEqual(
                 {
                     "danger_map": "high",

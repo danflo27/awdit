@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import tempfile
 import textwrap
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -388,6 +389,53 @@ class PartialSeedFailureProvider:
         )
 
     def cancel_background_turn(self, handle):
+        return "cancelled"
+
+    def classify_provider_failure(self, value):
+        return None
+
+
+class UsageEventProvider:
+    def __init__(self, responses: list[tuple[dict[str, object], dict[str, int]]]) -> None:
+        self._pending_responses = list(responses)
+        self._responses: dict[str, tuple[dict[str, object], dict[str, int]]] = {}
+        self.start_calls: list[dict[str, object]] = []
+
+    def start_background_turn(self, **kwargs):
+        if not self._pending_responses:
+            raise AssertionError("No pending usage responses left.")
+        response_id = f"bg_{len(self.start_calls) + 1}"
+        self._responses[response_id] = self._pending_responses.pop(0)
+        self.start_calls.append(kwargs)
+        return ProviderBackgroundHandle(response_id=response_id)
+
+    def poll_background_turn(self, **kwargs):
+        response_id = kwargs["handle"].response_id
+        payload, usage = self._responses.pop(response_id)
+        event_callback = kwargs.get("event_callback")
+        if event_callback is not None:
+            event_callback(
+                "provider_usage",
+                {
+                    "response_id": response_id,
+                    "model": kwargs["model"],
+                    "input_tokens": usage["input_tokens"],
+                    "output_tokens": usage["output_tokens"],
+                    "total_tokens": usage["total_tokens"],
+                    "cached_input_tokens": usage["cached_input_tokens"],
+                    "reasoning_output_tokens": usage["reasoning_output_tokens"],
+                },
+            )
+        time.sleep(0.01)
+        return BackgroundPollResult(
+            status="completed",
+            response_id=response_id,
+            final_text=json.dumps(payload),
+            tool_traces=(),
+        )
+
+    def cancel_background_turn(self, handle):
+        self._responses.pop(handle.response_id, None)
         return "cancelled"
 
     def classify_provider_failure(self, value):
@@ -1300,6 +1348,95 @@ class SwarmTests(unittest.TestCase):
 
             self.assertTrue((run_dir / "swarm" / "seeds" / "seed_001.json").exists())
             self.assertTrue((run_dir / "swarm" / "seeds" / "seed_001.md").exists())
+            usage_summary = json.loads((run_dir / "swarm" / "usage_summary.json").read_text(encoding="utf-8"))
+            self.assertEqual("failed", usage_summary["status"])
+            self.assertEqual("seed", usage_summary["failure_stage"])
+
+    def test_swarm_persists_usage_summary_with_worker_timings(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_dir = Path(tmp_dir) / "repo"
+            _write(repo_dir / "app" / "service.py", "print('hello')\n")
+            loaded = self._loaded_config(repo_dir)
+            run_dir = repo_dir / "runs" / "run_1"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            prompt_bundle = freeze_swarm_prompt_bundle(run_dir=run_dir, loaded=loaded)
+
+            swarm_digest = run_dir / "derived_context" / "swarm_digest.md"
+            shared_manifest = run_dir / "resources" / "shared" / "manifest.md"
+            _write(swarm_digest, "# digest\n")
+            _write(shared_manifest, "# shared\n")
+
+            provider = UsageEventProvider(
+                [
+                    (
+                        {
+                            "outcome": "finding",
+                            "severity_bucket": "medium",
+                            "claim": "seed claim",
+                            "evidence": ["app/service.py:1"],
+                            "related_files": [],
+                            "notes": ["seed note"],
+                        },
+                        {
+                            "input_tokens": 120,
+                            "output_tokens": 30,
+                            "total_tokens": 150,
+                            "cached_input_tokens": 20,
+                            "reasoning_output_tokens": 10,
+                        },
+                    ),
+                    (
+                        {
+                            "outcome": "reportable",
+                            "proof_state": "written_proof",
+                            "claim": "seed claim",
+                            "summary": "proof summary",
+                            "preconditions": [],
+                            "repro_steps": ["step 1"],
+                            "citations": ["app/service.py:1"],
+                            "notes": [],
+                            "filter_reason": "",
+                        },
+                        {
+                            "input_tokens": 240,
+                            "output_tokens": 60,
+                            "total_tokens": 300,
+                            "cached_input_tokens": 40,
+                            "reasoning_output_tokens": 25,
+                        },
+                    ),
+                ]
+            )
+
+            result = run_swarm_sweep(
+                cwd=repo_dir,
+                loaded=loaded,
+                provider=provider,
+                prompt_bundle=prompt_bundle,
+                run_dir=run_dir,
+                swarm_digest_path=swarm_digest,
+                shared_manifest_path=shared_manifest,
+                eligible_files=[(repo_dir / "app" / "service.py").resolve()],
+            )
+
+            self.assertEqual(run_dir / "swarm" / "usage_summary.json", result.usage_summary)
+            summary = json.loads(result.usage_summary.read_text(encoding="utf-8"))
+            self.assertEqual("completed", summary["status"])
+            self.assertEqual(2, summary["totals"]["responses"])
+            self.assertEqual(450, summary["totals"]["total_tokens"])
+            self.assertIn("seed", summary["stages"])
+            self.assertIn("proof", summary["stages"])
+            self.assertEqual(1, summary["stages"]["seed"]["completed_workers"])
+            self.assertEqual(1, summary["stages"]["proof"]["completed_workers"])
+
+            seed_worker = next(worker for worker in summary["workers"] if worker["worker_id"] == "SEED-001")
+            proof_worker = next(worker for worker in summary["workers"] if worker["worker_id"] == "SWM-001")
+            self.assertEqual("completed", seed_worker["status"])
+            self.assertEqual(150, seed_worker["totals"]["total_tokens"])
+            self.assertGreater(seed_worker["elapsed_seconds"], 0.0)
+            self.assertEqual("completed", proof_worker["status"])
+            self.assertEqual(300, proof_worker["totals"]["total_tokens"])
+            self.assertGreater(proof_worker["elapsed_seconds"], 0.0)
 
     def test_swarm_worker_failure_captures_invalid_payload_text(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

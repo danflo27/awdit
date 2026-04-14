@@ -323,6 +323,8 @@ def _handle_swarm(_: argparse.Namespace) -> int:
     print(f"    {sweep_result.case_groups}")
     print("  Proof artifacts:")
     print(f"    {sweep_result.proofs_dir}")
+    print("  Usage summary:")
+    print(f"    {sweep_result.usage_summary}")
     print("  Shared resource manifest:")
     print(f"    {snapshot.shared_manifest}")
     return 0
@@ -565,6 +567,7 @@ def _persist_swarm_startup_snapshot(
                     "seed_max_parallel": loaded.effective.swarm.seed_max_parallel,
                     "proof_max_parallel": loaded.effective.swarm.proof_max_parallel,
                     "rate_limit_max_retries": loaded.effective.swarm.rate_limit_max_retries,
+                    "usage_summary": str(run_dir / "swarm" / "usage_summary.json"),
                     "prompt_bundle": prompt_bundle.to_dict(),
                 },
                 "resources": {

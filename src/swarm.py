@@ -5,7 +5,7 @@ import json
 import re
 import subprocess
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable
@@ -274,6 +274,7 @@ class SwarmSweepResult:
     case_groups: Path
     final_ranked_findings: Path
     final_summary: Path
+    usage_summary: Path
 
 
 @dataclass(frozen=True)
@@ -295,6 +296,7 @@ class ActiveSwarmWorker:
     job: SwarmWorkerJob
     handle: ProviderBackgroundHandle
     tool_traces: list[ToolTraceRecord]
+    started_at: float
 
 
 @dataclass(frozen=True)
@@ -861,6 +863,375 @@ def _estimate_job_request_tokens(job: SwarmWorkerJob) -> int:
     return _estimate_text_tokens(job.instructions) + _estimate_text_tokens(job.input_text)
 
 
+def _coerce_nonnegative_int(value: Any) -> int:
+    try:
+        normalized = int(value)
+    except (TypeError, ValueError):
+        return 0
+    return max(0, normalized)
+
+
+def _new_usage_totals() -> dict[str, Any]:
+    return {
+        "responses": 0,
+        "tool_calls_requested": 0,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "total_tokens": 0,
+        "cached_input_tokens": 0,
+        "reasoning_output_tokens": 0,
+        "billable_input_tokens_estimate": 0,
+        "billable_tokens_estimate": 0,
+        "peak_input_tokens": 0,
+        "peak_total_tokens": 0,
+        "response_ids": [],
+        "models": {},
+        "_response_usage": {},
+    }
+
+
+def _refresh_usage_totals(totals: dict[str, Any]) -> None:
+    response_usage = totals.get("_response_usage", {})
+    totals["responses"] = len(response_usage)
+    totals["input_tokens"] = 0
+    totals["output_tokens"] = 0
+    totals["total_tokens"] = 0
+    totals["cached_input_tokens"] = 0
+    totals["reasoning_output_tokens"] = 0
+    totals["peak_input_tokens"] = 0
+    totals["peak_total_tokens"] = 0
+    totals["response_ids"] = list(response_usage.keys())
+    totals["models"] = {}
+
+    for response_id in totals["response_ids"]:
+        sample = response_usage[response_id]
+        input_tokens = _coerce_nonnegative_int(sample.get("input_tokens"))
+        output_tokens = _coerce_nonnegative_int(sample.get("output_tokens"))
+        total_tokens = _coerce_nonnegative_int(sample.get("total_tokens"))
+        cached_input_tokens = _coerce_nonnegative_int(sample.get("cached_input_tokens"))
+        reasoning_output_tokens = _coerce_nonnegative_int(sample.get("reasoning_output_tokens"))
+
+        totals["input_tokens"] += input_tokens
+        totals["output_tokens"] += output_tokens
+        totals["total_tokens"] += total_tokens
+        totals["cached_input_tokens"] += cached_input_tokens
+        totals["reasoning_output_tokens"] += reasoning_output_tokens
+        totals["peak_input_tokens"] = max(totals["peak_input_tokens"], input_tokens)
+        totals["peak_total_tokens"] = max(totals["peak_total_tokens"], total_tokens)
+
+        model_name = str(sample.get("model", "") or "").strip() or "unknown"
+        model_totals = totals["models"].setdefault(model_name, {"responses": 0, "total_tokens": 0})
+        model_totals["responses"] += 1
+        model_totals["total_tokens"] += total_tokens
+
+    totals["billable_input_tokens_estimate"] = max(
+        0,
+        totals["input_tokens"] - totals["cached_input_tokens"],
+    )
+    totals["billable_tokens_estimate"] = max(
+        0,
+        totals["billable_input_tokens_estimate"] + totals["output_tokens"],
+    )
+
+
+def _accumulate_provider_usage(totals: dict[str, Any], data: dict[str, Any]) -> None:
+    response_id = str(data.get("response_id", "") or "").strip()
+    if not response_id:
+        response_id = f"anonymous_{len(totals['_response_usage']) + 1}"
+    totals["_response_usage"][response_id] = {
+        "model": str(data.get("model", "") or "").strip(),
+        "input_tokens": _coerce_nonnegative_int(data.get("input_tokens")),
+        "output_tokens": _coerce_nonnegative_int(data.get("output_tokens")),
+        "total_tokens": _coerce_nonnegative_int(data.get("total_tokens")),
+        "cached_input_tokens": _coerce_nonnegative_int(data.get("cached_input_tokens")),
+        "reasoning_output_tokens": _coerce_nonnegative_int(data.get("reasoning_output_tokens")),
+    }
+    _refresh_usage_totals(totals)
+
+
+def _public_usage_totals(totals: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: value
+        for key, value in totals.items()
+        if key != "_response_usage"
+    }
+
+
+@dataclass
+class SwarmRunMetrics:
+    path: Path
+    started_at: str = field(default_factory=lambda: datetime.now().isoformat(timespec="seconds"))
+    status: str = "in_progress"
+    finished_at: str | None = None
+    failure_stage: str | None = None
+    failure_reason: str | None = None
+
+    def __post_init__(self) -> None:
+        self._started_monotonic = time.monotonic()
+        self._finished_monotonic: float | None = None
+        self._totals = _new_usage_totals()
+        self._stages: dict[str, dict[str, Any]] = {}
+        self._workers: dict[str, dict[str, Any]] = {}
+        self._stage_worker_keys: dict[str, set[str]] = {}
+
+    def register_stage_jobs(self, *, stage_name: str, jobs: list[SwarmWorkerJob]) -> None:
+        for job in jobs:
+            self._ensure_worker(stage_name=stage_name, job=job)
+        self.write()
+
+    def record_attempt_started(
+        self,
+        *,
+        stage_name: str,
+        job: SwarmWorkerJob,
+        started_at_monotonic: float,
+    ) -> None:
+        stage = self._ensure_stage(stage_name)
+        worker = self._ensure_worker(stage_name=stage_name, job=job)
+        started_at = datetime.now().isoformat(timespec="seconds")
+        if stage["first_started_at"] is None:
+            stage["first_started_at"] = started_at
+        if worker["first_started_at"] is None:
+            worker["first_started_at"] = started_at
+        worker["status"] = "running"
+        worker["attempts"] += 1
+        worker["_active_attempt_started_at"] = started_at_monotonic
+        self.write()
+
+    def record_provider_event(
+        self,
+        *,
+        stage_name: str,
+        job: SwarmWorkerJob,
+        event_type: str,
+        data: dict[str, Any],
+    ) -> None:
+        stage = self._ensure_stage(stage_name)
+        worker = self._ensure_worker(stage_name=stage_name, job=job)
+        if event_type == "provider_usage":
+            _accumulate_provider_usage(self._totals, data)
+            _accumulate_provider_usage(stage["totals"], data)
+            _accumulate_provider_usage(worker["totals"], data)
+        elif event_type == "tool_calls_requested":
+            count = _coerce_nonnegative_int(data.get("count"))
+            self._totals["tool_calls_requested"] += count
+            stage["totals"]["tool_calls_requested"] += count
+            worker["totals"]["tool_calls_requested"] += count
+        else:
+            return
+        self.write()
+
+    def record_retry(
+        self,
+        *,
+        stage_name: str,
+        job: SwarmWorkerJob,
+        reason: str,
+        delay_seconds: float | None = None,
+    ) -> None:
+        stage = self._ensure_stage(stage_name)
+        worker = self._ensure_worker(stage_name=stage_name, job=job)
+        stage["retry_events"] += 1
+        worker["retry_events"] += 1
+        worker["status"] = "pending_retry"
+        worker["last_retry_reason"] = reason
+        if delay_seconds is not None:
+            worker["last_retry_delay_seconds"] = round(max(0.0, delay_seconds), 6)
+        if reason == "rate_limit":
+            stage["rate_limit_retry_events"] += 1
+            worker["rate_limit_retry_events"] += 1
+        self.write()
+
+    def record_attempt_finished(
+        self,
+        *,
+        stage_name: str,
+        job: SwarmWorkerJob,
+        finished_at_monotonic: float,
+    ) -> None:
+        stage = self._ensure_stage(stage_name)
+        worker = self._ensure_worker(stage_name=stage_name, job=job)
+        last_finished_at = datetime.now().isoformat(timespec="seconds")
+        stage["last_finished_at"] = last_finished_at
+        worker["last_finished_at"] = last_finished_at
+        started_at = worker.get("_active_attempt_started_at")
+        if started_at is None:
+            self.write()
+            return
+        elapsed_seconds = max(0.0, finished_at_monotonic - float(started_at))
+        stage["elapsed_seconds"] = round(stage["elapsed_seconds"] + elapsed_seconds, 6)
+        worker["elapsed_seconds"] = round(worker["elapsed_seconds"] + elapsed_seconds, 6)
+        worker["_active_attempt_started_at"] = None
+        self.write()
+
+    def mark_worker_completed(self, *, stage_name: str, job: SwarmWorkerJob) -> None:
+        self._set_worker_status(stage_name=stage_name, job=job, status="completed")
+
+    def mark_worker_failed(
+        self,
+        *,
+        stage_name: str,
+        job: SwarmWorkerJob,
+        failure_message: str,
+    ) -> None:
+        self._set_worker_status(
+            stage_name=stage_name,
+            job=job,
+            status="failed",
+            failure_message=failure_message,
+        )
+
+    def mark_failed(self, *, stage_name: str, reason: str) -> None:
+        self.status = "failed"
+        self.finished_at = datetime.now().isoformat(timespec="seconds")
+        self.failure_stage = stage_name
+        self.failure_reason = reason
+        self._finished_monotonic = time.monotonic()
+        self.write()
+
+    def mark_completed(self) -> None:
+        self.status = "completed"
+        self.finished_at = datetime.now().isoformat(timespec="seconds")
+        self.failure_stage = None
+        self.failure_reason = None
+        self._finished_monotonic = time.monotonic()
+        self.write()
+
+    def to_dict(self) -> dict[str, Any]:
+        stages = {
+            stage_name: {
+                "worker_count": stage["worker_count"],
+                "completed_workers": stage["completed_workers"],
+                "failed_workers": stage["failed_workers"],
+                "retry_events": stage["retry_events"],
+                "rate_limit_retry_events": stage["rate_limit_retry_events"],
+                "elapsed_seconds": stage["elapsed_seconds"],
+                "first_started_at": stage["first_started_at"],
+                "last_finished_at": stage["last_finished_at"],
+                "totals": _public_usage_totals(stage["totals"]),
+            }
+            for stage_name, stage in sorted(self._stages.items())
+        }
+        workers = []
+        for worker in sorted(
+            self._workers.values(),
+            key=lambda item: (str(item["stage"]), str(item["worker_id"])),
+        ):
+            workers.append(
+                {
+                    "stage": worker["stage"],
+                    "worker_id": worker["worker_id"],
+                    "worker_type": worker["worker_type"],
+                    "lease_key": worker["lease_key"],
+                    "model": worker["model"],
+                    "reasoning_effort": worker["reasoning_effort"],
+                    "estimated_request_tokens": worker["estimated_request_tokens"],
+                    "status": worker["status"],
+                    "attempts": worker["attempts"],
+                    "retry_events": worker["retry_events"],
+                    "rate_limit_retry_events": worker["rate_limit_retry_events"],
+                    "elapsed_seconds": worker["elapsed_seconds"],
+                    "first_started_at": worker["first_started_at"],
+                    "last_finished_at": worker["last_finished_at"],
+                    "last_retry_reason": worker["last_retry_reason"],
+                    "last_retry_delay_seconds": worker["last_retry_delay_seconds"],
+                    "failure_message": worker["failure_message"],
+                    "totals": _public_usage_totals(worker["totals"]),
+                }
+            )
+        return {
+            "status": self.status,
+            "started_at": self.started_at,
+            "finished_at": self.finished_at,
+            "wall_clock_seconds": self._wall_clock_seconds(),
+            "failure_stage": self.failure_stage,
+            "failure_reason": self.failure_reason,
+            "totals": _public_usage_totals(self._totals),
+            "stages": stages,
+            "workers": workers,
+        }
+
+    def write(self) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.path.write_text(json.dumps(self.to_dict(), indent=2) + "\n", encoding="utf-8")
+
+    def _ensure_stage(self, stage_name: str) -> dict[str, Any]:
+        stage = self._stages.get(stage_name)
+        if stage is None:
+            stage = {
+                "worker_count": 0,
+                "completed_workers": 0,
+                "failed_workers": 0,
+                "retry_events": 0,
+                "rate_limit_retry_events": 0,
+                "elapsed_seconds": 0.0,
+                "first_started_at": None,
+                "last_finished_at": None,
+                "totals": _new_usage_totals(),
+            }
+            self._stages[stage_name] = stage
+            self._stage_worker_keys[stage_name] = set()
+        return stage
+
+    def _ensure_worker(self, *, stage_name: str, job: SwarmWorkerJob) -> dict[str, Any]:
+        stage = self._ensure_stage(stage_name)
+        worker_key = f"{stage_name}:{job.worker_id}"
+        worker = self._workers.get(worker_key)
+        if worker is None:
+            worker = {
+                "stage": stage_name,
+                "worker_id": job.worker_id,
+                "worker_type": job.worker_type,
+                "lease_key": job.lease_key,
+                "model": job.model,
+                "reasoning_effort": job.reasoning_effort,
+                "estimated_request_tokens": _estimate_job_request_tokens(job),
+                "status": "pending",
+                "attempts": 0,
+                "retry_events": 0,
+                "rate_limit_retry_events": 0,
+                "elapsed_seconds": 0.0,
+                "first_started_at": None,
+                "last_finished_at": None,
+                "last_retry_reason": None,
+                "last_retry_delay_seconds": None,
+                "failure_message": None,
+                "totals": _new_usage_totals(),
+                "_active_attempt_started_at": None,
+            }
+            self._workers[worker_key] = worker
+            self._stage_worker_keys[stage_name].add(worker_key)
+            stage["worker_count"] = len(self._stage_worker_keys[stage_name])
+        return worker
+
+    def _set_worker_status(
+        self,
+        *,
+        stage_name: str,
+        job: SwarmWorkerJob,
+        status: str,
+        failure_message: str | None = None,
+    ) -> None:
+        stage = self._ensure_stage(stage_name)
+        worker = self._ensure_worker(stage_name=stage_name, job=job)
+        previous_status = worker["status"]
+        if previous_status == "completed" and status != "completed":
+            stage["completed_workers"] = max(0, stage["completed_workers"] - 1)
+        if previous_status == "failed" and status != "failed":
+            stage["failed_workers"] = max(0, stage["failed_workers"] - 1)
+        if previous_status != "completed" and status == "completed":
+            stage["completed_workers"] += 1
+        if previous_status != "failed" and status == "failed":
+            stage["failed_workers"] += 1
+        worker["status"] = status
+        worker["failure_message"] = failure_message
+        self.write()
+
+    def _wall_clock_seconds(self) -> float:
+        finished = self._finished_monotonic if self._finished_monotonic is not None else time.monotonic()
+        return round(max(0.0, finished - self._started_monotonic), 6)
+
+
 def _rate_limit_retry_delay_seconds(message: str | None) -> float | None:
     text = str(message or "").strip()
     if not text:
@@ -1325,6 +1696,7 @@ def write_final_summary(
     seed_ledger: Path,
     case_groups: Path,
     final_ranked_findings: Path,
+    usage_summary: Path | None = None,
 ) -> None:
     findings = [result for result in proof_results if result.meets_report_bar]
     filtered = [result for result in proof_results if not result.meets_report_bar]
@@ -1348,6 +1720,8 @@ def write_final_summary(
         f"- Case groups: `{case_groups}`",
         f"- Ranked findings: `{final_ranked_findings}`",
     ]
+    if usage_summary is not None:
+        lines.append(f"- Usage summary: `{usage_summary}`")
     path.write_text("\n".join(lines).strip() + "\n", encoding="utf-8")
 
 
@@ -1544,6 +1918,7 @@ def run_swarm_sweep(
     seeds_dir = swarm_root / "seeds"
     proofs_dir = swarm_root / "proofs"
     reports_dir = swarm_root / "reports"
+    usage_summary = swarm_root / "usage_summary.json"
     seeds_dir.mkdir(parents=True, exist_ok=True)
     proofs_dir.mkdir(parents=True, exist_ok=True)
     reports_dir.mkdir(parents=True, exist_ok=True)
@@ -1556,6 +1931,8 @@ def run_swarm_sweep(
         scope_exclude=loaded.effective.scope.exclude,
         extra_allowed_paths=_staged_shared_resource_files(shared_manifest_path),
     )
+    metrics = SwarmRunMetrics(path=usage_summary)
+    metrics.write()
     prompt_asset = prompt_bundle.seed
     seed_output_path = seeds_dir.relative_to(cwd).as_posix()
     jobs, ordered_seed_metadata = _build_seed_worker_jobs(
@@ -1570,6 +1947,7 @@ def run_swarm_sweep(
     )
     seed_results_by_id: dict[str, SwarmSeedResult] = {}
     target_files_by_seed_id = dict(ordered_seed_metadata)
+    current_stage = "seed"
 
     def _persist_seed_result(job: SwarmWorkerJob, result: ProviderTurnResult) -> None:
         seed_result = parse_seed_payload(
@@ -1580,75 +1958,12 @@ def run_swarm_sweep(
         _write_seed_artifacts(seeds_dir, seed_result)
         seed_results_by_id[job.worker_id] = seed_result
 
-    provider_results = run_background_swarm_workers(
-        provider=provider,
-        jobs=jobs,
-        tool_executor=tools.run,
-        max_parallel=loaded.effective.swarm.seed_max_parallel,
-        max_retries=DEFAULT_SWARM_MAX_RETRIES,
-        rate_limit_max_retries=loaded.effective.swarm.rate_limit_max_retries,
-        max_inflight_estimated_tokens=(
-            None
-            if loaded.effective.swarm.allow_no_limit
-            else loaded.effective.swarm.token_budget
-        ),
-        on_worker_completed=_persist_seed_result,
-        stage_name="seed",
-    )
-    seed_results: list[SwarmSeedResult] = []
-    for seed_id, target_file in ordered_seed_metadata:
-        seed_result = seed_results_by_id.get(seed_id)
-        if seed_result is None:
-            result = provider_results[seed_id]
-            payload = _parse_json_object(result.final_text)
-            seed_result = parse_seed_payload(payload=payload, seed_id=seed_id, target_file=target_file)
-            _write_seed_artifacts(seeds_dir, seed_result)
-        seed_results.append(seed_result)
-
-    issue_candidates = promote_issue_candidates(seed_results)
-    proof_results: list[SwarmProofResult] = []
-    if issue_candidates:
-        proof_prompt_asset = prompt_bundle.proof
-        seed_lookup = {result.seed_id: result for result in seed_results}
-        proof_jobs: list[SwarmWorkerJob] = []
-        issue_candidates_by_case_id: dict[str, SwarmIssueCandidate] = {}
-        for issue_candidate in issue_candidates:
-            issue_candidates_by_case_id[issue_candidate.case_id] = issue_candidate
-            issue_seed_results = tuple(seed_lookup[seed_id] for seed_id in issue_candidate.seed_ids)
-            proof_jobs.append(
-                SwarmWorkerJob(
-                    worker_id=issue_candidate.case_id,
-                    worker_type="proof_issue",
-                    lease_key=f"issue:{issue_candidate.case_id}",
-                    model=loaded.effective.swarm.proof_model,
-                    reasoning_effort=loaded.effective.swarm.reasoning.proof,
-                    instructions=proof_prompt_asset.read_text(),
-                    input_text=build_proof_input(
-                        issue_candidate=issue_candidate,
-                        issue_seed_results=issue_seed_results,
-                        swarm_digest_text=swarm_digest_text,
-                        shared_manifest_text=shared_manifest_text,
-                    ),
-                    prompt_cache_key=proof_prompt_asset.prompt_cache_key,
-                    text_format=PROOF_RESPONSE_FORMAT,
-                    tools=tuple(tools.schemas()),
-                )
-            )
-        proof_results_by_case_id: dict[str, SwarmProofResult] = {}
-
-        def _persist_proof_result(job: SwarmWorkerJob, result: ProviderTurnResult) -> None:
-            proof_result = parse_proof_payload(
-                payload=_parse_json_object(result.final_text),
-                issue_candidate=issue_candidates_by_case_id[job.worker_id],
-            )
-            _write_proof_artifacts(proofs_dir, proof_result)
-            proof_results_by_case_id[job.worker_id] = proof_result
-
-        proof_provider_results = run_background_swarm_workers(
+    try:
+        provider_results = run_background_swarm_workers(
             provider=provider,
-            jobs=proof_jobs,
+            jobs=jobs,
             tool_executor=tools.run,
-            max_parallel=loaded.effective.swarm.proof_max_parallel,
+            max_parallel=loaded.effective.swarm.seed_max_parallel,
             max_retries=DEFAULT_SWARM_MAX_RETRIES,
             rate_limit_max_retries=loaded.effective.swarm.rate_limit_max_retries,
             max_inflight_estimated_tokens=(
@@ -1656,35 +1971,108 @@ def run_swarm_sweep(
                 if loaded.effective.swarm.allow_no_limit
                 else loaded.effective.swarm.token_budget
             ),
-            on_worker_completed=_persist_proof_result,
-            stage_name="proof",
+            on_worker_completed=_persist_seed_result,
+            stage_name="seed",
+            metrics_tracker=metrics,
         )
-        for issue_candidate in issue_candidates:
-            proof_result = proof_results_by_case_id.get(issue_candidate.case_id)
-            if proof_result is None:
-                result = proof_provider_results[issue_candidate.case_id]
+        seed_results: list[SwarmSeedResult] = []
+        for seed_id, target_file in ordered_seed_metadata:
+            seed_result = seed_results_by_id.get(seed_id)
+            if seed_result is None:
+                result = provider_results[seed_id]
                 payload = _parse_json_object(result.final_text)
-                proof_result = parse_proof_payload(payload=payload, issue_candidate=issue_candidate)
+                seed_result = parse_seed_payload(payload=payload, seed_id=seed_id, target_file=target_file)
+                _write_seed_artifacts(seeds_dir, seed_result)
+            seed_results.append(seed_result)
+
+        issue_candidates = promote_issue_candidates(seed_results)
+        proof_results: list[SwarmProofResult] = []
+        current_stage = "proof"
+        if issue_candidates:
+            proof_prompt_asset = prompt_bundle.proof
+            seed_lookup = {result.seed_id: result for result in seed_results}
+            proof_jobs: list[SwarmWorkerJob] = []
+            issue_candidates_by_case_id: dict[str, SwarmIssueCandidate] = {}
+            for issue_candidate in issue_candidates:
+                issue_candidates_by_case_id[issue_candidate.case_id] = issue_candidate
+                issue_seed_results = tuple(seed_lookup[seed_id] for seed_id in issue_candidate.seed_ids)
+                proof_jobs.append(
+                    SwarmWorkerJob(
+                        worker_id=issue_candidate.case_id,
+                        worker_type="proof_issue",
+                        lease_key=f"issue:{issue_candidate.case_id}",
+                        model=loaded.effective.swarm.proof_model,
+                        reasoning_effort=loaded.effective.swarm.reasoning.proof,
+                        instructions=proof_prompt_asset.read_text(),
+                        input_text=build_proof_input(
+                            issue_candidate=issue_candidate,
+                            issue_seed_results=issue_seed_results,
+                            swarm_digest_text=swarm_digest_text,
+                            shared_manifest_text=shared_manifest_text,
+                        ),
+                        prompt_cache_key=proof_prompt_asset.prompt_cache_key,
+                        text_format=PROOF_RESPONSE_FORMAT,
+                        tools=tuple(tools.schemas()),
+                    )
+                )
+            proof_results_by_case_id: dict[str, SwarmProofResult] = {}
+
+            def _persist_proof_result(job: SwarmWorkerJob, result: ProviderTurnResult) -> None:
+                proof_result = parse_proof_payload(
+                    payload=_parse_json_object(result.final_text),
+                    issue_candidate=issue_candidates_by_case_id[job.worker_id],
+                )
                 _write_proof_artifacts(proofs_dir, proof_result)
-            proof_results.append(proof_result)
+                proof_results_by_case_id[job.worker_id] = proof_result
 
-    seed_ledger = reports_dir / "seed_ledger.md"
-    case_groups = reports_dir / "case_groups.md"
-    final_ranked_findings = reports_dir / "final_ranked_findings.md"
-    final_summary = reports_dir / "final_summary.md"
-    write_seed_ledger(seed_ledger, seed_results)
-    write_case_groups(case_groups, issue_candidates, seed_results, tuple(proof_results))
-    write_final_ranked_findings(final_ranked_findings, tuple(proof_results))
-    write_final_summary(
-        final_summary,
-        seed_results,
-        issue_candidates,
-        tuple(proof_results),
-        seed_ledger,
-        case_groups,
-        final_ranked_findings,
-    )
+            proof_provider_results = run_background_swarm_workers(
+                provider=provider,
+                jobs=proof_jobs,
+                tool_executor=tools.run,
+                max_parallel=loaded.effective.swarm.proof_max_parallel,
+                max_retries=DEFAULT_SWARM_MAX_RETRIES,
+                rate_limit_max_retries=loaded.effective.swarm.rate_limit_max_retries,
+                max_inflight_estimated_tokens=(
+                    None
+                    if loaded.effective.swarm.allow_no_limit
+                    else loaded.effective.swarm.token_budget
+                ),
+                on_worker_completed=_persist_proof_result,
+                stage_name="proof",
+                metrics_tracker=metrics,
+            )
+            for issue_candidate in issue_candidates:
+                proof_result = proof_results_by_case_id.get(issue_candidate.case_id)
+                if proof_result is None:
+                    result = proof_provider_results[issue_candidate.case_id]
+                    payload = _parse_json_object(result.final_text)
+                    proof_result = parse_proof_payload(payload=payload, issue_candidate=issue_candidate)
+                    _write_proof_artifacts(proofs_dir, proof_result)
+                proof_results.append(proof_result)
 
+        current_stage = "report"
+        seed_ledger = reports_dir / "seed_ledger.md"
+        case_groups = reports_dir / "case_groups.md"
+        final_ranked_findings = reports_dir / "final_ranked_findings.md"
+        final_summary = reports_dir / "final_summary.md"
+        write_seed_ledger(seed_ledger, seed_results)
+        write_case_groups(case_groups, issue_candidates, seed_results, tuple(proof_results))
+        write_final_ranked_findings(final_ranked_findings, tuple(proof_results))
+        write_final_summary(
+            final_summary,
+            seed_results,
+            issue_candidates,
+            tuple(proof_results),
+            seed_ledger,
+            case_groups,
+            final_ranked_findings,
+            usage_summary,
+        )
+    except Exception as exc:
+        metrics.mark_failed(stage_name=current_stage, reason=str(exc))
+        raise
+
+    metrics.mark_completed()
     return SwarmSweepResult(
         seeds_dir=seeds_dir,
         proofs_dir=proofs_dir,
@@ -1696,6 +2084,7 @@ def run_swarm_sweep(
         case_groups=case_groups,
         final_ranked_findings=final_ranked_findings,
         final_summary=final_summary,
+        usage_summary=usage_summary,
     )
 
 
@@ -1711,9 +2100,12 @@ def run_background_swarm_workers(
     rate_limit_max_retries: int = DEFAULT_SWARM_MAX_RETRIES,
     max_inflight_estimated_tokens: int | None = None,
     on_worker_completed: Callable[[SwarmWorkerJob, ProviderTurnResult], None] | None = None,
+    metrics_tracker: SwarmRunMetrics | None = None,
 ) -> dict[str, ProviderTurnResult]:
     if not jobs:
         return {}
+    if metrics_tracker is not None:
+        metrics_tracker.register_stage_jobs(stage_name=stage_name, jobs=jobs)
 
     distinct_lease_count = len({job.lease_key for job in jobs})
     parallel_limit = max_parallel or min(DEFAULT_SWARM_MAX_PARALLEL, max(1, distinct_lease_count))
@@ -1772,13 +2164,32 @@ def run_background_swarm_workers(
                     if rate_limit_retry_counts[job.worker_id] <= rate_limit_max_retries:
                         pending.append(job)
                         cooldown_until = max(cooldown_until, time.monotonic() + rate_limit_delay)
+                        if metrics_tracker is not None:
+                            metrics_tracker.record_retry(
+                                stage_name=stage_name,
+                                job=job,
+                                reason="rate_limit",
+                                delay_seconds=rate_limit_delay,
+                            )
                         scan_limit = len(pending)
                         continue
                 retry_counts[job.worker_id] += 1
                 if retry_counts[job.worker_id] <= max_retries:
                     pending.append(job)
+                    if metrics_tracker is not None:
+                        metrics_tracker.record_retry(
+                            stage_name=stage_name,
+                            job=job,
+                            reason="failure",
+                        )
                     scan_limit = len(pending)
                     continue
+                if metrics_tracker is not None:
+                    metrics_tracker.mark_worker_failed(
+                        stage_name=stage_name,
+                        job=job,
+                        failure_message=failure_message or "worker start failed",
+                    )
                 permanent_failures.append(
                     SwarmWorkerFailureDiagnostic(
                         stage=stage_name,
@@ -1789,11 +2200,19 @@ def run_background_swarm_workers(
                 )
                 scan_limit = len(pending)
                 continue
+            started_at = time.monotonic()
             active[job.worker_id] = ActiveSwarmWorker(
                 job=job,
                 handle=handle,
                 tool_traces=[],
+                started_at=started_at,
             )
+            if metrics_tracker is not None:
+                metrics_tracker.record_attempt_started(
+                    stage_name=stage_name,
+                    job=job,
+                    started_at_monotonic=started_at,
+                )
             active_leases.add(job.lease_key)
             scan_limit = len(pending)
 
@@ -1805,6 +2224,16 @@ def run_background_swarm_workers(
                     tools=state.job.tools,
                     tool_executor=tool_executor,
                     text_format=state.job.text_format,
+                    event_callback=(
+                        None
+                        if metrics_tracker is None
+                        else lambda event_type, data, job=state.job: metrics_tracker.record_provider_event(
+                            stage_name=stage_name,
+                            job=job,
+                            event_type=event_type,
+                            data=data,
+                        )
+                    ),
                 )
             except Exception as exc:
                 poll_result = None
@@ -1819,6 +2248,13 @@ def run_background_swarm_workers(
 
             del active[worker_id]
             active_leases.discard(state.job.lease_key)
+            finished_at = time.monotonic()
+            if metrics_tracker is not None:
+                metrics_tracker.record_attempt_finished(
+                    stage_name=stage_name,
+                    job=state.job,
+                    finished_at_monotonic=finished_at,
+                )
 
             if poll_result is not None and poll_result.status == "completed":
                 completed_result = ProviderTurnResult(
@@ -1842,7 +2278,15 @@ def run_background_swarm_workers(
                             raw_final_text=completed_result.final_text,
                         )
                     )
+                    if metrics_tracker is not None:
+                        metrics_tracker.mark_worker_failed(
+                            stage_name=stage_name,
+                            job=state.job,
+                            failure_message=str(exc),
+                        )
                     continue
+                if metrics_tracker is not None:
+                    metrics_tracker.mark_worker_completed(stage_name=stage_name, job=state.job)
                 results[worker_id] = completed_result
                 continue
 
@@ -1852,11 +2296,30 @@ def run_background_swarm_workers(
                 if rate_limit_retry_counts[worker_id] <= rate_limit_max_retries:
                     pending.append(state.job)
                     cooldown_until = max(cooldown_until, time.monotonic() + rate_limit_delay)
+                    if metrics_tracker is not None:
+                        metrics_tracker.record_retry(
+                            stage_name=stage_name,
+                            job=state.job,
+                            reason="rate_limit",
+                            delay_seconds=rate_limit_delay,
+                        )
                     continue
             retry_counts[worker_id] += 1
             if retry_counts[worker_id] <= max_retries:
                 pending.append(state.job)
+                if metrics_tracker is not None:
+                    metrics_tracker.record_retry(
+                        stage_name=stage_name,
+                        job=state.job,
+                        reason="failure",
+                    )
                 continue
+            if metrics_tracker is not None:
+                metrics_tracker.mark_worker_failed(
+                    stage_name=stage_name,
+                    job=state.job,
+                    failure_message=failure_message or "background turn failed",
+                )
             permanent_failures.append(
                 SwarmWorkerFailureDiagnostic(
                     stage=stage_name,
@@ -1874,6 +2337,17 @@ def run_background_swarm_workers(
                     provider.cancel_background_turn(state.handle)
                 except Exception:
                     pass
+                if metrics_tracker is not None:
+                    metrics_tracker.record_attempt_finished(
+                        stage_name=stage_name,
+                        job=state.job,
+                        finished_at_monotonic=time.monotonic(),
+                    )
+                    metrics_tracker.mark_worker_failed(
+                        stage_name=stage_name,
+                        job=state.job,
+                        failure_message="cancelled after another worker failed",
+                    )
             raise SwarmWorkerFailure(permanent_failures)
 
         if pending or active:
