@@ -282,6 +282,41 @@ class RateLimitThenSuccessProvider:
         return None
 
 
+class RateLimitMillisThenSuccessProvider:
+    def __init__(self) -> None:
+        self.start_calls: list[dict[str, object]] = []
+        self._response_payloads: dict[str, dict[str, object]] = {}
+
+    def start_background_turn(self, **kwargs):
+        self.start_calls.append(kwargs)
+        if len(self.start_calls) == 1:
+            raise RuntimeError(
+                "ResponseError(code='rate_limit_exceeded', message='Rate limit reached for "
+                "gpt-5.4-mini on tokens per min (TPM): Limit 200000, Used 188404, Requested "
+                "19721. Please try again in 934ms.')"
+            )
+        response_id = f"bg_{len(self.start_calls)}"
+        self._response_payloads[response_id] = {"ok": True}
+        return ProviderBackgroundHandle(response_id=response_id)
+
+    def poll_background_turn(self, **kwargs):
+        response_id = kwargs["handle"].response_id
+        payload = self._response_payloads.pop(response_id)
+        return BackgroundPollResult(
+            status="completed",
+            response_id=response_id,
+            final_text=json.dumps(payload),
+            tool_traces=(),
+        )
+
+    def cancel_background_turn(self, handle):
+        self._response_payloads.pop(handle.response_id, None)
+        return "cancelled"
+
+    def classify_provider_failure(self, value):
+        return None
+
+
 class RunningThenFailureProvider:
     def __init__(self) -> None:
         self.start_calls: list[dict[str, object]] = []
@@ -1140,6 +1175,52 @@ class SwarmTests(unittest.TestCase):
         self.assertEqual({"job_retry"}, set(results))
         self.assertEqual(2, len(provider.start_calls))
         self.assertTrue(any(seconds >= 2.5 for seconds in sleeps))
+
+    def test_background_scheduler_waits_and_retries_millisecond_rate_limited_workers(self) -> None:
+        provider = RateLimitMillisThenSuccessProvider()
+        jobs = [
+            SwarmWorkerJob(
+                worker_id="job_retry",
+                worker_type="seed_file",
+                lease_key="file:app/a.py",
+                model="gpt-5.4-mini",
+                reasoning_effort="low",
+                instructions="seed",
+                input_text="retry",
+                prompt_cache_key="cache",
+                text_format=None,
+                tools=(),
+            )
+        ]
+
+        current_time = 10.0
+        sleeps: list[float] = []
+
+        def fake_monotonic() -> float:
+            return current_time
+
+        def fake_sleep(seconds: float) -> None:
+            nonlocal current_time
+            sleeps.append(seconds)
+            current_time += seconds
+
+        with (
+            mock.patch("swarm.time.monotonic", side_effect=fake_monotonic),
+            mock.patch("swarm.time.sleep", side_effect=fake_sleep),
+        ):
+            results = run_background_swarm_workers(
+                provider=provider,
+                jobs=jobs,
+                tool_executor=lambda name, arguments: "",
+                max_parallel=1,
+                poll_interval_seconds=0.0,
+                max_retries=0,
+                rate_limit_max_retries=1,
+            )
+
+        self.assertEqual({"job_retry"}, set(results))
+        self.assertEqual(2, len(provider.start_calls))
+        self.assertTrue(any(seconds >= 0.93 for seconds in sleeps), sleeps)
 
     def test_background_scheduler_cancels_active_workers_after_non_rate_limit_failure(self) -> None:
         provider = RunningThenFailureProvider()

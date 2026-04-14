@@ -91,7 +91,7 @@ PROOF_CONTRADICTION_PHRASES = (
     "hardening concern",
 )
 RATE_LIMIT_RETRY_PATTERN = re.compile(
-    r"please try again in\s+([0-9]+(?:\.[0-9]+)?)s",
+    r"please try again in\s+([0-9]+(?:\.[0-9]+)?)\s*(ms|milliseconds?|s|sec(?:onds?)?)\b",
     re.IGNORECASE,
 )
 
@@ -876,7 +876,11 @@ def _rate_limit_retry_delay_seconds(message: str | None) -> float | None:
         return None
     match = RATE_LIMIT_RETRY_PATTERN.search(text)
     if match is not None:
-        return max(float(match.group(1)), DEFAULT_SWARM_POLL_INTERVAL_SECONDS)
+        delay = float(match.group(1))
+        unit = match.group(2).lower()
+        if unit.startswith("ms"):
+            delay /= 1000.0
+        return max(delay, DEFAULT_SWARM_POLL_INTERVAL_SECONDS)
     return DEFAULT_SWARM_RATE_LIMIT_COOLDOWN_SECONDS
 
 
