@@ -1,15 +1,7 @@
-# Repo-scoped awdit config example.
-# Durable local resource defaults live under:
-#   - config/resources/shared/
-#   - config/resources/slots/<slot>/
-# awdit includes everything under those folders by default.
-# In the common case, this config only needs exclude rules.
-# Use include only for explicit URLs or out-of-tree paths.
-#
-# Model selection note (updated 2026-03-29):
-# Run `awdit list-models` periodically to refresh the OpenAI model IDs available
-# to your account before editing `providers.<name>.allowed_models` and
-# `slots.<slot_name>.default_model`.
+# Repo-scoped awdit config scaffold.
+# This file is intentionally verbose and self-documenting.
+# Optional sections say when they may be omitted and list every accepted value nearby.
+# Recommended path: keep the safe swarm preset and only override grouped swarm sections you truly need.
 
 active_provider = "openai"
 
@@ -18,9 +10,162 @@ api_key_env = "OPENAI_API_KEY"
 base_url = "https://api.openai.com/v1"
 allowed_models = ["gpt-5.4", "gpt-5.4-mini"]
 
+[scope]
+include = [
+  "src/**",
+  "tests/**",
+  "config/prompts/**",
+  "config/config.toml",
+  "config/config.toml.example",
+  "pyproject.toml",
+  "uv.lock",
+  ".gitignore",
+]
+exclude = [
+  "src/__pycache__/**",
+  "tests/__pycache__/**",
+  "src/*.egg-info/**",
+  "config/resources/**",
+  "docs/**",
+  ".env",
+  ".env.example",
+]
+
+[[validation.checks]]
+name = "pytest"
+command = "pytest -q"
+timeout_seconds = 600
+
+[repo_memory]
+enabled = true
+require_danger_map_approval = true
+confirm_refresh_on_startup = true
+auto_update_on_completion = true
+
+# Optional.
+# config/resources/shared/ is auto-included by discovery unless excluded here.
+# Options:
+#   - include: explicit URLs or out-of-tree paths only
+#   - exclude: glob patterns relative to config/resources/shared/
+[resources.shared]
+include = [
+  "../docs/architecture.md",
+  "../docs/agent-isolation-workflow.md",
+]
+exclude = []
+
+# Optional per-slot resource overrides.
+# Each block may be omitted, but when present it accepts:
+#   - include: explicit URLs or out-of-tree paths only
+#   - exclude: glob patterns relative to config/resources/slots/<slot>/
+[resources.slots.hunter_1]
+include = []
+exclude = []
+
+[resources.slots.hunter_2]
+include = []
+exclude = []
+
+[resources.slots.skeptic_1]
+include = []
+exclude = []
+
+[resources.slots.skeptic_2]
+include = []
+exclude = []
+
+[resources.slots.referee_1]
+include = []
+exclude = []
+
+[resources.slots.referee_2]
+include = []
+exclude = []
+
+[resources.slots.solver_1]
+include = []
+exclude = []
+
+[resources.slots.solver_2]
+include = []
+exclude = []
+
+[github]
+prefer_gh = true
+
+# Optional.
+# If omitted entirely, awdit does not enable swarm mode for this repo.
+# Grouped schema only: legacy flat swarm keys are rejected.
+
+[swarm.mode]
+# Optional. Omit to use the default preset.
+# Options:
+#   - "safe": default, stability-first, hard-safe continuation and launch gating
+#   - "balanced": still hard-safe, but reopens safe concurrency sooner
+#   - "fast": favors throughput and may knowingly accept retry churn
+preset = "safe"
+
+[swarm.models]
+# Optional overrides for the chosen preset.
+# Options:
+#   - sweep: any model listed in providers.<active>.allowed_models
+#   - proof: any model listed in providers.<active>.allowed_models
+sweep = "gpt-5.4-mini"
+proof = "gpt-5.4-mini"
+
+[swarm.files]
+# Optional.
+# Options:
+#   - "code_config_tests": code, config, and test files only
+#   - "all_tracked": every tracked repo file except runtime-managed paths
+profile = "code_config_tests"
+
+[swarm.budget]
+# Optional.
+# Options:
+#   - tokens: positive integer >= 1
+#   - mode:
+#       - "enforced": scheduler blocks or degrades oversized work to stay inside the budget
+#       - "advisory": budget is reported, but faster presets may push harder
+tokens = 120000
+mode = "enforced"
+
+[swarm.parallelism]
+# Optional.
+# Omit either value to inherit the preset default.
+# Options:
+#   - seed: positive integer >= 1
+#   - proof: positive integer >= 1
+seed = 2
+proof = 1
+
+[swarm.retries]
+# Optional.
+# Options:
+#   - rate_limits: positive integer >= 1
+rate_limits = 3
+
+[swarm.reasoning]
+# Optional.
+# Omit any individual value to inherit the built-in default for that stage.
+# Options for every field: "low", "medium", "high"
+danger_map = "medium"
+seed = "low"
+proof = "medium"
+
+[swarm.prompts]
+# Required when swarm is enabled.
+# Options:
+#   - danger_map: relative or absolute path to the danger-map prompt
+#   - seed: relative or absolute path to the seed prompt
+#   - proof: relative or absolute path to the proof prompt
+danger_map = "prompts/swarm_danger_map.md"
+seed = "prompts/swarm_seed.md"
+proof = "prompts/swarm_proof.md"
+
 [slots.hunter_1]
-default_model = "gpt-5.4"
-reasoning_effort = "medium"
+default_model = "gpt-5.4-mini"
+reasoning_effort = "low"
 prompt_file = "prompts/hunter_1.md"
 
 [slots.hunter_2]
@@ -57,101 +202,3 @@ prompt_file = "prompts/solver_1.md"
 default_model = "gpt-5.4-mini"
 reasoning_effort = "low"
 prompt_file = "prompts/solver_2.md"
-
-[scope]
-include = [
-  "src/**",
-  "tests/**",
-  "config/prompts/**",
-  "config/config.toml",
-  "config/config.toml.example",
-  "pyproject.toml",
-  "uv.lock",
-  ".gitignore",
-]
-exclude = [
-  "src/__pycache__/**",
-  "tests/__pycache__/**",
-  "src/*.egg-info/**",
-  "config/resources/**",
-  "docs/**",
-  ".env",
-  ".env.example",
-]
-
-
-[[validation.checks]]
-name = "pytest"
-command = "pytest -q"
-timeout_seconds = 600
-
-[repo_memory]
-enabled = true
-require_danger_map_approval = true
-confirm_refresh_on_startup = true
-auto_update_on_completion = true
-
-[resources.shared]
-include = [
-  "../README.md",
-  "../docs/architecture.md",
-  "../docs/agent-isolation-workflow.md",
-  "../docs/PROPOSED_FILE_STRUCTURE_CONFIG_BEHAVIOUR.txt",
-  "../docs/e2e-cli-walkthrough.txt",
-]
-exclude = []
-
-
-[resources.slots.hunter_1]
-exclude = []
-
-[resources.slots.hunter_2]
-exclude = []
-
-[resources.slots.skeptic_1]
-exclude = []
-
-[resources.slots.skeptic_2]
-exclude = []
-
-[resources.slots.referee_1]
-exclude = []
-
-[resources.slots.referee_2]
-exclude = []
-
-[resources.slots.solver_1]
-exclude = []
-
-[resources.slots.solver_2]
-exclude = []
-
-# Optional advanced examples:
-# [resources.shared]
-# include = ["https://internal.example/wiki/refund-trust-boundaries"]
-#
-# [resources.slots.referee_1]
-# include = ["~/notes/webhook-checklist.md"]
-
-[github]
-prefer_gh = true
-
-[swarm]
-sweep_model = "gpt-5.4-mini"
-proof_model = "gpt-5.4"
-eligible_file_profile = "code_config_tests"
-token_budget = 120000
-allow_no_limit = true
-seed_max_parallel = 2
-proof_max_parallel = 1
-rate_limit_max_retries = 3
-
-[swarm.reasoning]
-danger_map = "high"
-seed = "low"
-proof = "medium"
-
-[swarm.prompts]
-danger_map = "prompts/swarm_danger_map.md"
-seed = "prompts/swarm_seed.md"
-proof = "prompts/swarm_proof.md"

@@ -7,7 +7,7 @@ import random
 import re
 import subprocess
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable
@@ -16,6 +16,7 @@ from paths import managed_runtime_root_names
 from provider_openai import (
     OpenAIResponsesProvider,
     ProviderBackgroundHandle,
+    ProviderToolCall,
     ProviderTurnResult,
     ToolTraceRecord,
 )
@@ -82,6 +83,23 @@ DEFAULT_SWARM_POLL_INTERVAL_SECONDS = 0.05
 DEFAULT_SWARM_ESTIMATED_CHARS_PER_TOKEN = 4
 DEFAULT_SWARM_TPM_HEADROOM_FRACTION = 0.85
 DEFAULT_SWARM_TPM_WINDOW_SECONDS = 60.0
+SWARM_STAGE_PRESET_BEHAVIORS: dict[str, dict[str, Any]] = {
+    "safe": {
+        "hard_safe": True,
+        "bootstrap_parallel_limit": 1,
+        "rate_limit_strike_limit": 1,
+    },
+    "balanced": {
+        "hard_safe": True,
+        "bootstrap_parallel_limit": 1,
+        "rate_limit_strike_limit": 2,
+    },
+    "fast": {
+        "hard_safe": False,
+        "bootstrap_parallel_limit": None,
+        "rate_limit_strike_limit": 0,
+    },
+}
 PROOF_STATE_VALUES = (
     "hypothesized",
     "path_grounded",
@@ -277,6 +295,7 @@ class SwarmSweepResult:
     seeds_dir: Path
     proofs_dir: Path
     reports_dir: Path
+    tool_trace_log: Path
     seed_results: tuple[SwarmSeedResult, ...]
     issue_candidates: tuple[SwarmIssueCandidate, ...]
     proof_results: tuple[SwarmProofResult, ...]
@@ -301,14 +320,18 @@ class SwarmWorkerJob:
     tools: tuple[dict[str, Any], ...]
     progress_label: str | None = None
     progress_action: str | None = None
+    input_variants: tuple[str, ...] = ()
+    input_variant_index: int = 0
 
 
 @dataclass
 class ActiveSwarmWorker:
     job: SwarmWorkerJob
-    handle: ProviderBackgroundHandle
+    handle: ProviderBackgroundHandle | None
     tool_traces: list[ToolTraceRecord]
     started_at: float
+    pending_continuation_response_id: str | None = None
+    pending_continuation_input: tuple[dict[str, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -561,11 +584,13 @@ class RepoReadOnlyTools:
             {
                 "type": "function",
                 "name": "read_file",
-                "description": "Read an allowed repo file or current-run staged shared resource inside the current swarm scope.",
+                "description": "Read an allowed repo file or current-run staged shared resource inside the current swarm scope. Supports paged reads by line number.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "path": {"type": "string"},
+                        "start_line": {"type": "integer", "minimum": 1},
+                        "max_lines": {"type": "integer", "minimum": 1, "maximum": 500},
                         "max_chars": {"type": "integer", "minimum": 1, "maximum": 50000},
                     },
                     "required": ["path"],
@@ -583,15 +608,39 @@ class RepoReadOnlyTools:
             raw_path = str(arguments.get("path", "") or "").strip()
             if not raw_path:
                 raise RuntimeError("read_file requires a path.")
+            start_line = int(arguments.get("start_line", 1) or 1)
+            if start_line <= 0:
+                raise RuntimeError("read_file start_line must be >= 1.")
+            max_lines = int(arguments.get("max_lines", 200) or 200)
+            if max_lines <= 0:
+                raise RuntimeError("read_file max_lines must be >= 1.")
             max_chars = int(arguments.get("max_chars", 12000) or 12000)
             path = self.resolve_allowed_path(raw_path)
             text = path.read_text(encoding="utf-8", errors="replace")
-            visible_text = text[:max_chars]
+            all_lines = text.splitlines()
+            if text.endswith("\n"):
+                all_lines.append("")
+            raw_line_count = len(all_lines) or 1
+            if start_line > raw_line_count:
+                raise RuntimeError("read_file start_line is beyond the end of the file.")
+            end_line_exclusive = min(raw_line_count + 1, start_line + max_lines)
+            selected_lines = all_lines[start_line - 1 : end_line_exclusive - 1]
+            selected_text = "\n".join(selected_lines)
+            visible_text = selected_text[:max_chars]
+            numbered_text = _with_line_numbers(visible_text, start_line=start_line)
+            visible_line_count = max(1, len(visible_text.splitlines()) or (1 if visible_text else 0))
+            end_line = min(raw_line_count, start_line + visible_line_count - 1)
+            truncated_after = end_line < raw_line_count or len(selected_text) > max_chars
             return json.dumps(
                 {
                     "path": self._display_path(path),
-                    "content": _with_line_numbers(visible_text),
-                    "truncated": len(text) > max_chars,
+                    "start_line": start_line,
+                    "end_line": end_line,
+                    "content": numbered_text,
+                    "truncated": len(text) > max_chars or truncated_after,
+                    "truncated_before": start_line > 1,
+                    "truncated_after": truncated_after,
+                    "raw_line_count": raw_line_count,
                     "raw_char_count": len(text),
                 },
                 indent=2,
@@ -843,18 +892,41 @@ def build_seed_input(
     *,
     seed_id: str,
     target_file: str,
-    target_text: str,
     swarm_digest_text: str,
     shared_manifest_text: str,
+    target_size_bytes: int,
+    context_level: str = "compact",
 ) -> str:
+    swarm_digest_summary = _compact_seed_context(
+        swarm_digest_text,
+        max_chars=2400 if context_level == "compact" else 800,
+    )
+    shared_manifest_summary = _compact_seed_context(
+        shared_manifest_text,
+        max_chars=1400 if context_level == "compact" else 500,
+    )
     payload = {
         "task_type": "seed_file",
         "seed_id": seed_id,
         "lease_key": f"file:{target_file}",
         "target_file": target_file,
-        "shared_manifest_markdown": shared_manifest_text,
-        "swarm_digest_markdown": swarm_digest_text,
-        "target_file_numbered_content": _with_line_numbers(target_text),
+        "context_level": context_level,
+        "target_file_metadata": {
+            "path": target_file,
+            "size_bytes": target_size_bytes,
+        },
+        "first_read_request": {
+            "path": target_file,
+            "start_line": 1,
+            "max_lines": 200,
+            "max_chars": 12000,
+        },
+        "operator_notes": [
+            "Inspect the target file with read_file first.",
+            "Use paged read_file calls for large files instead of trying to load everything at once.",
+        ],
+        "shared_manifest_summary": shared_manifest_summary,
+        "swarm_digest_summary": swarm_digest_summary,
     }
     return json.dumps(payload, indent=2)
 
@@ -870,6 +942,26 @@ def _staged_shared_resource_files(shared_manifest_path: Path) -> tuple[Path, ...
             continue
         staged_files.append(path.resolve())
     return tuple(staged_files)
+
+
+def _compact_seed_context(text: str, *, max_chars: int) -> str:
+    compact_lines: list[str] = []
+    for raw_line in text.splitlines():
+        line = raw_line.rstrip()
+        if not line:
+            continue
+        if line.startswith("#"):
+            compact_lines.append(line)
+            continue
+        if line.startswith("- "):
+            compact_lines.append(line)
+            continue
+        if len(compact_lines) < 12:
+            compact_lines.append(line)
+    compact_text = "\n".join(compact_lines).strip()
+    if len(compact_text) <= max_chars:
+        return compact_text
+    return compact_text[:max_chars].rstrip() + "\n..."
 
 
 def render_seed_instructions(
@@ -1024,6 +1116,60 @@ def _swarm_progress_payload(stage_name: str, job: SwarmWorkerJob) -> dict[str, A
     }
 
 
+def _tool_call_summary(*, job: SwarmWorkerJob, tool_name: str, arguments: dict[str, Any]) -> str:
+    label = _swarm_job_label(job)
+    if tool_name == "read_file":
+        path = str(arguments.get("path", label) or label)
+        start_line = max(1, _coerce_nonnegative_int(arguments.get("start_line")) or 1)
+        max_lines = max(1, _coerce_nonnegative_int(arguments.get("max_lines")) or 200)
+        end_line = start_line + max_lines - 1
+        if path == label:
+            return f"reading {path} lines {start_line}-{end_line} for initial context"
+        return f"reading {path} lines {start_line}-{end_line} while inspecting {label}"
+    if tool_name == "list_scope_files":
+        path_glob = str(arguments.get("path_glob", "") or "").strip()
+        if path_glob:
+            return f"scanning {path_glob} for nearby clues while inspecting {label}"
+        return f"scanning the readable scope for nearby clues while inspecting {label}"
+    return f"using {tool_name} while inspecting {label}"
+
+
+def _append_tool_trace_records(
+    *,
+    path: Path | None,
+    stage_name: str,
+    job: SwarmWorkerJob,
+    traces: tuple[ToolTraceRecord, ...],
+) -> None:
+    if path is None or not traces:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        for trace in traces:
+            payload = {
+                "ts": datetime.now().isoformat(timespec="seconds"),
+                "stage": stage_name,
+                "worker_id": job.worker_id,
+                "response_id": trace.response_id,
+                "tool": trace.name,
+                "arguments": trace.arguments,
+                "summary": _tool_call_summary(job=job, tool_name=trace.name, arguments=trace.arguments),
+                "output_meta": trace.output_meta,
+            }
+            handle.write(json.dumps(payload) + "\n")
+
+
+def _degrade_worker_job(job: SwarmWorkerJob) -> SwarmWorkerJob | None:
+    next_index = job.input_variant_index + 1
+    if next_index >= len(job.input_variants):
+        return None
+    return replace(
+        job,
+        input_text=job.input_variants[next_index],
+        input_variant_index=next_index,
+    )
+
+
 def _emit_swarm_progress(
     progress_callback: SwarmProgressCallback | None,
     event_type: str,
@@ -1051,10 +1197,17 @@ class SwarmRunMetrics:
         self._workers: dict[str, dict[str, Any]] = {}
         self._stage_worker_keys: dict[str, set[str]] = {}
         self._limiter_snapshot = {
+            "preset": None,
+            "hard_safe": True,
             "model_limit_tpm": None,
             "headroom_fraction": DEFAULT_SWARM_TPM_HEADROOM_FRACTION,
             "current_stage_parallel_ceiling": 1,
             "stage_degraded_after_rate_limit": False,
+            "rate_limit_strikes": 0,
+            "limiter_wait_seconds": 0.0,
+            "blocked_launches": 0,
+            "blocked_continuations": 0,
+            "degrade_events": 0,
             "stage_name": None,
         }
 
@@ -1126,15 +1279,53 @@ class SwarmRunMetrics:
             worker["rate_limit_retry_events"] += 1
         self.write()
 
+    def record_wait(
+        self,
+        *,
+        stage_name: str,
+        continuation: bool,
+        seconds: float,
+    ) -> None:
+        stage = self._ensure_stage(stage_name)
+        normalized = round(max(0.0, seconds), 6)
+        stage["limiter_wait_seconds"] = round(stage["limiter_wait_seconds"] + normalized, 6)
+        self._limiter_snapshot["limiter_wait_seconds"] = round(
+            float(self._limiter_snapshot.get("limiter_wait_seconds", 0.0)) + normalized,
+            6,
+        )
+        key = "blocked_continuations" if continuation else "blocked_launches"
+        stage[key] += 1
+        self._limiter_snapshot[key] = int(self._limiter_snapshot.get(key, 0)) + 1
+        self.write()
+
+    def record_degrade(self, *, stage_name: str, job: SwarmWorkerJob) -> None:
+        stage = self._ensure_stage(stage_name)
+        stage["degrade_events"] += 1
+        self._limiter_snapshot["degrade_events"] = int(
+            self._limiter_snapshot.get("degrade_events", 0)
+        ) + 1
+        worker = self._ensure_worker(stage_name=stage_name, job=job)
+        worker["degrade_events"] += 1
+        self.write()
+
     def update_limiter_state(self, *, stage_name: str, limiter_state: dict[str, Any]) -> None:
         stage = self._ensure_stage(stage_name)
         stage["limiter"] = {
+            "preset": limiter_state.get("preset"),
+            "hard_safe": limiter_state.get("hard_safe"),
             "model_limit_tpm": limiter_state.get("model_limit_tpm"),
             "headroom_fraction": limiter_state.get("headroom_fraction"),
             "current_stage_parallel_ceiling": limiter_state.get("current_stage_parallel_ceiling"),
             "stage_degraded_after_rate_limit": limiter_state.get("stage_degraded_after_rate_limit"),
+            "rate_limit_strikes": limiter_state.get("rate_limit_strikes"),
+            "limiter_wait_seconds": stage.get("limiter_wait_seconds", 0.0),
+            "blocked_launches": stage.get("blocked_launches", 0),
+            "blocked_continuations": stage.get("blocked_continuations", 0),
+            "degrade_events": stage.get("degrade_events", 0),
         }
         self._limiter_snapshot = {
+            "preset": limiter_state.get("preset"),
+            "hard_safe": limiter_state.get("hard_safe", True),
             "model_limit_tpm": limiter_state.get("model_limit_tpm"),
             "headroom_fraction": limiter_state.get(
                 "headroom_fraction", DEFAULT_SWARM_TPM_HEADROOM_FRACTION
@@ -1143,6 +1334,11 @@ class SwarmRunMetrics:
             "stage_degraded_after_rate_limit": limiter_state.get(
                 "stage_degraded_after_rate_limit", False
             ),
+            "rate_limit_strikes": limiter_state.get("rate_limit_strikes", 0),
+            "limiter_wait_seconds": float(self._limiter_snapshot.get("limiter_wait_seconds", 0.0)),
+            "blocked_launches": int(self._limiter_snapshot.get("blocked_launches", 0)),
+            "blocked_continuations": int(self._limiter_snapshot.get("blocked_continuations", 0)),
+            "degrade_events": int(self._limiter_snapshot.get("degrade_events", 0)),
             "stage_name": stage_name,
         }
         self.write()
@@ -1231,6 +1427,10 @@ class SwarmRunMetrics:
                 "skipped_workers": stage["skipped_workers"],
                 "retry_events": stage["retry_events"],
                 "rate_limit_retry_events": stage["rate_limit_retry_events"],
+                "limiter_wait_seconds": stage["limiter_wait_seconds"],
+                "blocked_launches": stage["blocked_launches"],
+                "blocked_continuations": stage["blocked_continuations"],
+                "degrade_events": stage["degrade_events"],
                 "elapsed_seconds": stage["elapsed_seconds"],
                 "first_started_at": stage["first_started_at"],
                 "last_finished_at": stage["last_finished_at"],
@@ -1259,6 +1459,7 @@ class SwarmRunMetrics:
                     "attempts": worker["attempts"],
                     "retry_events": worker["retry_events"],
                     "rate_limit_retry_events": worker["rate_limit_retry_events"],
+                    "degrade_events": worker["degrade_events"],
                     "elapsed_seconds": worker["elapsed_seconds"],
                     "first_started_at": worker["first_started_at"],
                     "last_finished_at": worker["last_finished_at"],
@@ -1326,11 +1527,22 @@ class SwarmRunMetrics:
                 "last_finished_at": None,
                 "aborted": False,
                 "abort_reason": None,
+                "limiter_wait_seconds": 0.0,
+                "blocked_launches": 0,
+                "blocked_continuations": 0,
+                "degrade_events": 0,
                 "limiter": {
+                    "preset": None,
+                    "hard_safe": True,
                     "model_limit_tpm": None,
                     "headroom_fraction": DEFAULT_SWARM_TPM_HEADROOM_FRACTION,
                     "current_stage_parallel_ceiling": 1,
                     "stage_degraded_after_rate_limit": False,
+                    "rate_limit_strikes": 0,
+                    "limiter_wait_seconds": 0.0,
+                    "blocked_launches": 0,
+                    "blocked_continuations": 0,
+                    "degrade_events": 0,
                 },
                 "totals": _new_usage_totals(),
             }
@@ -1355,6 +1567,7 @@ class SwarmRunMetrics:
                 "attempts": 0,
                 "retry_events": 0,
                 "rate_limit_retry_events": 0,
+                "degrade_events": 0,
                 "elapsed_seconds": 0.0,
                 "first_started_at": None,
                 "last_finished_at": None,
@@ -1453,14 +1666,28 @@ class SwarmStageTokenLimiter:
         stage_name: str,
         jobs: list[SwarmWorkerJob],
         configured_parallel_limit: int,
+        preset: str,
         headroom_fraction: float = DEFAULT_SWARM_TPM_HEADROOM_FRACTION,
     ) -> None:
         self._cwd = cwd.resolve()
         self._provider_name = provider_name
         self._stage_name = stage_name
+        self._preset = preset
+        behavior = SWARM_STAGE_PRESET_BEHAVIORS.get(preset, SWARM_STAGE_PRESET_BEHAVIORS["safe"])
+        self._hard_safe = bool(behavior["hard_safe"])
+        bootstrap_parallel_limit = behavior["bootstrap_parallel_limit"]
+        if bootstrap_parallel_limit is None:
+            self._bootstrap_parallel_limit = max(1, configured_parallel_limit)
+        else:
+            self._bootstrap_parallel_limit = max(
+                1,
+                min(configured_parallel_limit, int(bootstrap_parallel_limit)),
+            )
+        self._rate_limit_strike_limit = int(behavior["rate_limit_strike_limit"])
+        self._rate_limit_strikes = 0
         self._configured_parallel_limit = max(1, configured_parallel_limit)
         self._headroom_fraction = headroom_fraction
-        self._current_stage_parallel_ceiling = 1
+        self._current_stage_parallel_ceiling = self._bootstrap_parallel_limit
         self._stage_degraded_after_rate_limit = False
         self._saw_current_run_usage = False
         self._window_events_by_model: dict[str, list[tuple[float, int]]] = {}
@@ -1507,29 +1734,59 @@ class SwarmStageTokenLimiter:
         self._prune_window(job.model, now)
         if len(active_jobs) >= self._current_stage_parallel_ceiling:
             return False
-        if not active_jobs:
+        if not self._hard_safe:
             return True
-        if self._current_stage_parallel_ceiling <= 1:
-            return False
-        state = self._model_states.get(job.model)
-        if state is None or state["learned_tpm_limit"] is None:
-            return False
         candidate_reservation = self._reservation_tokens(job)
-        if candidate_reservation is None:
-            return False
+        safe_limit = self._safe_limit(job.model)
+        if candidate_reservation is None or safe_limit is None:
+            return len(active_jobs) < self._bootstrap_parallel_limit
         active_reservations = 0
         for active_job in active_jobs:
             if active_job.model != job.model:
-                return False
+                continue
             reservation = self._reservation_tokens(active_job)
             if reservation is None:
-                return False
+                reservation = _estimate_job_request_tokens(active_job)
             active_reservations += reservation
-        safe_limit = math.floor(int(state["learned_tpm_limit"]) * self._headroom_fraction)
-        if safe_limit <= 0:
-            return False
         window_tokens = self._window_tokens(job.model, now)
         return window_tokens + active_reservations + candidate_reservation <= safe_limit
+
+    def recommended_wait_seconds(
+        self,
+        *,
+        job: SwarmWorkerJob,
+        active_jobs: tuple[SwarmWorkerJob, ...],
+        now: float,
+    ) -> float:
+        self._prune_window(job.model, now)
+        if len(active_jobs) >= self._current_stage_parallel_ceiling:
+            return 0.0
+        if not self._hard_safe:
+            return 0.0
+        safe_limit = self._safe_limit(job.model)
+        candidate_reservation = self._reservation_tokens(job)
+        if safe_limit is None or candidate_reservation is None:
+            return 0.0
+        active_reservations = 0
+        for active_job in active_jobs:
+            if active_job.model != job.model:
+                continue
+            reservation = self._reservation_tokens(active_job)
+            if reservation is None:
+                reservation = _estimate_job_request_tokens(active_job)
+            active_reservations += reservation
+        remaining_capacity = safe_limit - active_reservations - candidate_reservation
+        if remaining_capacity < 0:
+            return 0.0
+        window_events = sorted(self._window_events_by_model.get(job.model, []), key=lambda item: item[0])
+        running_window_tokens = sum(tokens for _, tokens in window_events)
+        if running_window_tokens <= remaining_capacity:
+            return 0.0
+        for timestamp, tokens in window_events:
+            running_window_tokens -= tokens
+            if running_window_tokens <= remaining_capacity:
+                return max(0.0, DEFAULT_SWARM_TPM_WINDOW_SECONDS - (now - timestamp))
+        return 0.0
 
     def record_provider_usage(self, *, job: SwarmWorkerJob, data: dict[str, Any], now: float) -> None:
         input_tokens = _coerce_nonnegative_int(data.get("input_tokens"))
@@ -1558,8 +1815,7 @@ class SwarmStageTokenLimiter:
         self._recompute_parallel_ceiling()
 
     def record_rate_limit(self, *, job: SwarmWorkerJob, failure_message: str) -> None:
-        self._stage_degraded_after_rate_limit = True
-        self._current_stage_parallel_ceiling = 1
+        self._rate_limit_strikes += 1
         state = self._model_states.setdefault(
             job.model,
             {
@@ -1572,6 +1828,23 @@ class SwarmStageTokenLimiter:
         if parsed_limit is not None and parsed_limit != state["learned_tpm_limit"]:
             state["learned_tpm_limit"] = parsed_limit
             state["dirty"] = True
+        if (
+            self._rate_limit_strike_limit > 0
+            and self._rate_limit_strikes >= self._rate_limit_strike_limit
+        ):
+            self._stage_degraded_after_rate_limit = True
+        self._recompute_parallel_ceiling()
+
+    def is_intrinsically_oversized(self, *, job: SwarmWorkerJob) -> bool:
+        if not self._hard_safe:
+            return False
+        safe_limit = self._safe_limit(job.model)
+        if safe_limit is None:
+            return False
+        candidate_reservation = self._reservation_tokens(job)
+        if candidate_reservation is None:
+            candidate_reservation = _estimate_job_request_tokens(job)
+        return candidate_reservation > safe_limit
 
     def persist(self) -> None:
         for model, state in self._model_states.items():
@@ -1589,10 +1862,13 @@ class SwarmStageTokenLimiter:
 
     def snapshot(self) -> dict[str, Any]:
         return {
+            "preset": self._preset,
+            "hard_safe": self._hard_safe,
             "model_limit_tpm": self.model_limit_tpm,
             "headroom_fraction": self._headroom_fraction,
             "current_stage_parallel_ceiling": self._current_stage_parallel_ceiling,
             "stage_degraded_after_rate_limit": self._stage_degraded_after_rate_limit,
+            "rate_limit_strikes": self._rate_limit_strikes,
             "stage_name": self._stage_name,
         }
 
@@ -1612,16 +1888,24 @@ class SwarmStageTokenLimiter:
         if state is None:
             return None
         reservation = _coerce_nonnegative_int(state["observed_peak_input_tokens"].get(job.worker_type))
-        return reservation or None
+        return reservation or _estimate_job_request_tokens(job)
+
+    def _safe_limit(self, model: str) -> int | None:
+        state = self._model_states.get(model)
+        if state is None or state["learned_tpm_limit"] is None:
+            return None
+        safe_limit = math.floor(int(state["learned_tpm_limit"]) * self._headroom_fraction)
+        return safe_limit if safe_limit > 0 else None
 
     def _recompute_parallel_ceiling(self) -> None:
-        if (
-            self._configured_parallel_limit <= 1
-            or self._stage_degraded_after_rate_limit
-            or not self._saw_current_run_usage
-            or self.model_limit_tpm is None
-        ):
+        if not self._hard_safe:
+            self._current_stage_parallel_ceiling = self._configured_parallel_limit
+            return
+        if self._configured_parallel_limit <= 1 or self._stage_degraded_after_rate_limit:
             self._current_stage_parallel_ceiling = 1
+            return
+        if not self._saw_current_run_usage or self.model_limit_tpm is None:
+            self._current_stage_parallel_ceiling = self._bootstrap_parallel_limit
             return
         self._current_stage_parallel_ceiling = self._configured_parallel_limit
 
@@ -1644,7 +1928,23 @@ def _build_seed_worker_jobs(
         seed_id = f"SEED-{index:03d}"
         target_file = display_repo_path(cwd, target_path)
         ordered_seed_metadata.append((seed_id, target_file))
-        target_text = target_path.read_text(encoding="utf-8", errors="replace")
+        target_size_bytes = target_path.stat().st_size
+        compact_input = build_seed_input(
+            seed_id=seed_id,
+            target_file=target_file,
+            target_size_bytes=target_size_bytes,
+            swarm_digest_text=swarm_digest_text,
+            shared_manifest_text=shared_manifest_text,
+            context_level="compact",
+        )
+        minimal_input = build_seed_input(
+            seed_id=seed_id,
+            target_file=target_file,
+            target_size_bytes=target_size_bytes,
+            swarm_digest_text=swarm_digest_text,
+            shared_manifest_text=shared_manifest_text,
+            context_level="minimal",
+        )
         jobs.append(
             SwarmWorkerJob(
                 worker_id=seed_id,
@@ -1657,18 +1957,13 @@ def _build_seed_worker_jobs(
                     target_file=target_file,
                     output_path=seed_output_path,
                 ),
-                input_text=build_seed_input(
-                    seed_id=seed_id,
-                    target_file=target_file,
-                    target_text=target_text,
-                    swarm_digest_text=swarm_digest_text,
-                    shared_manifest_text=shared_manifest_text,
-                ),
+                input_text=compact_input,
                 prompt_cache_key=prompt_asset.prompt_cache_key,
                 text_format=SEED_RESPONSE_FORMAT,
                 tools=tool_schemas,
                 progress_label=target_file,
                 progress_action=f"inspect {target_file}",
+                input_variants=(compact_input, minimal_input),
             )
         )
     return jobs, ordered_seed_metadata
@@ -2219,13 +2514,15 @@ def render_proof_markdown(proof_result: SwarmProofResult) -> str:
     return "\n".join(lines).strip() + "\n"
 
 
-def _with_line_numbers(text: str) -> str:
+def _with_line_numbers(text: str, *, start_line: int = 1) -> str:
     lines = text.splitlines()
     if text.endswith("\n"):
         lines.append("")
     if not lines:
-        return "1 | "
-    return "\n".join(f"{index:>5} | {line}" for index, line in enumerate(lines, start=1))
+        return f"{start_line:>5} | "
+    return "\n".join(
+        f"{index:>5} | {line}" for index, line in enumerate(lines, start=start_line)
+    )
 
 
 def _require_payload_keys(payload: dict[str, Any], keys: tuple[str, ...]) -> None:
@@ -2333,6 +2630,7 @@ def run_swarm_sweep(
     proofs_dir = swarm_root / "proofs"
     reports_dir = swarm_root / "reports"
     usage_summary = swarm_root / "usage_summary.json"
+    tool_trace_log = swarm_root / "tool_trace.jsonl"
     seeds_dir.mkdir(parents=True, exist_ok=True)
     proofs_dir.mkdir(parents=True, exist_ok=True)
     reports_dir.mkdir(parents=True, exist_ok=True)
@@ -2391,7 +2689,7 @@ def run_swarm_sweep(
                 rate_limit_max_retries=loaded.effective.swarm.rate_limit_max_retries,
                 max_inflight_estimated_tokens=(
                     None
-                    if loaded.effective.swarm.allow_no_limit
+                    if loaded.effective.swarm.budget_mode == "advisory"
                     else loaded.effective.swarm.token_budget
                 ),
                 on_worker_completed=_persist_seed_result,
@@ -2400,6 +2698,8 @@ def run_swarm_sweep(
                 progress_callback=progress_callback,
                 cwd=cwd,
                 provider_name=loaded.effective.active_provider,
+                scheduler_preset=loaded.effective.swarm.preset,
+                tool_trace_path=tool_trace_log,
             )
             resolved_seed_results: list[SwarmSeedResult] = []
             for seed_id, target_file in ordered_seed_metadata:
@@ -2491,7 +2791,7 @@ def run_swarm_sweep(
                     rate_limit_max_retries=loaded.effective.swarm.rate_limit_max_retries,
                     max_inflight_estimated_tokens=(
                         None
-                        if loaded.effective.swarm.allow_no_limit
+                        if loaded.effective.swarm.budget_mode == "advisory"
                         else loaded.effective.swarm.token_budget
                     ),
                     on_worker_completed=_persist_proof_result,
@@ -2500,6 +2800,8 @@ def run_swarm_sweep(
                     progress_callback=progress_callback,
                     cwd=cwd,
                     provider_name=loaded.effective.active_provider,
+                    scheduler_preset=loaded.effective.swarm.preset,
+                    tool_trace_path=tool_trace_log,
                 )
                 for issue_candidate in issue_candidates:
                     proof_result = proof_results_by_case_id.get(issue_candidate.case_id)
@@ -2555,6 +2857,7 @@ def run_swarm_sweep(
         seeds_dir=seeds_dir,
         proofs_dir=proofs_dir,
         reports_dir=reports_dir,
+        tool_trace_log=tool_trace_log,
         seed_results=seed_results,
         issue_candidates=issue_candidates,
         proof_results=proof_results,
@@ -2582,6 +2885,8 @@ def run_background_swarm_workers(
     progress_callback: SwarmProgressCallback | None = None,
     cwd: Path | None = None,
     provider_name: str | None = None,
+    scheduler_preset: str = "safe",
+    tool_trace_path: Path | None = None,
 ) -> dict[str, ProviderTurnResult]:
     if not jobs:
         return {}
@@ -2598,6 +2903,7 @@ def run_background_swarm_workers(
             stage_name=stage_name,
             jobs=jobs,
             configured_parallel_limit=configured_parallel_limit,
+            preset=scheduler_preset,
         )
         if metrics_tracker is not None:
             metrics_tracker.update_limiter_state(stage_name=stage_name, limiter_state=limiter.snapshot())
@@ -2609,197 +2915,424 @@ def run_background_swarm_workers(
         max_parallel=configured_parallel_limit,
     )
 
-    pending: list[SwarmWorkerJob] = list(jobs)
+    estimated_tokens_by_job_id = {
+        job.worker_id: _estimate_job_request_tokens(job) for job in jobs
+    }
+    job_order_by_id = {job.worker_id: index for index, job in enumerate(jobs)}
+    pending: list[SwarmWorkerJob] = sorted(
+        list(jobs),
+        key=lambda item: (
+            estimated_tokens_by_job_id[item.worker_id],
+            job_order_by_id[item.worker_id],
+        ),
+    )
     active: dict[str, ActiveSwarmWorker] = {}
+    awaiting_continuation: dict[str, ActiveSwarmWorker] = {}
     active_leases: set[str] = set()
     retry_counts: dict[str, int] = {job.worker_id: 0 for job in jobs}
     rate_limit_retry_counts: dict[str, int] = {job.worker_id: 0 for job in jobs}
     attempt_counts: dict[str, int] = {job.worker_id: 0 for job in jobs}
-    estimated_tokens_by_job_id = {
-        job.worker_id: _estimate_job_request_tokens(job) for job in jobs
-    }
     results: dict[str, ProviderTurnResult] = {}
     cooldown_until = 0.0
     abort_diagnostics: list[SwarmWorkerFailureDiagnostic] = []
     aborting_due_to_rate_limit = False
 
     try:
-        while pending or active:
+        while pending or active or awaiting_continuation:
             permanent_failures: list[SwarmWorkerFailureDiagnostic] = []
-            scan_limit = len(pending)
-            while (
-                not aborting_due_to_rate_limit
-                and pending
-                and len(active) < configured_parallel_limit
-                and scan_limit > 0
-            ):
+            blocked_job: SwarmWorkerJob | None = None
+            blocked_continuation = False
+            while not aborting_due_to_rate_limit and len(active) < configured_parallel_limit:
+                scheduled_this_pass = False
+                hit_cooldown = False
                 now = time.monotonic()
                 if cooldown_until > now:
                     break
-                job = pending.pop(0)
-                if job.lease_key in active_leases:
-                    pending.append(job)
-                    scan_limit -= 1
-                    continue
                 active_jobs = tuple(state.job for state in active.values())
-                if limiter is not None:
-                    if metrics_tracker is not None:
-                        metrics_tracker.update_limiter_state(
-                            stage_name=stage_name,
-                            limiter_state=limiter.snapshot(),
-                        )
-                    if not limiter.can_start_job(job=job, active_jobs=active_jobs, now=now):
-                        pending.append(job)
-                        scan_limit -= 1
-                        continue
                 active_estimated_tokens = sum(
                     estimated_tokens_by_job_id[state.job.worker_id] for state in active.values()
                 )
-                job_estimated_tokens = estimated_tokens_by_job_id[job.worker_id]
-                if (
-                    max_inflight_estimated_tokens is not None
-                    and active
-                    and active_estimated_tokens + job_estimated_tokens > max_inflight_estimated_tokens
-                ):
-                    pending.append(job)
-                    scan_limit -= 1
-                    continue
-                try:
-                    handle = provider.start_background_turn(
-                        model=job.model,
-                        reasoning_effort=job.reasoning_effort,
-                        instructions=job.instructions,
-                        input_text=job.input_text,
-                        previous_response_id=None,
-                        tools=job.tools,
-                        text_format=job.text_format,
-                        prompt_cache_key=job.prompt_cache_key,
-                    )
-                except Exception as exc:
-                    failure_message = provider.classify_provider_failure(exc) or str(exc)
-                    rate_limit_delay = _rate_limit_retry_delay_seconds(failure_message)
-                    if rate_limit_delay is not None:
-                        rate_limit_retry_counts[job.worker_id] += 1
-                        if limiter is not None:
-                            limiter.record_rate_limit(job=job, failure_message=failure_message)
-                            if metrics_tracker is not None:
-                                metrics_tracker.update_limiter_state(
-                                    stage_name=stage_name,
-                                    limiter_state=limiter.snapshot(),
-                                )
-                        retry_delay = rate_limit_delay + _rate_limit_retry_jitter_seconds(
-                            worker_id=job.worker_id,
-                            retry_count=rate_limit_retry_counts[job.worker_id],
+
+                scheduled_continuation = False
+                for worker_id, state in list(awaiting_continuation.items()):
+                    job = state.job
+                    if limiter is not None:
+                        if metrics_tracker is not None:
+                            metrics_tracker.update_limiter_state(
+                                stage_name=stage_name,
+                                limiter_state=limiter.snapshot(),
+                            )
+                        if not limiter.can_start_job(job=job, active_jobs=active_jobs, now=now):
+                            blocked_job = job
+                            blocked_continuation = True
+                            continue
+                    job_estimated_tokens = estimated_tokens_by_job_id[job.worker_id]
+                    if (
+                        max_inflight_estimated_tokens is not None
+                        and active
+                        and active_estimated_tokens + job_estimated_tokens > max_inflight_estimated_tokens
+                    ):
+                        blocked_job = job
+                        blocked_continuation = True
+                        continue
+                    try:
+                        handle = provider.continue_background_turn(
+                            previous_response_id=state.pending_continuation_response_id or "",
+                            model=job.model,
+                            input_items=state.pending_continuation_input,
+                            tools=job.tools,
+                            text_format=job.text_format,
                         )
-                        if rate_limit_retry_counts[job.worker_id] <= rate_limit_max_retries:
+                    except Exception as exc:
+                        failure_message = provider.classify_provider_failure(exc) or str(exc)
+                        rate_limit_delay = _rate_limit_retry_delay_seconds(failure_message)
+                        if rate_limit_delay is not None:
+                            rate_limit_retry_counts[job.worker_id] += 1
+                            if limiter is not None:
+                                limiter.record_rate_limit(job=job, failure_message=failure_message)
+                                if metrics_tracker is not None:
+                                    metrics_tracker.update_limiter_state(
+                                        stage_name=stage_name,
+                                        limiter_state=limiter.snapshot(),
+                                    )
+                            retry_delay = rate_limit_delay + _rate_limit_retry_jitter_seconds(
+                                worker_id=job.worker_id,
+                                retry_count=rate_limit_retry_counts[job.worker_id],
+                            )
+                            if rate_limit_retry_counts[job.worker_id] <= rate_limit_max_retries:
+                                cooldown_until = max(cooldown_until, time.monotonic() + retry_delay)
+                                if metrics_tracker is not None:
+                                    metrics_tracker.record_retry(
+                                        stage_name=stage_name,
+                                        job=job,
+                                        reason="rate_limit",
+                                        delay_seconds=retry_delay,
+                                    )
+                                _emit_swarm_progress(
+                                    progress_callback,
+                                    "worker_retry",
+                                    reason="rate_limit",
+                                    delay_seconds=retry_delay,
+                                    failure_message=failure_message,
+                                    **_swarm_progress_payload(stage_name, job),
+                                )
+                                blocked_job = job
+                                blocked_continuation = True
+                                hit_cooldown = True
+                                break
+                            awaiting_continuation.pop(worker_id, None)
+                            active_leases.discard(job.lease_key)
+                            diagnostic = SwarmWorkerFailureDiagnostic(
+                                stage=stage_name,
+                                worker_id=job.worker_id,
+                                lease_key=job.lease_key,
+                                failure_message=failure_message or "rate-limit retries exhausted",
+                                response_id=state.pending_continuation_response_id,
+                            )
+                            abort_diagnostics.append(diagnostic)
+                            aborting_due_to_rate_limit = True
+                            if metrics_tracker is not None:
+                                metrics_tracker.mark_worker_failed(
+                                    stage_name=stage_name,
+                                    job=job,
+                                    failure_message=diagnostic.failure_message,
+                                )
+                                metrics_tracker.mark_stage_aborted(
+                                    stage_name=stage_name,
+                                    reason=diagnostic.failure_message,
+                                )
+                            _emit_swarm_progress(
+                                progress_callback,
+                                "worker_failed",
+                                failure_message=diagnostic.failure_message,
+                                response_id=diagnostic.response_id,
+                                **_swarm_progress_payload(stage_name, job),
+                            )
+                            continue
+                        awaiting_continuation.pop(worker_id, None)
+                        active_leases.discard(job.lease_key)
+                        retry_counts[job.worker_id] += 1
+                        if retry_counts[job.worker_id] <= max_retries:
                             pending.append(job)
-                            cooldown_until = max(cooldown_until, time.monotonic() + retry_delay)
+                            pending.sort(
+                                key=lambda item: (
+                                    estimated_tokens_by_job_id[item.worker_id],
+                                    item.worker_id,
+                                )
+                            )
                             if metrics_tracker is not None:
                                 metrics_tracker.record_retry(
                                     stage_name=stage_name,
                                     job=job,
-                                    reason="rate_limit",
-                                    delay_seconds=retry_delay,
+                                    reason="failure",
                                 )
                             _emit_swarm_progress(
                                 progress_callback,
                                 "worker_retry",
-                                reason="rate_limit",
-                                delay_seconds=retry_delay,
+                                reason="failure",
+                                failure_message=failure_message,
+                                **_swarm_progress_payload(stage_name, job),
+                            )
+                            continue
+                        if metrics_tracker is not None:
+                            metrics_tracker.mark_worker_failed(
+                                stage_name=stage_name,
+                                job=job,
+                                failure_message=failure_message or "worker continuation failed",
+                            )
+                        _emit_swarm_progress(
+                            progress_callback,
+                            "worker_failed",
+                            failure_message=failure_message or "worker continuation failed",
+                            **_swarm_progress_payload(stage_name, job),
+                        )
+                        permanent_failures.append(
+                            SwarmWorkerFailureDiagnostic(
+                                stage=stage_name,
+                                worker_id=job.worker_id,
+                                lease_key=job.lease_key,
+                                failure_message=failure_message or "worker continuation failed",
+                                response_id=state.pending_continuation_response_id,
+                            )
+                        )
+                        continue
+                    state.handle = handle
+                    state.pending_continuation_response_id = None
+                    state.pending_continuation_input = ()
+                    active[worker_id] = state
+                    awaiting_continuation.pop(worker_id, None)
+                    scheduled_continuation = True
+                    scheduled_this_pass = True
+                    break
+                if scheduled_continuation:
+                    continue
+                if hit_cooldown:
+                    break
+
+                scan_limit = len(pending)
+                while pending and len(active) < configured_parallel_limit and scan_limit > 0:
+                    job = pending.pop(0)
+                    if job.lease_key in active_leases:
+                        pending.append(job)
+                        scan_limit -= 1
+                        continue
+                    active_jobs = tuple(state.job for state in active.values())
+                    if limiter is not None:
+                        if metrics_tracker is not None:
+                            metrics_tracker.update_limiter_state(
+                                stage_name=stage_name,
+                                limiter_state=limiter.snapshot(),
+                            )
+                        if not limiter.can_start_job(job=job, active_jobs=active_jobs, now=now):
+                            degraded_job = None
+                            if limiter.is_intrinsically_oversized(job=job):
+                                degraded_job = _degrade_worker_job(job)
+                            if degraded_job is not None:
+                                estimated_tokens_by_job_id[degraded_job.worker_id] = _estimate_job_request_tokens(
+                                    degraded_job
+                                )
+                                pending.append(degraded_job)
+                                pending.sort(
+                                    key=lambda item: (
+                                        estimated_tokens_by_job_id[item.worker_id],
+                                        job_order_by_id[item.worker_id],
+                                    )
+                                )
+                                if metrics_tracker is not None:
+                                    metrics_tracker.record_degrade(stage_name=stage_name, job=degraded_job)
+                                _emit_swarm_progress(
+                                    progress_callback,
+                                    "worker_degraded",
+                                    **_swarm_progress_payload(stage_name, degraded_job),
+                                )
+                                scan_limit = len(pending)
+                                continue
+                            if limiter.is_intrinsically_oversized(job=job):
+                                if metrics_tracker is not None:
+                                    metrics_tracker.mark_worker_failed(
+                                        stage_name=stage_name,
+                                        job=job,
+                                        failure_message="request remains larger than the safe TPM envelope after degradation",
+                                    )
+                                permanent_failures.append(
+                                    SwarmWorkerFailureDiagnostic(
+                                        stage=stage_name,
+                                        worker_id=job.worker_id,
+                                        lease_key=job.lease_key,
+                                        failure_message="request remains larger than the safe TPM envelope after degradation",
+                                    )
+                                )
+                                scan_limit = len(pending)
+                                continue
+                            pending.append(job)
+                            blocked_job = blocked_job or job
+                            blocked_continuation = False
+                            scan_limit -= 1
+                            continue
+                    job_estimated_tokens = estimated_tokens_by_job_id[job.worker_id]
+                    if (
+                        max_inflight_estimated_tokens is not None
+                        and active
+                        and active_estimated_tokens + job_estimated_tokens > max_inflight_estimated_tokens
+                    ):
+                        pending.append(job)
+                        blocked_job = blocked_job or job
+                        blocked_continuation = False
+                        scan_limit -= 1
+                        continue
+                    try:
+                        handle = provider.start_background_turn(
+                            model=job.model,
+                            reasoning_effort=job.reasoning_effort,
+                            instructions=job.instructions,
+                            input_text=job.input_text,
+                            previous_response_id=None,
+                            tools=job.tools,
+                            text_format=job.text_format,
+                            prompt_cache_key=job.prompt_cache_key,
+                        )
+                    except Exception as exc:
+                        failure_message = provider.classify_provider_failure(exc) or str(exc)
+                        rate_limit_delay = _rate_limit_retry_delay_seconds(failure_message)
+                        if rate_limit_delay is not None:
+                            rate_limit_retry_counts[job.worker_id] += 1
+                            if limiter is not None:
+                                limiter.record_rate_limit(job=job, failure_message=failure_message)
+                                if metrics_tracker is not None:
+                                    metrics_tracker.update_limiter_state(
+                                        stage_name=stage_name,
+                                        limiter_state=limiter.snapshot(),
+                                    )
+                            retry_delay = rate_limit_delay + _rate_limit_retry_jitter_seconds(
+                                worker_id=job.worker_id,
+                                retry_count=rate_limit_retry_counts[job.worker_id],
+                            )
+                            if rate_limit_retry_counts[job.worker_id] <= rate_limit_max_retries:
+                                pending.append(job)
+                                pending.sort(
+                                    key=lambda item: (
+                                        estimated_tokens_by_job_id[item.worker_id],
+                                        job_order_by_id[item.worker_id],
+                                    )
+                                )
+                                cooldown_until = max(cooldown_until, time.monotonic() + retry_delay)
+                                if metrics_tracker is not None:
+                                    metrics_tracker.record_retry(
+                                        stage_name=stage_name,
+                                        job=job,
+                                        reason="rate_limit",
+                                        delay_seconds=retry_delay,
+                                    )
+                                _emit_swarm_progress(
+                                    progress_callback,
+                                    "worker_retry",
+                                    reason="rate_limit",
+                                    delay_seconds=retry_delay,
+                                    failure_message=failure_message,
+                                    **_swarm_progress_payload(stage_name, job),
+                                )
+                                blocked_job = job
+                                blocked_continuation = False
+                                hit_cooldown = True
+                                break
+                            diagnostic = SwarmWorkerFailureDiagnostic(
+                                stage=stage_name,
+                                worker_id=job.worker_id,
+                                lease_key=job.lease_key,
+                                failure_message=failure_message or "rate-limit retries exhausted",
+                            )
+                            abort_diagnostics.append(diagnostic)
+                            aborting_due_to_rate_limit = True
+                            if metrics_tracker is not None:
+                                metrics_tracker.mark_worker_failed(
+                                    stage_name=stage_name,
+                                    job=job,
+                                    failure_message=diagnostic.failure_message,
+                                )
+                                metrics_tracker.mark_stage_aborted(
+                                    stage_name=stage_name,
+                                    reason=diagnostic.failure_message,
+                                )
+                            _emit_swarm_progress(
+                                progress_callback,
+                                "worker_failed",
+                                failure_message=diagnostic.failure_message,
+                                **_swarm_progress_payload(stage_name, job),
+                            )
+                            scan_limit = len(pending)
+                            continue
+                        retry_counts[job.worker_id] += 1
+                        if retry_counts[job.worker_id] <= max_retries:
+                            pending.append(job)
+                            pending.sort(
+                                key=lambda item: (
+                                    estimated_tokens_by_job_id[item.worker_id],
+                                    job_order_by_id[item.worker_id],
+                                )
+                            )
+                            if metrics_tracker is not None:
+                                metrics_tracker.record_retry(
+                                    stage_name=stage_name,
+                                    job=job,
+                                    reason="failure",
+                                )
+                            _emit_swarm_progress(
+                                progress_callback,
+                                "worker_retry",
+                                reason="failure",
                                 failure_message=failure_message,
                                 **_swarm_progress_payload(stage_name, job),
                             )
                             scan_limit = len(pending)
                             continue
-                        diagnostic = SwarmWorkerFailureDiagnostic(
-                            stage=stage_name,
-                            worker_id=job.worker_id,
-                            lease_key=job.lease_key,
-                            failure_message=failure_message or "rate-limit retries exhausted",
-                        )
-                        abort_diagnostics.append(diagnostic)
-                        aborting_due_to_rate_limit = True
                         if metrics_tracker is not None:
                             metrics_tracker.mark_worker_failed(
                                 stage_name=stage_name,
                                 job=job,
-                                failure_message=diagnostic.failure_message,
-                            )
-                            metrics_tracker.mark_stage_aborted(
-                                stage_name=stage_name,
-                                reason=diagnostic.failure_message,
+                                failure_message=failure_message or "worker start failed",
                             )
                         _emit_swarm_progress(
                             progress_callback,
                             "worker_failed",
-                            failure_message=diagnostic.failure_message,
+                            failure_message=failure_message or "worker start failed",
                             **_swarm_progress_payload(stage_name, job),
                         )
-                        scan_limit = len(pending)
-                        continue
-                    retry_counts[job.worker_id] += 1
-                    if retry_counts[job.worker_id] <= max_retries:
-                        pending.append(job)
-                        if metrics_tracker is not None:
-                            metrics_tracker.record_retry(
-                                stage_name=stage_name,
-                                job=job,
-                                reason="failure",
+                        permanent_failures.append(
+                            SwarmWorkerFailureDiagnostic(
+                                stage=stage_name,
+                                worker_id=job.worker_id,
+                                lease_key=job.lease_key,
+                                failure_message=failure_message or "worker start failed",
                             )
-                        _emit_swarm_progress(
-                            progress_callback,
-                            "worker_retry",
-                            reason="failure",
-                            failure_message=failure_message,
-                            **_swarm_progress_payload(stage_name, job),
                         )
                         scan_limit = len(pending)
                         continue
+                    started_at = time.monotonic()
+                    active[job.worker_id] = ActiveSwarmWorker(
+                        job=job,
+                        handle=handle,
+                        tool_traces=[],
+                        started_at=started_at,
+                    )
                     if metrics_tracker is not None:
-                        metrics_tracker.mark_worker_failed(
+                        metrics_tracker.record_attempt_started(
                             stage_name=stage_name,
                             job=job,
-                            failure_message=failure_message or "worker start failed",
+                            started_at_monotonic=started_at,
                         )
+                    attempt_counts[job.worker_id] += 1
                     _emit_swarm_progress(
                         progress_callback,
-                        "worker_failed",
-                        failure_message=failure_message or "worker start failed",
+                        "worker_started",
+                        attempt=attempt_counts[job.worker_id],
+                        estimated_request_tokens=job_estimated_tokens,
                         **_swarm_progress_payload(stage_name, job),
                     )
-                    permanent_failures.append(
-                        SwarmWorkerFailureDiagnostic(
-                            stage=stage_name,
-                            worker_id=job.worker_id,
-                            lease_key=job.lease_key,
-                            failure_message=failure_message or "worker start failed",
-                        )
-                    )
-                    scan_limit = len(pending)
-                    continue
-                started_at = time.monotonic()
-                active[job.worker_id] = ActiveSwarmWorker(
-                    job=job,
-                    handle=handle,
-                    tool_traces=[],
-                    started_at=started_at,
-                )
-                if metrics_tracker is not None:
-                    metrics_tracker.record_attempt_started(
-                        stage_name=stage_name,
-                        job=job,
-                        started_at_monotonic=started_at,
-                    )
-                attempt_counts[job.worker_id] += 1
-                _emit_swarm_progress(
-                    progress_callback,
-                    "worker_started",
-                    attempt=attempt_counts[job.worker_id],
-                    estimated_request_tokens=job_estimated_tokens,
-                    **_swarm_progress_payload(stage_name, job),
-                )
-                active_leases.add(job.lease_key)
-                scan_limit = len(pending)
+                    active_leases.add(job.lease_key)
+                    scheduled_this_pass = True
+                    break
+                if not scheduled_this_pass:
+                    break
 
             for worker_id, state in list(active.items()):
                 def _handle_worker_event(event_type: str, data: dict[str, Any], *, job=state.job) -> None:
@@ -2819,14 +3352,24 @@ def run_background_swarm_workers(
                             )
                     if event_type != "tool_calls_requested":
                         return
-                    _emit_swarm_progress(
-                        progress_callback,
-                        "worker_tool_calls_requested",
-                        count=_coerce_nonnegative_int(data.get("count")),
-                        tool_names=tuple(_string_list(data.get("tool_names"))),
-                        response_id=str(data.get("response_id", "") or ""),
-                        **_swarm_progress_payload(stage_name, job),
-                    )
+                    for item in data.get("tool_calls") or []:
+                        tool_name = str(item.get("name", "") or "")
+                        arguments = item.get("arguments")
+                        if not isinstance(arguments, dict):
+                            arguments = {}
+                        _emit_swarm_progress(
+                            progress_callback,
+                            "worker_tool_call_requested",
+                            response_id=str(data.get("response_id", "") or ""),
+                            tool_name=tool_name,
+                            arguments=arguments,
+                            summary=_tool_call_summary(
+                                job=job,
+                                tool_name=tool_name,
+                                arguments=arguments,
+                            ),
+                            **_swarm_progress_payload(stage_name, job),
+                        )
 
                 try:
                     poll_result = provider.poll_background_turn(
@@ -2843,9 +3386,22 @@ def run_background_swarm_workers(
                 else:
                     failure_message = poll_result.failure_message
                     state.tool_traces.extend(poll_result.tool_traces)
+                    _append_tool_trace_records(
+                        path=tool_trace_path,
+                        stage_name=stage_name,
+                        job=state.job,
+                        traces=poll_result.tool_traces,
+                    )
 
                 if poll_result is not None and poll_result.status == "running":
                     state.handle = ProviderBackgroundHandle(response_id=poll_result.response_id)
+                    continue
+                if poll_result is not None and poll_result.status == "awaiting_continuation":
+                    active.pop(worker_id, None)
+                    state.handle = None
+                    state.pending_continuation_response_id = poll_result.response_id
+                    state.pending_continuation_input = poll_result.continuation_input
+                    awaiting_continuation[worker_id] = state
                     continue
 
                 del active[worker_id]
@@ -2924,6 +3480,12 @@ def run_background_swarm_workers(
                     )
                     if rate_limit_retry_counts[worker_id] <= rate_limit_max_retries:
                         pending.append(state.job)
+                        pending.sort(
+                            key=lambda item: (
+                                estimated_tokens_by_job_id[item.worker_id],
+                                job_order_by_id[item.worker_id],
+                            )
+                        )
                         cooldown_until = max(cooldown_until, time.monotonic() + retry_delay)
                         if metrics_tracker is not None:
                             metrics_tracker.record_retry(
@@ -3020,7 +3582,8 @@ def run_background_swarm_workers(
             if permanent_failures:
                 for state in list(active.values()):
                     try:
-                        provider.cancel_background_turn(state.handle)
+                        if state.handle is not None:
+                            provider.cancel_background_turn(state.handle)
                     except Exception:
                         pass
                     if metrics_tracker is not None:
@@ -3038,14 +3601,30 @@ def run_background_swarm_workers(
                         progress_callback,
                         "worker_failed",
                         failure_message="cancelled after another worker failed",
-                        response_id=state.handle.response_id,
+                        response_id=state.handle.response_id if state.handle is not None else "",
+                        **_swarm_progress_payload(stage_name, state.job),
+                    )
+                for state in list(awaiting_continuation.values()):
+                    active_leases.discard(state.job.lease_key)
+                    if metrics_tracker is not None:
+                        metrics_tracker.mark_worker_failed(
+                            stage_name=stage_name,
+                            job=state.job,
+                            failure_message="cancelled after another worker failed",
+                        )
+                    _emit_swarm_progress(
+                        progress_callback,
+                        "worker_failed",
+                        failure_message="cancelled after another worker failed",
+                        response_id=state.pending_continuation_response_id or "",
                         **_swarm_progress_payload(stage_name, state.job),
                     )
                 raise SwarmWorkerFailure(permanent_failures)
 
             if aborting_due_to_rate_limit and not active:
-                skipped_jobs = tuple(pending)
+                skipped_jobs = tuple(pending + [state.job for state in awaiting_continuation.values()])
                 pending.clear()
+                awaiting_continuation.clear()
                 if metrics_tracker is not None:
                     for skipped_job in skipped_jobs:
                         metrics_tracker.mark_worker_skipped(
@@ -3059,11 +3638,36 @@ def run_background_swarm_workers(
                     skipped_worker_ids=tuple(job.worker_id for job in skipped_jobs),
                 )
 
-            if pending or active:
+            if pending or active or awaiting_continuation:
                 sleep_for = poll_interval_seconds
                 now = time.monotonic()
                 if not active and cooldown_until > now:
                     sleep_for = max(sleep_for, cooldown_until - now)
+                elif not active and blocked_job is not None:
+                    recommended_wait = (
+                        limiter.recommended_wait_seconds(
+                            job=blocked_job,
+                            active_jobs=(),
+                            now=now,
+                        )
+                        if limiter is not None
+                        else 0.0
+                    )
+                    sleep_for = max(sleep_for, recommended_wait or 0.5)
+                    if metrics_tracker is not None:
+                        metrics_tracker.record_wait(
+                            stage_name=stage_name,
+                            continuation=blocked_continuation,
+                            seconds=sleep_for,
+                        )
+                    _emit_swarm_progress(
+                        progress_callback,
+                        "worker_waiting",
+                        delay_seconds=round(sleep_for, 6),
+                        continuation=blocked_continuation,
+                        reason="safe_tpm_window",
+                        **_swarm_progress_payload(stage_name, blocked_job),
+                    )
                 time.sleep(sleep_for)
     finally:
         if limiter is not None:

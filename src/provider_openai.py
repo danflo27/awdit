@@ -18,6 +18,7 @@ class ToolTraceRecord:
     name: str
     arguments: dict[str, Any]
     output: str
+    output_meta: dict[str, Any]
     response_id: str
 
 
@@ -36,11 +37,20 @@ class ProviderBackgroundHandle:
 
 
 @dataclass(frozen=True)
+class ProviderToolCall:
+    call_id: str
+    name: str
+    arguments: dict[str, Any]
+
+
+@dataclass(frozen=True)
 class BackgroundPollResult:
     status: str
     response_id: str
     final_text: str
     tool_traces: tuple[ToolTraceRecord, ...]
+    continuation_input: tuple[dict[str, str], ...] = ()
+    tool_calls: tuple[ProviderToolCall, ...] = ()
     failure_message: str | None = None
 
 
@@ -133,6 +143,16 @@ class OpenAIResponsesProvider:
                         "count": len(function_calls),
                         "response_id": response_id,
                         "tool_names": [str(getattr(call, "name", "")) for call in function_calls],
+                        "tool_calls": [
+                            {
+                                "call_id": str(getattr(call, "call_id", "")),
+                                "name": str(getattr(call, "name", "")),
+                                "arguments": self._parse_tool_arguments(
+                                    getattr(call, "arguments", "{}")
+                                ),
+                            }
+                            for call in function_calls
+                        ],
                     },
                 )
 
@@ -183,6 +203,26 @@ class OpenAIResponsesProvider:
             store=True,
         )
         return ProviderBackgroundHandle(response_id=getattr(response, "id", ""))
+
+    def continue_background_turn(
+        self,
+        *,
+        previous_response_id: str,
+        model: str,
+        input_items: Iterable[dict[str, str]],
+        tools: Iterable[dict[str, Any]],
+        text_format: dict[str, Any] | None = None,
+    ) -> ProviderBackgroundHandle:
+        response = self._client.responses.create(
+            model=model,
+            previous_response_id=previous_response_id,
+            input=list(input_items),
+            text={"format": text_format} if text_format is not None else NOT_GIVEN,
+            tools=list(tools),
+            background=True,
+            store=True,
+        )
+        return ProviderBackgroundHandle(response_id=getattr(response, "id", previous_response_id))
 
     def poll_background_turn(
         self,
@@ -236,6 +276,16 @@ class OpenAIResponsesProvider:
                         "count": len(function_calls),
                         "response_id": response_id,
                         "tool_names": [str(getattr(call, "name", "")) for call in function_calls],
+                        "tool_calls": [
+                            {
+                                "call_id": str(getattr(call, "call_id", "")),
+                                "name": str(getattr(call, "name", "")),
+                                "arguments": self._parse_tool_arguments(
+                                    getattr(call, "arguments", "{}")
+                                ),
+                            }
+                            for call in function_calls
+                        ],
                     },
                 )
             tool_outputs, new_traces = self._execute_tool_calls(
@@ -243,20 +293,20 @@ class OpenAIResponsesProvider:
                 tool_executor=tool_executor,
                 response_id=response_id,
             )
-            continuation = self._client.responses.create(
-                model=model,
-                previous_response_id=response_id,
-                input=tool_outputs,
-                text={"format": text_format} if text_format is not None else NOT_GIVEN,
-                tools=list(tools),
-                background=True,
-                store=True,
-            )
             return BackgroundPollResult(
-                status="running",
-                response_id=getattr(continuation, "id", response_id),
+                status="awaiting_continuation",
+                response_id=response_id,
                 final_text="",
                 tool_traces=tuple(new_traces),
+                continuation_input=tuple(tool_outputs),
+                tool_calls=tuple(
+                    ProviderToolCall(
+                        call_id=str(getattr(call, "call_id", "")),
+                        name=str(getattr(call, "name", "")),
+                        arguments=self._parse_tool_arguments(getattr(call, "arguments", "{}")),
+                    )
+                    for call in function_calls
+                ),
             )
 
         final_text = self._response_text(response, "")
@@ -341,10 +391,41 @@ class OpenAIResponsesProvider:
                     name=name,
                     arguments=arguments,
                     output=output,
+                    output_meta=self._tool_output_meta(output),
                     response_id=response_id,
                 )
             )
         return tool_outputs, tool_traces
+
+    def _parse_tool_arguments(self, raw_arguments: Any) -> dict[str, Any]:
+        try:
+            parsed = json.loads(raw_arguments or "{}")
+        except json.JSONDecodeError:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+
+    def _tool_output_meta(self, output: str) -> dict[str, Any]:
+        meta: dict[str, Any] = {"chars": len(output)}
+        try:
+            payload = json.loads(output)
+        except json.JSONDecodeError:
+            return meta
+        if not isinstance(payload, dict):
+            return meta
+        for key in (
+            "start_line",
+            "end_line",
+            "truncated",
+            "truncated_before",
+            "truncated_after",
+            "raw_char_count",
+            "raw_line_count",
+        ):
+            if key in payload:
+                meta[key] = payload[key]
+        if "truncated" in payload and "truncated_after" not in meta:
+            meta["truncated_after"] = payload["truncated"]
+        return meta
 
     def _response_text(self, response: Any, stream_text: str) -> str:
         refusal = self._extract_refusal_text(response)

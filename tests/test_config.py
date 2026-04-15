@@ -106,12 +106,19 @@ def _user_config_text() -> str:
         [github]
         prefer_gh = true
 
-        [swarm]
-        sweep_model = "gpt-5.4-mini"
-        proof_model = "gpt-5.4"
-        eligible_file_profile = "code_config_tests"
-        token_budget = 120000
-        allow_no_limit = true
+        [swarm.mode]
+        preset = "safe"
+
+        [swarm.models]
+        sweep = "gpt-5.4-mini"
+        proof = "gpt-5.4"
+
+        [swarm.files]
+        profile = "code_config_tests"
+
+        [swarm.budget]
+        tokens = 120000
+        mode = "enforced"
 
         [swarm.prompts]
         danger_map = "prompts/swarm_danger_map.md"
@@ -167,15 +174,26 @@ class ConfigTests(unittest.TestCase):
                 [github]
                 prefer_gh = true
 
-                [swarm]
-                sweep_model = "gpt-5.4-mini"
-                proof_model = "gpt-5.4"
-                eligible_file_profile = "code_config_tests"
-                token_budget = 120000
-                allow_no_limit = true
-                seed_max_parallel = 4
-                proof_max_parallel = 2
-                rate_limit_max_retries = 5
+                [swarm.mode]
+                preset = "safe"
+
+                [swarm.models]
+                sweep = "gpt-5.4-mini"
+                proof = "gpt-5.4"
+
+                [swarm.files]
+                profile = "code_config_tests"
+
+                [swarm.budget]
+                tokens = 120000
+                mode = "advisory"
+
+                [swarm.parallelism]
+                seed = 4
+                proof = 2
+
+                [swarm.retries]
+                rate_limits = 5
 
                 [swarm.reasoning]
                 danger_map = "low"
@@ -260,8 +278,10 @@ class ConfigTests(unittest.TestCase):
             )
             self.assertEqual(("old/**",), loaded.effective.resources.slots["hunter_1"].exclude)
             self.assertIsNotNone(loaded.effective.swarm)
+            self.assertEqual("safe", loaded.effective.swarm.preset)
             self.assertEqual("gpt-5.4-mini", loaded.effective.swarm.sweep_model)
             self.assertEqual("gpt-5.4", loaded.effective.swarm.proof_model)
+            self.assertEqual("advisory", loaded.effective.swarm.budget_mode)
             self.assertEqual(4, loaded.effective.swarm.seed_max_parallel)
             self.assertEqual(2, loaded.effective.swarm.proof_max_parallel)
             self.assertEqual(5, loaded.effective.swarm.rate_limit_max_retries)
@@ -351,6 +371,31 @@ class ConfigTests(unittest.TestCase):
                 )
 
             self.assertIn("Missing prompt file for swarm", str(ctx.exception))
+
+    def test_legacy_swarm_schema_is_rejected_with_scaffold_hint(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_dir = Path(tmp_dir) / "repo"
+            config_path = repo_dir / "config" / "config.toml"
+
+            _write_prompt_tree(repo_dir / "config")
+            _write(
+                config_path,
+                _user_config_text().replace(
+                    '[swarm.mode]\n        preset = "safe"',
+                    '[swarm]\n        sweep_model = "gpt-5.4-mini"\n        proof_model = "gpt-5.4"\n        eligible_file_profile = "code_config_tests"\n        token_budget = 120000\n        allow_no_limit = true\n\n        [swarm.mode]\n        preset = "safe"',
+                    1,
+                ),
+            )
+
+            with self.assertRaises(ConfigError) as ctx:
+                load_effective_config(
+                    cwd=repo_dir,
+                    config_path=config_path,
+                    env={"OPENAI_API_KEY": "token"},
+                )
+
+            self.assertIn("Legacy swarm schema is no longer supported", str(ctx.exception))
+            self.assertIn("awdit init-config", str(ctx.exception))
 
     def test_repo_dotenv_supplies_active_provider_env(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -451,6 +496,7 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual("high", loaded.effective.swarm.reasoning.danger_map)
             self.assertEqual("low", loaded.effective.swarm.reasoning.seed)
             self.assertEqual("medium", loaded.effective.swarm.reasoning.proof)
+            self.assertEqual("safe", loaded.effective.swarm.preset)
             self.assertEqual(2, loaded.effective.swarm.seed_max_parallel)
             self.assertEqual(1, loaded.effective.swarm.proof_max_parallel)
             self.assertEqual(3, loaded.effective.swarm.rate_limit_max_retries)

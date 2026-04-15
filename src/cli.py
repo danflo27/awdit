@@ -31,6 +31,7 @@ from config import (
     discover_resource_files,
     load_effective_config,
     merge_patch_dicts,
+    render_config_scaffold,
     summarize_config,
 )
 from paths import migrate_legacy_runtime_layout, runs_root
@@ -101,6 +102,17 @@ def main(argv: list[str] | None = None) -> int:
         help="Run the repo-wide black-hat sweep startup flow.",
     )
     swarm_parser.set_defaults(handler=_handle_swarm)
+
+    init_config_parser = subparsers.add_parser(
+        "init-config",
+        help="Write a fresh grouped config scaffold to config/config.toml.",
+    )
+    init_config_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Overwrite config/config.toml if it already exists.",
+    )
+    init_config_parser.set_defaults(handler=_handle_init_config)
 
     list_models_parser = subparsers.add_parser(
         "list-models",
@@ -182,6 +194,23 @@ def _handle_review(_: argparse.Namespace) -> int:
     print("")
     print("Startup resource review complete.")
     print("Full audit pipeline beyond startup resource staging is not implemented yet.")
+    return 0
+
+
+def _handle_init_config(args: argparse.Namespace) -> int:
+    cwd = Path.cwd()
+    config_dir = cwd / "config"
+    config_path = config_dir / "config.toml"
+    if config_path.exists() and not args.force:
+        print(
+            f"Refusing to overwrite existing config at {config_path}. "
+            "Re-run with --force if you want to replace it."
+        )
+        return 1
+    config_dir.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(render_config_scaffold(), encoding="utf-8")
+    print(f"Wrote grouped config scaffold: {config_path}")
+    print("Review the inline comments, then adjust scope, resources, prompts, and swarm overrides as needed.")
     return 0
 
 
@@ -327,6 +356,8 @@ def _handle_swarm(_: argparse.Namespace) -> int:
     print(f"    {sweep_result.proofs_dir}")
     print("  Usage summary:")
     print(f"    {sweep_result.usage_summary}")
+    print("  Tool trace log:")
+    print(f"    {sweep_result.tool_trace_log}")
     print("  Shared resource manifest:")
     print(f"    {snapshot.shared_manifest}")
     return 0
@@ -556,20 +587,34 @@ def _persist_swarm_startup_snapshot(
                 "repo_key": danger_map_result.identity.repo_key,
                 "danger_map_path": str(danger_map_result.danger_map_md),
                 "swarm": {
-                    "sweep_model": loaded.effective.swarm.sweep_model,
-                    "proof_model": loaded.effective.swarm.proof_model,
+                    "mode": {
+                        "preset": loaded.effective.swarm.preset,
+                    },
+                    "models": {
+                        "sweep": loaded.effective.swarm.sweep_model,
+                        "proof": loaded.effective.swarm.proof_model,
+                    },
+                    "files": {
+                        "profile": loaded.effective.swarm.eligible_file_profile,
+                    },
+                    "budget": {
+                        "tokens": loaded.effective.swarm.token_budget,
+                        "mode": loaded.effective.swarm.budget_mode,
+                    },
+                    "parallelism": {
+                        "seed": loaded.effective.swarm.seed_max_parallel,
+                        "proof": loaded.effective.swarm.proof_max_parallel,
+                    },
+                    "retries": {
+                        "rate_limits": loaded.effective.swarm.rate_limit_max_retries,
+                    },
                     "reasoning": {
                         "danger_map": loaded.effective.swarm.reasoning.danger_map,
                         "seed": loaded.effective.swarm.reasoning.seed,
                         "proof": loaded.effective.swarm.reasoning.proof,
                     },
-                    "eligible_file_profile": loaded.effective.swarm.eligible_file_profile,
-                    "token_budget": loaded.effective.swarm.token_budget,
-                    "allow_no_limit": loaded.effective.swarm.allow_no_limit,
-                    "seed_max_parallel": loaded.effective.swarm.seed_max_parallel,
-                    "proof_max_parallel": loaded.effective.swarm.proof_max_parallel,
-                    "rate_limit_max_retries": loaded.effective.swarm.rate_limit_max_retries,
                     "usage_summary": str(run_dir / "swarm" / "usage_summary.json"),
+                    "tool_trace_log": str(run_dir / "swarm" / "tool_trace.jsonl"),
                     "prompt_bundle": prompt_bundle.to_dict(),
                 },
                 "resources": {
@@ -631,12 +676,15 @@ def _write_swarm_digest(
         [
             "",
             "## Swarm settings",
+            f"- Preset: `{loaded.effective.swarm.preset}`",
             f"- Sweep model: `{loaded.effective.swarm.sweep_model}`",
             f"- Proof model: `{loaded.effective.swarm.proof_model}`",
             f"- Danger-map reasoning: `{loaded.effective.swarm.reasoning.danger_map}`",
             f"- Seed reasoning: `{loaded.effective.swarm.reasoning.seed}`",
             f"- Proof reasoning: `{loaded.effective.swarm.reasoning.proof}`",
             f"- Eligible profile: `{loaded.effective.swarm.eligible_file_profile}`",
+            f"- Budget mode: `{loaded.effective.swarm.budget_mode}`",
+            f"- Token budget: `{loaded.effective.swarm.token_budget}`",
         ]
     )
     path.write_text("\n".join(lines).strip() + "\n", encoding="utf-8")
@@ -654,50 +702,44 @@ def _print_swarm_preflight(cwd: Path, loaded, snapshot, danger_map_result, promp
     )
     print("")
     print("Swarm preflight")
-    print("  Mode: repo-wide black-hat sweep")
+    print("  Execution")
+    print(f"    Preset: {loaded.effective.swarm.preset}")
+    print(f"    Sweep model: {loaded.effective.swarm.sweep_model}")
+    print(f"    Proof model: {loaded.effective.swarm.proof_model}")
+    print(f"    Seed parallelism: {loaded.effective.swarm.seed_max_parallel}")
+    print(f"    Proof parallelism: {loaded.effective.swarm.proof_max_parallel}")
+    print(f"    Rate-limit retries: {loaded.effective.swarm.rate_limit_max_retries}")
+    print("")
+    print("  Context")
     print(
-        "  File profile: "
+        "    File profile: "
         f"{loaded.effective.swarm.eligible_file_profile.replace('_', ' ')}"
     )
-    print(f"  Eligible files discovered: {len(eligible_files)}")
-    if loaded.effective.swarm.allow_no_limit:
-        print(
-            "  Token budget: "
-            f"{loaded.effective.swarm.token_budget} (advisory, no-limit allowed)"
-        )
-    else:
-        print(f"  Token budget: {loaded.effective.swarm.token_budget}")
-    print(f"  Sweep model: {loaded.effective.swarm.sweep_model}")
-    print(f"  Proof model: {loaded.effective.swarm.proof_model}")
-    print(f"  Seed max parallel: {loaded.effective.swarm.seed_max_parallel}")
-    print(f"  Proof max parallel: {loaded.effective.swarm.proof_max_parallel}")
-    print(f"  Rate-limit retries: {loaded.effective.swarm.rate_limit_max_retries}")
-    print(f"  Danger-map reasoning: {loaded.effective.swarm.reasoning.danger_map}")
-    print(f"  Seed reasoning: {loaded.effective.swarm.reasoning.seed}")
-    print(f"  Proof reasoning: {loaded.effective.swarm.reasoning.proof}")
-    print(f"  Estimated peak seed request tokens: {seed_volume.peak_parallel_estimated_tokens}")
+    print(f"    Eligible files discovered: {len(eligible_files)}")
+    print("    Seed input mode: compact metadata + paged read_file")
+    print("    Proof stage: read-only validation")
+    print("    Final report style: proof-filtered findings, grouped duplicates")
+    print("")
+    print("  Safety")
+    print(f"    Budget mode: {loaded.effective.swarm.budget_mode}")
+    print(f"    Token budget: {loaded.effective.swarm.token_budget}")
+    print(f"    Estimated peak seed request tokens: {seed_volume.peak_parallel_estimated_tokens}")
+    print(
+        "    Largest seed request: "
+        f"{seed_volume.max_job_target_file or '(n/a)'} (~{seed_volume.max_job_estimated_tokens} tokens)"
+    )
     if (
-        loaded.effective.swarm.allow_no_limit
+        loaded.effective.swarm.budget_mode == "advisory"
         and seed_volume.peak_parallel_estimated_tokens > loaded.effective.swarm.token_budget
     ):
-        print(
-            "  Warning: estimated peak seed request tokens exceed the configured token budget, "
-            "but allow_no_limit is enabled."
-        )
-        print(
-            "    Largest seed request: "
-            f"{seed_volume.max_job_target_file} (~{seed_volume.max_job_estimated_tokens} tokens)"
-        )
-    print("  Proof stage: read-only validation")
-    print("  Final report style: proof-filtered findings, grouped duplicates")
-    print("  Repo danger map:")
-    print(f"    {danger_map_result.danger_map_md}")
-    print("  Shared resource manifest:")
-    print(f"    {snapshot.shared_manifest}")
-    print("  Swarm digest:")
-    print(f"    {snapshot.swarm_digest}")
-    print("  Prompt bundle manifest:")
-    print(f"    {snapshot.prompt_bundle_manifest}")
+        print("    Warning: peak seed estimate exceeds the configured advisory budget.")
+    print("")
+    print("  Artifacts")
+    print(f"    Repo danger map: {danger_map_result.danger_map_md}")
+    print(f"    Shared resource manifest: {snapshot.shared_manifest}")
+    print(f"    Swarm digest: {snapshot.swarm_digest}")
+    print(f"    Prompt bundle manifest: {snapshot.prompt_bundle_manifest}")
+    print(f"    Tool trace log: {snapshot.run_dir / 'swarm' / 'tool_trace.jsonl'}")
 
 
 def _print_swarm_progress(event_type: str, data: dict[str, Any]) -> None:
@@ -732,11 +774,33 @@ def _print_swarm_progress(event_type: str, data: dict[str, Any]) -> None:
         print(f"[* {stage_name} worker {worker_id} started: {action} *]", flush=True)
         return
 
-    if event_type == "worker_tool_calls_requested":
-        count = _coerce_progress_int(data.get("count"))
-        noun = "tool call" if count == 1 else "tool calls"
+    if event_type == "worker_tool_call_requested":
+        summary = str(data.get("summary", "") or "").strip() or f"using {data.get('tool_name', 'a tool')}"
         print(
-            f"[* {stage_name} worker {worker_id} requested {count} {noun} while working on {label} *]",
+            f"[* {stage_name} worker {worker_id} is {summary} *]",
+            flush=True,
+        )
+        return
+
+    if event_type == "worker_waiting":
+        delay_seconds = data.get("delay_seconds")
+        continuation = bool(data.get("continuation"))
+        wait_target = f"continuing {label}" if continuation else f"starting {label}"
+        if isinstance(delay_seconds, (int, float)):
+            print(
+                f"[* {stage_name} worker {worker_id} is waiting {float(delay_seconds):.2f}s for a safe TPM window before {wait_target} *]",
+                flush=True,
+            )
+            return
+        print(
+            f"[* {stage_name} worker {worker_id} is waiting for a safe TPM window before {wait_target} *]",
+            flush=True,
+        )
+        return
+
+    if event_type == "worker_degraded":
+        print(
+            f"[* {stage_name} worker {worker_id} is trimming shared context before retrying {label} safely *]",
             flush=True,
         )
         return

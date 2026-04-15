@@ -648,6 +648,20 @@ class OneSlotRuntime:
                 )
                 time.sleep(self.poll_interval_seconds)
                 continue
+            if poll_result.status == "awaiting_continuation":
+                handle = self.provider.continue_background_turn(
+                    previous_response_id=poll_result.response_id,
+                    model=self.model_name,
+                    input_items=poll_result.continuation_input,
+                    tools=tools,
+                )
+                self._handle_provider_event(
+                    dispatch_id=record.dispatch_id,
+                    event_type="background_poll",
+                    data={"response_id": handle.response_id},
+                )
+                time.sleep(self.poll_interval_seconds)
+                continue
             if poll_result.status == "failed":
                 raise RuntimeError(poll_result.failure_message or "background turn failed")
             return ProviderTurnResult(

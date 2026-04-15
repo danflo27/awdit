@@ -7,9 +7,10 @@ Hint: look at `{{target_file}}`.
 Write the most serious one to `{{output_path}}` by returning only the structured response requested by the caller.
 
 Rules:
-- inspect `{{target_file}}` first
+- inspect `{{target_file}}` first by calling `read_file`
 - stay read-only
 - use only the provided read-only tools when nearby code is needed
+- for large files, keep using paged `read_file` calls instead of trying to load the whole file at once
 - focus on realistic offensive paths, not style issues
 - prefer concrete exploitability over vague suspicion
 - if the evidence is weak, say so clearly

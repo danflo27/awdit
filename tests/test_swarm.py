@@ -9,7 +9,13 @@ from pathlib import Path
 from unittest import mock
 
 from config import load_effective_config
-from provider_openai import BackgroundPollResult, ProviderBackgroundHandle, ProviderTurnResult
+from provider_openai import (
+    BackgroundPollResult,
+    ProviderBackgroundHandle,
+    ProviderToolCall,
+    ProviderTurnResult,
+    ToolTraceRecord,
+)
 from state_db import load_learned_model_limit, save_learned_model_limit
 from swarm import (
     RepoReadOnlyTools,
@@ -91,12 +97,19 @@ def _config_text() -> str:
     [github]
     prefer_gh = true
 
-    [swarm]
-    sweep_model = "gpt-5.4-mini"
-    proof_model = "gpt-5.4"
-    eligible_file_profile = "code_config_tests"
-    token_budget = 120000
-    allow_no_limit = true
+    [swarm.mode]
+    preset = "safe"
+
+    [swarm.models]
+    sweep = "gpt-5.4-mini"
+    proof = "gpt-5.4"
+
+    [swarm.files]
+    profile = "code_config_tests"
+
+    [swarm.budget]
+    tokens = 120000
+    mode = "enforced"
 
     [swarm.prompts]
     danger_map = "prompts/swarm_danger_map.md"
@@ -173,6 +186,109 @@ class SequenceProvider:
     def cancel_background_turn(self, handle):
         self.cancelled.append(handle.response_id)
         self._response_payloads.pop(handle.response_id, None)
+        return "cancelled"
+
+    def classify_provider_failure(self, value):
+        return None
+
+
+class ContinuationToolProvider:
+    def __init__(self) -> None:
+        self.start_calls: list[dict[str, object]] = []
+        self.continue_calls: list[dict[str, object]] = []
+
+    def start_background_turn(self, **kwargs):
+        self.start_calls.append(kwargs)
+        return ProviderBackgroundHandle(response_id="bg_1")
+
+    def continue_background_turn(self, **kwargs):
+        self.continue_calls.append(kwargs)
+        return ProviderBackgroundHandle(response_id="bg_2")
+
+    def poll_background_turn(self, **kwargs):
+        response_id = kwargs["handle"].response_id
+        event_callback = kwargs.get("event_callback")
+        if response_id == "bg_1":
+            if event_callback is not None:
+                event_callback(
+                    "tool_calls_requested",
+                    {
+                        "response_id": response_id,
+                        "tool_calls": [
+                            {
+                                "call_id": "call_read",
+                                "name": "read_file",
+                                "arguments": {
+                                    "path": "app/service.py",
+                                    "start_line": 1,
+                                    "max_lines": 2,
+                                },
+                            },
+                            {
+                                "call_id": "call_list",
+                                "name": "list_scope_files",
+                                "arguments": {
+                                    "path_glob": "tests/**",
+                                },
+                            },
+                        ],
+                    },
+                )
+            return BackgroundPollResult(
+                status="awaiting_continuation",
+                response_id=response_id,
+                final_text="",
+                tool_traces=(
+                    ToolTraceRecord(
+                        call_id="call_read",
+                        name="read_file",
+                        arguments={"path": "app/service.py", "start_line": 1, "max_lines": 2},
+                        output='{"path":"app/service.py"}',
+                        output_meta={
+                            "chars": 24,
+                            "start_line": 1,
+                            "end_line": 2,
+                            "truncated_before": False,
+                            "truncated_after": False,
+                            "raw_line_count": 3,
+                            "raw_char_count": 30,
+                        },
+                        response_id=response_id,
+                    ),
+                    ToolTraceRecord(
+                        call_id="call_list",
+                        name="list_scope_files",
+                        arguments={"path_glob": "tests/**"},
+                        output='{"count":1}',
+                        output_meta={"chars": 11},
+                        response_id=response_id,
+                    ),
+                ),
+                continuation_input=(
+                    {"type": "function_call_output", "call_id": "call_read", "output": '{"ok":true}'},
+                    {"type": "function_call_output", "call_id": "call_list", "output": '{"ok":true}'},
+                ),
+                tool_calls=(
+                    ProviderToolCall(
+                        call_id="call_read",
+                        name="read_file",
+                        arguments={"path": "app/service.py", "start_line": 1, "max_lines": 2},
+                    ),
+                    ProviderToolCall(
+                        call_id="call_list",
+                        name="list_scope_files",
+                        arguments={"path_glob": "tests/**"},
+                    ),
+                ),
+            )
+        return BackgroundPollResult(
+            status="completed",
+            response_id=response_id,
+            final_text=json.dumps({"ok": True}),
+            tool_traces=(),
+        )
+
+    def cancel_background_turn(self, handle):
         return "cancelled"
 
     def classify_provider_failure(self, value):
@@ -791,7 +907,7 @@ class SwarmTests(unittest.TestCase):
                 repo_dir,
                 _config_text().replace(
                     '[swarm.prompts]',
-                    'rate_limit_max_retries = 4\n\n[swarm.prompts]',
+                    '[swarm.retries]\nrate_limits = 4\n\n[swarm.prompts]',
                     1,
                 ),
             )
@@ -834,7 +950,7 @@ class SwarmTests(unittest.TestCase):
                 repo_dir,
                 _config_text().replace(
                     '[swarm.prompts]',
-                    'seed_max_parallel = 3\nproof_max_parallel = 2\nrate_limit_max_retries = 4\n\n[swarm.prompts]',
+                    '[swarm.parallelism]\nseed = 3\nproof = 2\n\n[swarm.retries]\nrate_limits = 4\n\n[swarm.prompts]',
                     1,
                 ),
             )
@@ -953,8 +1069,9 @@ class SwarmTests(unittest.TestCase):
 
             self.assertEqual(2, len(result.seed_results))
             self.assertEqual(1, len(result.issue_candidates))
-            self.assertEqual(("SEED-001", "SEED-002"), result.issue_candidates[0].seed_ids)
-            self.assertEqual(("SEED-002",), result.issue_candidates[0].duplicate_seed_ids)
+            self.assertEqual({"SEED-001", "SEED-002"}, set(result.issue_candidates[0].seed_ids))
+            self.assertEqual(1, len(result.issue_candidates[0].duplicate_seed_ids))
+            duplicate_seed_id = result.issue_candidates[0].duplicate_seed_ids[0]
             proof_input = json.loads(provider.start_calls[2]["input_text"])
             self.assertEqual("proof_issue", proof_input["task_type"])
             self.assertEqual("issue:SWM-001", proof_input["lease_key"])
@@ -963,9 +1080,9 @@ class SwarmTests(unittest.TestCase):
 
             case_groups = result.case_groups.read_text(encoding="utf-8")
             ranked = result.final_ranked_findings.read_text(encoding="utf-8")
-            self.assertIn("Duplicate seeds: `SEED-002`", case_groups)
+            self.assertIn(f"Duplicate seeds: `{duplicate_seed_id}`", case_groups)
             self.assertIn("Proof state: `executed_proof`", case_groups)
-            self.assertIn("Related duplicate seeds: `SEED-002`", ranked)
+            self.assertIn(f"Related duplicate seeds: `{duplicate_seed_id}`", ranked)
             self.assertIn("Case: `SWM-001`", ranked)
 
     def test_swarm_does_not_group_seeds_without_bidirectional_target_links(self) -> None:
@@ -1226,6 +1343,98 @@ class SwarmTests(unittest.TestCase):
             self.assertIn("shared architecture notes", staged_data["content"])
             with self.assertRaisesRegex(RuntimeError, "outside the configured readable repo scope"):
                 tools.run("read_file", {"path": "runs/other_run/secret.txt"})
+
+    def test_repo_tools_read_file_supports_paged_reads_with_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_dir = Path(tmp_dir) / "repo"
+            _write(
+                repo_dir / "app" / "service.py",
+                "line 1\nline 2\nline 3\nline 4\n",
+            )
+            loaded = self._loaded_config(repo_dir)
+            tools = RepoReadOnlyTools(
+                cwd=repo_dir,
+                scope_include=loaded.effective.scope.include,
+                scope_exclude=loaded.effective.scope.exclude,
+            )
+
+            payload = json.loads(
+                tools.run(
+                    "read_file",
+                    {
+                        "path": "app/service.py",
+                        "start_line": 2,
+                        "max_lines": 2,
+                    },
+                )
+            )
+
+            self.assertEqual(2, payload["start_line"])
+            self.assertEqual(3, payload["end_line"])
+            self.assertTrue(payload["truncated_before"])
+            self.assertTrue(payload["truncated_after"])
+            self.assertEqual(5, payload["raw_line_count"])
+            self.assertEqual(len("line 1\nline 2\nline 3\nline 4\n"), payload["raw_char_count"])
+            self.assertIn("2 | line 2", payload["content"])
+            self.assertIn("3 | line 3", payload["content"])
+
+    def test_background_scheduler_emits_human_tool_progress_and_writes_trace_log(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_dir = Path(tmp_dir) / "repo"
+            repo_dir.mkdir(parents=True)
+            provider = ContinuationToolProvider()
+            trace_path = repo_dir / "runs" / "run_1" / "swarm" / "tool_trace.jsonl"
+            progress_events: list[tuple[str, dict[str, object]]] = []
+            job = SwarmWorkerJob(
+                worker_id="job_tools",
+                worker_type="seed_file",
+                lease_key="file:app/service.py",
+                model="gpt-5.4-mini",
+                reasoning_effort="low",
+                instructions="seed",
+                input_text="seed",
+                prompt_cache_key="cache",
+                text_format=None,
+                tools=(),
+            )
+
+            results = run_background_swarm_workers(
+                provider=provider,
+                jobs=[job],
+                tool_executor=lambda name, arguments: "",
+                max_parallel=1,
+                poll_interval_seconds=0.0,
+                stage_name="seed",
+                cwd=repo_dir,
+                provider_name="openai",
+                tool_trace_path=trace_path,
+                progress_callback=lambda event_type, data: progress_events.append((event_type, data)),
+            )
+
+            self.assertEqual({"job_tools"}, set(results))
+            self.assertEqual(1, len(provider.continue_calls))
+            self.assertEqual("bg_1", provider.continue_calls[0]["previous_response_id"])
+
+            tool_summaries = [
+                str(data["summary"])
+                for event_type, data in progress_events
+                if event_type == "worker_tool_call_requested"
+            ]
+            self.assertEqual(2, len(tool_summaries))
+            self.assertIn("reading app/service.py lines 1-2 for initial context", tool_summaries)
+            self.assertIn("scanning tests/** for nearby clues while inspecting app/service.py", tool_summaries)
+
+            trace_lines = [
+                json.loads(line)
+                for line in trace_path.read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+            self.assertEqual(2, len(trace_lines))
+            self.assertEqual("read_file", trace_lines[0]["tool"])
+            self.assertEqual("list_scope_files", trace_lines[1]["tool"])
+            self.assertEqual(1, trace_lines[0]["output_meta"]["start_line"])
+            self.assertEqual(2, trace_lines[0]["output_meta"]["end_line"])
+            self.assertEqual(False, trace_lines[0]["output_meta"]["truncated_after"])
 
     def test_background_scheduler_serializes_duplicate_lease_keys(self) -> None:
         provider = SequenceProvider(
@@ -1612,20 +1821,34 @@ class SwarmTests(unittest.TestCase):
                     tools=(),
                 ),
             ]
+            fake_now = [0.0]
+            sleeps: list[float] = []
 
-            results = run_background_swarm_workers(
-                provider=provider,
-                jobs=jobs,
-                tool_executor=lambda name, arguments: "",
-                max_parallel=2,
-                poll_interval_seconds=0.0,
-                cwd=repo_dir,
-                provider_name="openai",
-            )
+            def fake_monotonic() -> float:
+                return fake_now[0]
+
+            def fake_sleep(seconds: float) -> None:
+                sleeps.append(seconds)
+                fake_now[0] += seconds
+
+            with (
+                mock.patch("swarm.time.monotonic", side_effect=fake_monotonic),
+                mock.patch("swarm.time.sleep", side_effect=fake_sleep),
+            ):
+                results = run_background_swarm_workers(
+                    provider=provider,
+                    jobs=jobs,
+                    tool_executor=lambda name, arguments: "",
+                    max_parallel=2,
+                    poll_interval_seconds=0.0,
+                    cwd=repo_dir,
+                    provider_name="openai",
+                )
 
             self.assertEqual({"job_a", "job_b", "job_c"}, set(results))
             self.assertEqual(1, provider.max_in_flight)
             self.assertEqual([False, True, True], provider.start_usage_emitted_flags)
+            self.assertTrue(any(seconds >= 60.0 for seconds in sleeps), sleeps)
 
     def test_background_scheduler_reuses_persisted_learned_limit_on_later_runs(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

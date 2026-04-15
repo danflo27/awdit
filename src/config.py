@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import json
 import os
+import textwrap
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Mapping
@@ -21,6 +22,8 @@ SLOT_NAMES = (
 )
 REASONING_EFFORT_VALUES = ("low", "medium", "high")
 SWARM_ELIGIBLE_FILE_PROFILES = ("code_config_tests", "all_tracked")
+SWARM_PRESET_VALUES = ("safe", "balanced", "fast")
+SWARM_BUDGET_MODE_VALUES = ("advisory", "enforced")
 DEFAULT_SWARM_REASONING_EFFORTS = {
     "danger_map": "high",
     "seed": "low",
@@ -29,6 +32,51 @@ DEFAULT_SWARM_REASONING_EFFORTS = {
 DEFAULT_SWARM_SEED_MAX_PARALLEL = 2
 DEFAULT_SWARM_PROOF_MAX_PARALLEL = 1
 DEFAULT_SWARM_RATE_LIMIT_MAX_RETRIES = 3
+DEFAULT_SWARM_TOKEN_BUDGET = 120000
+DEFAULT_SWARM_PRESET = "safe"
+DEFAULT_SWARM_BUDGET_MODE = "enforced"
+SWARM_LEGACY_KEYS = {
+    "sweep_model",
+    "proof_model",
+    "eligible_file_profile",
+    "token_budget",
+    "allow_no_limit",
+    "seed_max_parallel",
+    "proof_max_parallel",
+    "rate_limit_max_retries",
+}
+SWARM_PRESET_DEFAULTS: dict[str, dict[str, Any]] = {
+    "safe": {
+        "sweep_model": "gpt-5.4-mini",
+        "proof_model": "gpt-5.4-mini",
+        "eligible_file_profile": "code_config_tests",
+        "token_budget": DEFAULT_SWARM_TOKEN_BUDGET,
+        "budget_mode": "enforced",
+        "seed_max_parallel": 2,
+        "proof_max_parallel": 1,
+        "rate_limit_max_retries": DEFAULT_SWARM_RATE_LIMIT_MAX_RETRIES,
+    },
+    "balanced": {
+        "sweep_model": "gpt-5.4-mini",
+        "proof_model": "gpt-5.4-mini",
+        "eligible_file_profile": "code_config_tests",
+        "token_budget": DEFAULT_SWARM_TOKEN_BUDGET,
+        "budget_mode": "enforced",
+        "seed_max_parallel": 3,
+        "proof_max_parallel": 1,
+        "rate_limit_max_retries": DEFAULT_SWARM_RATE_LIMIT_MAX_RETRIES,
+    },
+    "fast": {
+        "sweep_model": "gpt-5.4-mini",
+        "proof_model": "gpt-5.4-mini",
+        "eligible_file_profile": "code_config_tests",
+        "token_budget": DEFAULT_SWARM_TOKEN_BUDGET,
+        "budget_mode": "advisory",
+        "seed_max_parallel": 4,
+        "proof_max_parallel": 2,
+        "rate_limit_max_retries": DEFAULT_SWARM_RATE_LIMIT_MAX_RETRIES,
+    },
+}
 
 BUILTIN_DEFAULTS: dict[str, Any] = {
     "active_provider": "openai",
@@ -153,11 +201,12 @@ class SwarmReasoningConfig:
 class SwarmConfig:
     prompts: SwarmPromptsConfig
     reasoning: SwarmReasoningConfig
+    preset: str
     sweep_model: str
     proof_model: str
     eligible_file_profile: str
     token_budget: int
-    allow_no_limit: bool
+    budget_mode: str
     seed_max_parallel: int
     proof_max_parallel: int
     rate_limit_max_retries: int
@@ -223,7 +272,7 @@ def load_effective_config(
     if not config_path.exists():
         raise ConfigError(
             f"Missing required config at {config_path}. "
-            "Create config/config.toml before running awdit."
+            "Run `awdit init-config` to scaffold a fresh config/config.toml before running awdit."
         )
 
     layers = [
@@ -433,44 +482,70 @@ def summarize_config(loaded: LoadedConfig) -> list[tuple[str, str, str]]:
         ]
     )
     if loaded.effective.swarm is not None:
+        preset_source = loaded.sources.get(("swarm", "mode", "preset"))
+        sweep_model_source = loaded.sources.get(("swarm", "models", "sweep"))
+        proof_model_source = loaded.sources.get(("swarm", "models", "proof"))
+        file_profile_source = loaded.sources.get(("swarm", "files", "profile"))
+        budget_tokens_source = loaded.sources.get(("swarm", "budget", "tokens"))
+        budget_mode_source = loaded.sources.get(("swarm", "budget", "mode"))
         danger_map_reasoning_source = loaded.sources.get(("swarm", "reasoning", "danger_map"))
         seed_reasoning_source = loaded.sources.get(("swarm", "reasoning", "seed"))
         proof_reasoning_source = loaded.sources.get(("swarm", "reasoning", "proof"))
-        seed_max_parallel_source = loaded.sources.get(("swarm", "seed_max_parallel"))
-        proof_max_parallel_source = loaded.sources.get(("swarm", "proof_max_parallel"))
-        rate_limit_retries_source = loaded.sources.get(("swarm", "rate_limit_max_retries"))
+        seed_max_parallel_source = loaded.sources.get(("swarm", "parallelism", "seed"))
+        proof_max_parallel_source = loaded.sources.get(("swarm", "parallelism", "proof"))
+        rate_limit_retries_source = loaded.sources.get(("swarm", "retries", "rate_limits"))
         rows.extend(
             [
                 (
+                    "Swarm preset",
+                    loaded.effective.swarm.preset,
+                    preset_source.label if preset_source else f"preset default ({loaded.effective.swarm.preset})",
+                ),
+                (
                     "Swarm sweep model",
                     loaded.effective.swarm.sweep_model,
-                    loaded.source_label("swarm", "sweep_model"),
+                    sweep_model_source.label if sweep_model_source else f"preset default ({loaded.effective.swarm.preset})",
                 ),
                 (
                     "Swarm proof model",
                     loaded.effective.swarm.proof_model,
-                    loaded.source_label("swarm", "proof_model"),
+                    proof_model_source.label if proof_model_source else f"preset default ({loaded.effective.swarm.preset})",
+                ),
+                (
+                    "Swarm file profile",
+                    loaded.effective.swarm.eligible_file_profile,
+                    file_profile_source.label if file_profile_source else f"preset default ({loaded.effective.swarm.preset})",
+                ),
+                (
+                    "Swarm token budget",
+                    str(loaded.effective.swarm.token_budget),
+                    budget_tokens_source.label if budget_tokens_source else f"preset default ({loaded.effective.swarm.preset})",
+                ),
+                (
+                    "Swarm budget mode",
+                    loaded.effective.swarm.budget_mode,
+                    budget_mode_source.label if budget_mode_source else f"preset default ({loaded.effective.swarm.preset})",
                 ),
                 (
                     "Swarm seed max parallel",
                     str(loaded.effective.swarm.seed_max_parallel),
                     seed_max_parallel_source.label
                     if seed_max_parallel_source
-                    else "built-in default",
+                    else f"preset default ({loaded.effective.swarm.preset})",
                 ),
                 (
                     "Swarm proof max parallel",
                     str(loaded.effective.swarm.proof_max_parallel),
                     proof_max_parallel_source.label
                     if proof_max_parallel_source
-                    else "built-in default",
+                    else f"preset default ({loaded.effective.swarm.preset})",
                 ),
                 (
                     "Swarm rate-limit retries",
                     str(loaded.effective.swarm.rate_limit_max_retries),
                     rate_limit_retries_source.label
                     if rate_limit_retries_source
-                    else "built-in default",
+                    else f"preset default ({loaded.effective.swarm.preset})",
                 ),
                 (
                     "Swarm danger-map reasoning",
@@ -710,11 +785,25 @@ def _normalize_and_validate(
 
     swarm: SwarmConfig | None = None
     if swarm_raw:
+        legacy_keys = sorted(SWARM_LEGACY_KEYS & set(swarm_raw))
+        if legacy_keys:
+            raise ConfigError(
+                "Legacy swarm schema is no longer supported. "
+                "Expected grouped sections like [swarm.mode], [swarm.models], [swarm.files], "
+                "[swarm.budget], [swarm.parallelism], [swarm.retries], [swarm.reasoning], "
+                f"and [swarm.prompts]. Remove legacy keys: {', '.join(legacy_keys)}. "
+                "Run `awdit init-config` to regenerate a fresh grouped scaffold."
+            )
         if "prompt_file" in swarm_raw:
             raise ConfigError(
                 "swarm.prompt_file is no longer supported. "
                 "Use [swarm.prompts] with danger_map, seed, and proof entries."
             )
+
+        mode_raw = _optional_table(swarm_raw, ("swarm", "mode"))
+        preset = _optional_choice(mode_raw, ("swarm", "mode", "preset"), SWARM_PRESET_VALUES)
+        preset = preset or DEFAULT_SWARM_PRESET
+        preset_defaults = SWARM_PRESET_DEFAULTS[preset]
 
         prompts_raw = _require_table(raw, ("swarm", "prompts"))
 
@@ -739,30 +828,53 @@ def _normalize_and_validate(
         if not proof_prompt_path.exists():
             raise ConfigError(f"Missing prompt file for swarm: {proof_prompt_path}")
 
-        sweep_model = _require_string(swarm_raw, ("swarm", "sweep_model"))
-        proof_model = _require_string(swarm_raw, ("swarm", "proof_model"))
+        models_raw = _optional_table(swarm_raw, ("swarm", "models"))
+        sweep_model = _optional_string(models_raw, ("swarm", "models", "sweep")) or preset_defaults["sweep_model"]
+        proof_model = _optional_string(models_raw, ("swarm", "models", "proof")) or preset_defaults["proof_model"]
         if sweep_model not in active_allowed:
             raise ConfigError(
-                f"Swarm sweep_model {sweep_model!r} is not present in "
+                f"Swarm sweep model {sweep_model!r} is not present in "
                 f"providers.{active_provider}.allowed_models."
             )
         if proof_model not in active_allowed:
             raise ConfigError(
-                f"Swarm proof_model {proof_model!r} is not present in "
+                f"Swarm proof model {proof_model!r} is not present in "
                 f"providers.{active_provider}.allowed_models."
             )
 
-        eligible_file_profile = _require_string(swarm_raw, ("swarm", "eligible_file_profile"))
-        if eligible_file_profile not in SWARM_ELIGIBLE_FILE_PROFILES:
-            allowed = ", ".join(SWARM_ELIGIBLE_FILE_PROFILES)
-            raise ConfigError(f"swarm.eligible_file_profile must be one of: {allowed}.")
+        files_raw = _optional_table(swarm_raw, ("swarm", "files"))
+        eligible_file_profile = (
+            _optional_choice(files_raw, ("swarm", "files", "profile"), SWARM_ELIGIBLE_FILE_PROFILES)
+            or preset_defaults["eligible_file_profile"]
+        )
 
-        reasoning_raw = swarm_raw.get("reasoning", {})
-        if reasoning_raw is None:
-            reasoning_raw = {}
-        if not isinstance(reasoning_raw, dict):
-            raise ConfigError("swarm.reasoning must be a table.")
+        budget_raw = _optional_table(swarm_raw, ("swarm", "budget"))
+        token_budget = (
+            _optional_positive_int(budget_raw, ("swarm", "budget", "tokens"))
+            or preset_defaults["token_budget"]
+        )
+        budget_mode = (
+            _optional_choice(budget_raw, ("swarm", "budget", "mode"), SWARM_BUDGET_MODE_VALUES)
+            or preset_defaults["budget_mode"]
+        )
 
+        parallel_raw = _optional_table(swarm_raw, ("swarm", "parallelism"))
+        seed_max_parallel = (
+            _optional_positive_int(parallel_raw, ("swarm", "parallelism", "seed"))
+            or preset_defaults["seed_max_parallel"]
+        )
+        proof_max_parallel = (
+            _optional_positive_int(parallel_raw, ("swarm", "parallelism", "proof"))
+            or preset_defaults["proof_max_parallel"]
+        )
+
+        retries_raw = _optional_table(swarm_raw, ("swarm", "retries"))
+        rate_limit_max_retries = (
+            _optional_positive_int(retries_raw, ("swarm", "retries", "rate_limits"))
+            or preset_defaults["rate_limit_max_retries"]
+        )
+
+        reasoning_raw = _optional_table(swarm_raw, ("swarm", "reasoning"))
         swarm = SwarmConfig(
             prompts=SwarmPromptsConfig(
                 danger_map=danger_map_prompt_path,
@@ -786,19 +898,15 @@ def _normalize_and_validate(
                 )
                 or DEFAULT_SWARM_REASONING_EFFORTS["proof"],
             ),
+            preset=preset,
             sweep_model=sweep_model,
             proof_model=proof_model,
             eligible_file_profile=eligible_file_profile,
-            token_budget=_require_positive_int(swarm_raw, ("swarm", "token_budget")),
-            allow_no_limit=_require_bool(swarm_raw, ("swarm", "allow_no_limit")),
-            seed_max_parallel=_optional_positive_int(swarm_raw, ("swarm", "seed_max_parallel"))
-            or DEFAULT_SWARM_SEED_MAX_PARALLEL,
-            proof_max_parallel=_optional_positive_int(swarm_raw, ("swarm", "proof_max_parallel"))
-            or DEFAULT_SWARM_PROOF_MAX_PARALLEL,
-            rate_limit_max_retries=_optional_positive_int(
-                swarm_raw, ("swarm", "rate_limit_max_retries")
-            )
-            or DEFAULT_SWARM_RATE_LIMIT_MAX_RETRIES,
+            token_budget=token_budget,
+            budget_mode=budget_mode,
+            seed_max_parallel=seed_max_parallel,
+            proof_max_parallel=proof_max_parallel,
+            rate_limit_max_retries=rate_limit_max_retries,
         )
 
     return EffectiveConfig(
@@ -866,7 +974,33 @@ def _require_bool(container: dict[str, Any], path: PathKey) -> bool:
     return value
 
 
+def _optional_table(container: dict[str, Any] | None, path: PathKey) -> dict[str, Any]:
+    if container is None:
+        return {}
+    value = container.get(path[-1])
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        dotted = ".".join(path)
+        raise ConfigError(f"{dotted} must be a table.")
+    return value
+
+
+def _optional_string(container: dict[str, Any] | None, path: PathKey) -> str | None:
+    if container is None:
+        return None
+    value = container.get(path[-1])
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        dotted = ".".join(path)
+        raise ConfigError(f"{dotted} must be a non-empty string.")
+    return value
+
+
 def _optional_positive_int(container: dict[str, Any], path: PathKey) -> int | None:
+    if container is None:
+        return None
     value = container.get(path[-1])
     if value is None:
         return None
@@ -877,12 +1011,31 @@ def _optional_positive_int(container: dict[str, Any], path: PathKey) -> int | No
 
 
 def _optional_reasoning_effort(container: dict[str, Any], path: PathKey) -> str | None:
+    if container is None:
+        return None
     value = container.get(path[-1])
     if value is None:
         return None
     if not isinstance(value, str) or value not in REASONING_EFFORT_VALUES:
         dotted = ".".join(path)
         allowed = ", ".join(REASONING_EFFORT_VALUES)
+        raise ConfigError(f"{dotted} must be one of: {allowed}.")
+    return value
+
+
+def _optional_choice(
+    container: dict[str, Any] | None,
+    path: PathKey,
+    allowed_values: tuple[str, ...],
+) -> str | None:
+    if container is None:
+        return None
+    value = container.get(path[-1])
+    if value is None:
+        return None
+    if not isinstance(value, str) or value not in allowed_values:
+        dotted = ".".join(path)
+        allowed = ", ".join(allowed_values)
         raise ConfigError(f"{dotted} must be one of: {allowed}.")
     return value
 
@@ -997,19 +1150,39 @@ def _dump_known_schema_toml(data: dict[str, Any]) -> str:
 
     swarm = data.get("swarm", {})
     if isinstance(swarm, dict) and swarm:
-        lines.extend(["", "[swarm]"])
-        for key in (
-            "sweep_model",
-            "proof_model",
-            "eligible_file_profile",
-            "token_budget",
-            "allow_no_limit",
-            "seed_max_parallel",
-            "proof_max_parallel",
-            "rate_limit_max_retries",
-        ):
-            if key in swarm:
-                lines.append(f"{key} = {_format_toml_value(swarm[key])}")
+        mode = swarm.get("mode")
+        if isinstance(mode, dict) and mode:
+            lines.extend(["", "[swarm.mode]"])
+            if "preset" in mode:
+                lines.append(f"preset = {_format_toml_value(mode['preset'])}")
+        models = swarm.get("models")
+        if isinstance(models, dict) and models:
+            lines.extend(["", "[swarm.models]"])
+            for key in ("sweep", "proof"):
+                if key in models:
+                    lines.append(f"{key} = {_format_toml_value(models[key])}")
+        files = swarm.get("files")
+        if isinstance(files, dict) and files:
+            lines.extend(["", "[swarm.files]"])
+            if "profile" in files:
+                lines.append(f"profile = {_format_toml_value(files['profile'])}")
+        budget = swarm.get("budget")
+        if isinstance(budget, dict) and budget:
+            lines.extend(["", "[swarm.budget]"])
+            for key in ("tokens", "mode"):
+                if key in budget:
+                    lines.append(f"{key} = {_format_toml_value(budget[key])}")
+        parallelism = swarm.get("parallelism")
+        if isinstance(parallelism, dict) and parallelism:
+            lines.extend(["", "[swarm.parallelism]"])
+            for key in ("seed", "proof"):
+                if key in parallelism:
+                    lines.append(f"{key} = {_format_toml_value(parallelism[key])}")
+        retries = swarm.get("retries")
+        if isinstance(retries, dict) and retries:
+            lines.extend(["", "[swarm.retries]"])
+            if "rate_limits" in retries:
+                lines.append(f"rate_limits = {_format_toml_value(retries['rate_limits'])}")
         reasoning = swarm.get("reasoning")
         if isinstance(reasoning, dict) and reasoning:
             lines.extend(["", "[swarm.reasoning]"])
@@ -1036,3 +1209,196 @@ def _format_toml_value(value: Any) -> str:
     if isinstance(value, list):
         return "[" + ", ".join(_format_toml_value(item) for item in value) + "]"
     raise TypeError(f"Unsupported TOML value type: {type(value).__name__}")
+
+
+def render_config_scaffold() -> str:
+    slot_models = {
+        "hunter_1": "gpt-5.4-mini",
+        "hunter_2": "gpt-5.4-mini",
+        "skeptic_1": "gpt-5.4",
+        "skeptic_2": "gpt-5.4-mini",
+        "referee_1": "gpt-5.4",
+        "referee_2": "gpt-5.4-mini",
+        "solver_1": "gpt-5.4",
+        "solver_2": "gpt-5.4-mini",
+    }
+    slot_reasoning = {
+        "hunter_1": "low",
+        "hunter_2": "low",
+        "skeptic_1": "medium",
+        "skeptic_2": "low",
+        "referee_1": "medium",
+        "referee_2": "low",
+        "solver_1": "medium",
+        "solver_2": "low",
+    }
+    slot_blocks: list[str] = []
+    for slot_name in SLOT_NAMES:
+        slot_blocks.append(
+            textwrap.dedent(
+                f"""
+                [slots.{slot_name}]
+                default_model = "{slot_models[slot_name]}"
+                reasoning_effort = "{slot_reasoning[slot_name]}"
+                prompt_file = "prompts/{slot_name}.md"
+                """
+            ).strip()
+        )
+
+    return (
+        textwrap.dedent(
+            """
+            # Repo-scoped awdit config scaffold.
+            # This file is intentionally verbose and self-documenting.
+            # Optional sections say when they may be omitted and list every accepted value nearby.
+            # Recommended path: keep the safe swarm preset and only override grouped swarm sections you truly need.
+
+            active_provider = "openai"
+
+            [providers.openai]
+            api_key_env = "OPENAI_API_KEY"
+            base_url = "https://api.openai.com/v1"
+            allowed_models = ["gpt-5.4", "gpt-5.4-mini"]
+
+            [scope]
+            include = [
+              "src/**",
+              "tests/**",
+              "config/prompts/**",
+              "config/config.toml",
+              "config/config.toml.example",
+              "pyproject.toml",
+              "uv.lock",
+              ".gitignore",
+            ]
+            exclude = [
+              "src/__pycache__/**",
+              "tests/__pycache__/**",
+              "src/*.egg-info/**",
+              "config/resources/**",
+              "docs/**",
+              ".env",
+              ".env.example",
+            ]
+
+            [[validation.checks]]
+            name = "pytest"
+            command = "pytest -q"
+            timeout_seconds = 600
+
+            [repo_memory]
+            enabled = true
+            require_danger_map_approval = true
+            confirm_refresh_on_startup = true
+            auto_update_on_completion = true
+
+            # Optional.
+            # config/resources/shared/ is auto-included by discovery unless excluded here.
+            # Options:
+            #   - include: explicit URLs or out-of-tree paths only
+            #   - exclude: glob patterns relative to config/resources/shared/
+            [resources.shared]
+            include = [
+              "../docs/architecture.md",
+              "../docs/agent-isolation-workflow.md",
+            ]
+            exclude = []
+
+            # Optional per-slot resource overrides.
+            # Each block may be omitted, but when present it accepts:
+            #   - include: explicit URLs or out-of-tree paths only
+            #   - exclude: glob patterns relative to config/resources/slots/<slot>/
+            """
+        ).strip()
+        + "\n\n"
+        + "\n\n".join(
+            textwrap.dedent(
+                f"""
+                [resources.slots.{slot_name}]
+                include = []
+                exclude = []
+                """
+            ).strip()
+            for slot_name in SLOT_NAMES
+        )
+        + "\n\n"
+        + textwrap.dedent(
+            """
+            [github]
+            prefer_gh = true
+
+            # Optional.
+            # If omitted entirely, awdit does not enable swarm mode for this repo.
+            # Grouped schema only: legacy flat swarm keys are rejected.
+
+            [swarm.mode]
+            # Optional. Omit to use the default preset.
+            # Options:
+            #   - "safe": default, stability-first, hard-safe continuation and launch gating
+            #   - "balanced": still hard-safe, but reopens safe concurrency sooner
+            #   - "fast": favors throughput and may knowingly accept retry churn
+            preset = "safe"
+
+            [swarm.models]
+            # Optional overrides for the chosen preset.
+            # Options:
+            #   - sweep: any model listed in providers.<active>.allowed_models
+            #   - proof: any model listed in providers.<active>.allowed_models
+            sweep = "gpt-5.4-mini"
+            proof = "gpt-5.4-mini"
+
+            [swarm.files]
+            # Optional.
+            # Options:
+            #   - "code_config_tests": code, config, and test files only
+            #   - "all_tracked": every tracked repo file except runtime-managed paths
+            profile = "code_config_tests"
+
+            [swarm.budget]
+            # Optional.
+            # Options:
+            #   - tokens: positive integer >= 1
+            #   - mode:
+            #       - "enforced": scheduler blocks or degrades oversized work to stay inside the budget
+            #       - "advisory": budget is reported, but faster presets may push harder
+            tokens = 120000
+            mode = "enforced"
+
+            [swarm.parallelism]
+            # Optional.
+            # Omit either value to inherit the preset default.
+            # Options:
+            #   - seed: positive integer >= 1
+            #   - proof: positive integer >= 1
+            seed = 2
+            proof = 1
+
+            [swarm.retries]
+            # Optional.
+            # Options:
+            #   - rate_limits: positive integer >= 1
+            rate_limits = 3
+
+            [swarm.reasoning]
+            # Optional.
+            # Omit any individual value to inherit the built-in default for that stage.
+            # Options for every field: "low", "medium", "high"
+            danger_map = "medium"
+            seed = "low"
+            proof = "medium"
+
+            [swarm.prompts]
+            # Required when swarm is enabled.
+            # Options:
+            #   - danger_map: relative or absolute path to the danger-map prompt
+            #   - seed: relative or absolute path to the seed prompt
+            #   - proof: relative or absolute path to the proof prompt
+            danger_map = "prompts/swarm_danger_map.md"
+            seed = "prompts/swarm_seed.md"
+            proof = "prompts/swarm_proof.md"
+            """
+        ).strip()
+        + "\n\n"
+        + "\n\n".join(slot_blocks)
+        + "\n"
+    )

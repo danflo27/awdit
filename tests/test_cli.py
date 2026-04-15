@@ -79,12 +79,19 @@ def _user_config_text() -> str:
         [github]
         prefer_gh = true
 
-        [swarm]
-        sweep_model = "gpt-5.4-mini"
-        proof_model = "gpt-5.4"
-        eligible_file_profile = "code_config_tests"
-        token_budget = 120000
-        allow_no_limit = true
+        [swarm.mode]
+        preset = "safe"
+
+        [swarm.models]
+        sweep = "gpt-5.4-mini"
+        proof = "gpt-5.4"
+
+        [swarm.files]
+        profile = "code_config_tests"
+
+        [swarm.budget]
+        tokens = 120000
+        mode = "enforced"
 
         [swarm.prompts]
         danger_map = "prompts/swarm_danger_map.md"
@@ -920,14 +927,14 @@ class SwarmCliTests(unittest.TestCase):
             self.assertIn("Swarm preflight", output)
             self.assertIn("Shared resources selected for this run", output)
             self.assertIn("Launching swarm batch...", output)
-            self.assertIn("Danger-map reasoning: high", output)
-            self.assertIn("Seed reasoning: low", output)
-            self.assertIn("Proof reasoning: medium", output)
-            self.assertIn("Seed max parallel: 2", output)
-            self.assertIn("Proof max parallel: 1", output)
+            self.assertIn("Preset: safe", output)
+            self.assertIn("Budget mode: enforced", output)
+            self.assertIn("Seed parallelism: 2", output)
+            self.assertIn("Proof parallelism: 1", output)
             self.assertIn("Rate-limit retries: 3", output)
             self.assertIn("Proof stage: read-only validation", output)
             self.assertIn("proof-filtered findings, grouped duplicates", output)
+            self.assertIn("Tool trace log:", output)
             self.assertIn("Usage summary:", output)
 
             run_dir = runs_root(repo_dir) / "2026-04-06_121500"
@@ -957,12 +964,17 @@ class SwarmCliTests(unittest.TestCase):
             self.assertIn("Proof reasoning: `medium`", swarm_digest)
             self.assertEqual("swarm", run_json["mode"])
             self.assertIn("prompt_bundle", run_json["swarm"])
-            self.assertEqual(2, run_json["swarm"]["seed_max_parallel"])
-            self.assertEqual(1, run_json["swarm"]["proof_max_parallel"])
-            self.assertEqual(3, run_json["swarm"]["rate_limit_max_retries"])
+            self.assertEqual("safe", run_json["swarm"]["mode"]["preset"])
+            self.assertEqual(2, run_json["swarm"]["parallelism"]["seed"])
+            self.assertEqual(1, run_json["swarm"]["parallelism"]["proof"])
+            self.assertEqual(3, run_json["swarm"]["retries"]["rate_limits"])
             self.assertEqual(
                 str(run_dir / "swarm" / "usage_summary.json"),
                 run_json["swarm"]["usage_summary"],
+            )
+            self.assertEqual(
+                str(run_dir / "swarm" / "tool_trace.jsonl"),
+                run_json["swarm"]["tool_trace_log"],
             )
             self.assertEqual(
                 {
@@ -982,11 +994,9 @@ class SwarmCliTests(unittest.TestCase):
             )
             loaded = self._loaded_config_from_text(
                 repo_dir,
-                _user_config_text().replace(
-                    "token_budget = 120000",
-                    "token_budget = 100",
-                    1,
-                ),
+                _user_config_text()
+                .replace('mode = "enforced"', 'mode = "advisory"', 1)
+                .replace("tokens = 120000", "tokens = 100", 1),
             )
 
             result, output = self._run_swarm(
@@ -1016,7 +1026,7 @@ class SwarmCliTests(unittest.TestCase):
 
             self.assertEqual(0, result)
             self.assertIn(
-                "Warning: estimated peak seed request tokens exceed the configured token budget",
+                "Warning: peak seed estimate exceeds the configured advisory budget.",
                 output,
             )
             self.assertIn("Largest seed request: app/large.py", output)
@@ -1247,6 +1257,41 @@ class SwarmCliTests(unittest.TestCase):
             self.assertEqual("danger_map", row[2])
             self.assertIn("synthetic swarm failure", row[3])
             self.assertTrue(row[4].endswith("failure_diagnostic.json"))
+
+
+class InitConfigCliTests(unittest.TestCase):
+    def test_init_config_writes_commented_grouped_scaffold(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_dir = Path(tmp_dir) / "repo"
+            stdout = io.StringIO()
+
+            with (
+                mock.patch("cli.Path.cwd", return_value=repo_dir),
+                mock.patch("sys.stdout", stdout),
+            ):
+                result = main(["init-config"])
+
+            self.assertEqual(0, result)
+            config_path = repo_dir / "config" / "config.toml"
+            self.assertTrue(config_path.exists())
+
+            scaffold = config_path.read_text(encoding="utf-8")
+            self.assertIn("[swarm.mode]", scaffold)
+            self.assertIn("[swarm.models]", scaffold)
+            self.assertIn("[swarm.budget]", scaffold)
+            self.assertIn(
+                '#   - "safe": default, stability-first, hard-safe continuation and launch gating',
+                scaffold,
+            )
+            self.assertIn(
+                '#       - "enforced": scheduler blocks or degrades oversized work to stay inside the budget',
+                scaffold,
+            )
+            self.assertIn(
+                '#       - "advisory": budget is reported, but faster presets may push harder',
+                scaffold,
+            )
+            self.assertIn("Wrote grouped config scaffold:", stdout.getvalue())
 
 
 if __name__ == "__main__":
