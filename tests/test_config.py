@@ -501,6 +501,53 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(1, loaded.effective.swarm.proof_max_parallel)
             self.assertEqual(3, loaded.effective.swarm.rate_limit_max_retries)
 
+    def test_swarm_accepts_pr_changed_files_profile(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            repo_dir = root / "repo"
+            config_path = repo_dir / "config" / "config.toml"
+            _write_prompt_tree(repo_dir / "config")
+            _write(
+                config_path,
+                _user_config_text().replace(
+                    'profile = "code_config_tests"',
+                    'profile = "pr_changed_files"',
+                    1,
+                ),
+            )
+
+            loaded = load_effective_config(
+                cwd=repo_dir,
+                config_path=config_path,
+                env={"OPENAI_API_KEY": "token"},
+            )
+
+            self.assertEqual("pr_changed_files", loaded.effective.swarm.eligible_file_profile)
+
+    def test_swarm_rejects_all_tracked_profile(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            repo_dir = root / "repo"
+            config_path = repo_dir / "config" / "config.toml"
+            _write_prompt_tree(repo_dir / "config")
+            _write(
+                config_path,
+                _user_config_text().replace(
+                    'profile = "code_config_tests"',
+                    'profile = "all_tracked"',
+                    1,
+                ),
+            )
+
+            with self.assertRaises(ConfigError) as ctx:
+                load_effective_config(
+                    cwd=repo_dir,
+                    config_path=config_path,
+                    env={"OPENAI_API_KEY": "token"},
+                )
+
+            self.assertIn("swarm.files.profile", str(ctx.exception))
+
     def test_swarm_reasoning_partial_override_uses_defaults_for_missing_values(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)

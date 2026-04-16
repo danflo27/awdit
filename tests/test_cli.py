@@ -161,7 +161,10 @@ class HelpFormattingTests(unittest.TestCase):
     def test_swarm_help_uses_moderate_spacing(self) -> None:
         output = self._capture_help(["swarm", "--help"])
 
-        self.assertIn("usage: awdit swarm [-h]\n\noptions:\n", output)
+        self.assertIn(
+            "usage: awdit swarm [-h] [--config CONFIG] [--base-ref BASE_REF]\n\noptions:\n",
+            output,
+        )
         _assert_no_triple_newlines(self, output)
 
 
@@ -711,6 +714,7 @@ class SwarmCliTests(unittest.TestCase):
         provider,
         inputs: list[str],
         *,
+        argv: list[str] | None = None,
         run_id: str = "2026-04-06_121500",
     ) -> tuple[int, str]:
         stdout = io.StringIO()
@@ -731,7 +735,7 @@ class SwarmCliTests(unittest.TestCase):
             mock.patch("builtins.input", side_effect=self._input_mock(inputs, stdout)),
             mock.patch("sys.stdout", stdout),
         ):
-            result = main(["swarm"])
+            result = main(argv or ["swarm"])
         return result, stdout.getvalue()
 
     def test_allocate_run_dir_retries_until_unique(self) -> None:
@@ -789,6 +793,235 @@ class SwarmCliTests(unittest.TestCase):
                 ).fetchone()
             self.assertEqual(("swarm", "completed"), row[:2])
             self.assertIsNotNone(row[2])
+
+    def test_swarm_rejects_base_ref_outside_pr_changed_files_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_dir = Path(tmp_dir) / "repo"
+            loaded = self._loaded_config(repo_dir)
+            stdout = io.StringIO()
+
+            with (
+                mock.patch("cli.Path.cwd", return_value=repo_dir),
+                mock.patch("cli.load_effective_config", return_value=loaded),
+                mock.patch("sys.stdout", stdout),
+            ):
+                result = main(["swarm", "--base-ref", "origin/main"])
+
+            self.assertEqual(1, result)
+            self.assertIn(
+                '--base-ref is only valid when [swarm.files].profile = "pr_changed_files"',
+                stdout.getvalue(),
+            )
+
+    def test_swarm_pr_changed_files_mode_defaults_base_ref_to_main(self) -> None:
+        def _fake_git_run(command, **kwargs):
+            if command[:2] == ["git", "diff"]:
+                self.assertEqual("main...HEAD", command[-1])
+                return mock.Mock(returncode=0, stdout="M\tapp/service.py\n", stderr="")
+            if command[:2] == ["git", "ls-files"]:
+                return mock.Mock(returncode=1, stdout="", stderr="not a git repo")
+            raise AssertionError(f"Unexpected git command: {command}")
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_dir = Path(tmp_dir) / "repo"
+            _write(repo_dir / "app" / "service.py", "print('hello')\n")
+            loaded = self._loaded_config_from_text(
+                repo_dir,
+                _user_config_text().replace('profile = "code_config_tests"', 'profile = "pr_changed_files"', 1),
+            )
+
+            with mock.patch("swarm.subprocess.run", side_effect=_fake_git_run):
+                result, output = self._run_swarm(
+                    repo_dir,
+                    loaded,
+                    BackgroundSequenceProvider(
+                        [
+                            {
+                                "trust_boundaries": ["api boundary"],
+                                "risky_sinks": ["sql write path"],
+                                "auth_assumptions": ["session cookie is trusted"],
+                                "hot_paths": ["app/service.py"],
+                                "notes": ["watch org scoping"],
+                            }
+                        ]
+                    ),
+                    ["n", "y", "y", "n"],
+                )
+
+            self.assertEqual(0, result)
+            self.assertIn("File handling mode: PR changed files", output)
+            self.assertIn("Base ref: main", output)
+
+            run_json = json.loads(
+                ((runs_root(repo_dir) / "2026-04-06_121500") / "run.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual("pr_changed_files", run_json["swarm"]["files"]["profile"])
+            self.assertEqual("main", run_json["swarm"]["files"]["base_ref"])
+
+    def test_swarm_pr_changed_files_mode_honors_base_ref_override(self) -> None:
+        def _fake_git_run(command, **kwargs):
+            if command[:2] == ["git", "diff"]:
+                self.assertEqual("origin/main...HEAD", command[-1])
+                return mock.Mock(returncode=0, stdout="M\tapp/service.py\n", stderr="")
+            if command[:2] == ["git", "ls-files"]:
+                return mock.Mock(returncode=1, stdout="", stderr="not a git repo")
+            raise AssertionError(f"Unexpected git command: {command}")
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_dir = Path(tmp_dir) / "repo"
+            _write(repo_dir / "app" / "service.py", "print('hello')\n")
+            loaded = self._loaded_config_from_text(
+                repo_dir,
+                _user_config_text().replace('profile = "code_config_tests"', 'profile = "pr_changed_files"', 1),
+            )
+
+            with mock.patch("swarm.subprocess.run", side_effect=_fake_git_run):
+                result, output = self._run_swarm(
+                    repo_dir,
+                    loaded,
+                    BackgroundSequenceProvider(
+                        [
+                            {
+                                "trust_boundaries": ["api boundary"],
+                                "risky_sinks": ["sql write path"],
+                                "auth_assumptions": ["session cookie is trusted"],
+                                "hot_paths": ["app/service.py"],
+                                "notes": ["watch org scoping"],
+                            }
+                        ]
+                    ),
+                    ["n", "y", "y", "n"],
+                    argv=["swarm", "--base-ref", "origin/main"],
+                )
+
+            self.assertEqual(0, result)
+            self.assertIn("Base ref: origin/main", output)
+
+            run_json = json.loads(
+                ((runs_root(repo_dir) / "2026-04-06_121500") / "run.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual("origin/main", run_json["swarm"]["files"]["base_ref"])
+
+    def test_swarm_pr_changed_files_mode_exits_cleanly_when_no_files_remain(self) -> None:
+        def _fake_git_run(command, **kwargs):
+            if command[:2] == ["git", "diff"]:
+                return mock.Mock(returncode=0, stdout="", stderr="")
+            if command[:2] == ["git", "ls-files"]:
+                return mock.Mock(returncode=1, stdout="", stderr="not a git repo")
+            raise AssertionError(f"Unexpected git command: {command}")
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_dir = Path(tmp_dir) / "repo"
+            loaded = self._loaded_config_from_text(
+                repo_dir,
+                _user_config_text().replace('profile = "code_config_tests"', 'profile = "pr_changed_files"', 1),
+            )
+            provider = BackgroundSequenceProvider(
+                [
+                    {
+                        "trust_boundaries": ["api boundary"],
+                        "risky_sinks": ["sql write path"],
+                        "auth_assumptions": ["session cookie is trusted"],
+                        "hot_paths": ["app/service.py"],
+                        "notes": ["watch org scoping"],
+                    }
+                ]
+            )
+
+            with mock.patch("swarm.subprocess.run", side_effect=_fake_git_run):
+                result, output = self._run_swarm(
+                    repo_dir,
+                    loaded,
+                    provider,
+                    ["n", "y", "y"],
+                )
+
+            self.assertEqual(0, result)
+            self.assertIn("No processable changed files remain for swarm.", output)
+            self.assertIn("Swarm finished without launching workers.", output)
+            self.assertNotIn("Launch swarm?", output)
+            self.assertEqual(1, len(provider.start_calls))
+
+            run_json = json.loads(
+                ((runs_root(repo_dir) / "2026-04-06_121500") / "run.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual([], run_json["eligible_files"])
+
+            with sqlite3.connect(repo_dir / "state" / "awdit.db") as connection:
+                row = connection.execute(
+                    "SELECT status FROM runs WHERE run_id = ?",
+                    ("2026-04-06_121500",),
+                ).fetchone()
+            self.assertEqual(("completed",), row)
+
+    def test_swarm_can_load_external_config_for_foreign_repo(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            repo_dir = root / "target-repo"
+            external_dir = root / "external-config"
+            config_path = external_dir / "swarm.toml"
+            stdout = io.StringIO()
+            _write(repo_dir / "app" / "service.py", "print('hello')\n")
+            _write_prompt_tree(external_dir)
+            _write(external_dir / "shared" / "foreign-reference.md", "foreign note")
+            _write(
+                config_path,
+                _user_config_text().replace(
+                    'include = ["https://example.com/shared-reference"]',
+                    'include = ["shared/foreign-reference.md"]',
+                    1,
+                ),
+            )
+            identity = RepoIdentity(
+                repo_name=repo_dir.name,
+                repo_key=f"{repo_dir.name}_deadbeef",
+                source_kind="repo_path",
+                source_value=str(repo_dir.resolve()),
+                repo_dir=repo_dir.resolve(),
+            )
+
+            with (
+                mock.patch("cli.Path.cwd", return_value=repo_dir),
+                mock.patch("cli._make_run_id", return_value="2026-04-06_121500"),
+                mock.patch(
+                    "cli.OpenAIResponsesProvider.from_loaded_config",
+                    return_value=BackgroundSequenceProvider(
+                        [
+                            {
+                                "trust_boundaries": ["api boundary"],
+                                "risky_sinks": ["sql write path"],
+                                "auth_assumptions": ["session cookie is trusted"],
+                                "hot_paths": ["app/service.py"],
+                                "notes": ["watch org scoping"],
+                            }
+                        ]
+                    ),
+                ),
+                mock.patch("cli.resolve_repo_identity", return_value=identity),
+                mock.patch("swarm.resolve_repo_identity", return_value=identity),
+                mock.patch("builtins.input", side_effect=self._input_mock(["n", "y", "y", "n"], stdout)),
+                mock.patch("sys.stdout", stdout),
+                mock.patch.dict("os.environ", {"OPENAI_API_KEY": "token"}, clear=False),
+            ):
+                result = main(["swarm", "--config", str(config_path)])
+
+            self.assertEqual(0, result)
+            self.assertIn("Swarm preflight", stdout.getvalue())
+
+            run_dir = runs_root(repo_dir) / "2026-04-06_121500"
+            shared_manifest = (run_dir / "resources" / "shared" / "manifest.md").read_text(
+                encoding="utf-8"
+            )
+            run_json = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+
+            self.assertIn("foreign-reference.md", shared_manifest)
+            self.assertEqual(str(config_path.resolve()), run_json["config_path"])
 
     def test_swarm_prints_live_worker_progress(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

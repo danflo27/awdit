@@ -560,11 +560,13 @@ class RepoReadOnlyTools:
         cwd: Path,
         scope_include: tuple[str, ...],
         scope_exclude: tuple[str, ...],
+        use_scope_filters: bool = True,
         extra_allowed_paths: tuple[Path, ...] = (),
     ) -> None:
         self.cwd = cwd.resolve()
         self.scope_include = scope_include
         self.scope_exclude = scope_exclude
+        self.use_scope_filters = use_scope_filters
         self.extra_allowed_paths = tuple(path.resolve() for path in extra_allowed_paths)
 
     def schemas(self) -> list[dict[str, Any]]:
@@ -650,10 +652,11 @@ class RepoReadOnlyTools:
     def allowed_paths(self, *, path_glob: str = "") -> list[Path]:
         allowed: list[Path] = []
         for entry in list_repo_file_entries(self.cwd):
-            if self.scope_include and not _matches_any(entry.relative_path, self.scope_include):
-                continue
-            if _matches_any(entry.relative_path, self.scope_exclude):
-                continue
+            if self.use_scope_filters:
+                if self.scope_include and not _matches_any(entry.relative_path, self.scope_include):
+                    continue
+                if _matches_any(entry.relative_path, self.scope_exclude):
+                    continue
             if path_glob and not PurePosixPath(entry.relative_path).match(path_glob):
                 continue
             allowed.append(entry.path)
@@ -2591,23 +2594,24 @@ def list_repo_files(cwd: Path) -> list[Path]:
     return [entry.path for entry in list_repo_file_entries(cwd)]
 
 
-def list_eligible_swarm_files(cwd: Path, loaded) -> list[Path]:
+def list_eligible_swarm_files(cwd: Path, loaded, *, base_ref: str | None = None) -> list[Path]:
     repo_dir = cwd.resolve()
-    scope_include = loaded.effective.scope.include
-    scope_exclude = loaded.effective.scope.exclude
     swarm_config = loaded.effective.swarm
     if swarm_config is None:
         raise RuntimeError("Swarm config is not available.")
 
-    eligible: list[Path] = []
-    for entry in list_repo_file_entries(repo_dir):
-        if scope_include and not _matches_any(entry.relative_path, scope_include):
-            continue
-        if _matches_any(entry.relative_path, scope_exclude):
-            continue
-        if _matches_swarm_profile(entry.relative_path, swarm_config.eligible_file_profile):
-            eligible.append(entry.path)
-    return eligible
+    profile = swarm_config.eligible_file_profile
+    if profile == "code_config_tests":
+        return _list_code_config_test_swarm_files(
+            repo_dir,
+            scope_include=loaded.effective.scope.include,
+            scope_exclude=loaded.effective.scope.exclude,
+        )
+    if profile == "pr_changed_files":
+        if not base_ref:
+            raise RuntimeError("PR changed-files swarm mode requires a base ref.")
+        return _list_pr_changed_swarm_files(repo_dir, base_ref=base_ref)
+    raise RuntimeError(f"Unknown swarm file handling mode: {profile!r}")
 
 
 def run_swarm_sweep(
@@ -2637,10 +2641,12 @@ def run_swarm_sweep(
 
     swarm_digest_text = swarm_digest_path.read_text(encoding="utf-8")
     shared_manifest_text = shared_manifest_path.read_text(encoding="utf-8")
+    use_scope_filters = loaded.effective.swarm.eligible_file_profile != "pr_changed_files"
     tools = RepoReadOnlyTools(
         cwd=cwd,
         scope_include=loaded.effective.scope.include,
         scope_exclude=loaded.effective.scope.exclude,
+        use_scope_filters=use_scope_filters,
         extra_allowed_paths=_staged_shared_resource_files(shared_manifest_path),
     )
     metrics = SwarmRunMetrics(path=usage_summary)
@@ -3789,10 +3795,7 @@ def _proof_state_rank(proof_state: str) -> int:
     return order.get(proof_state, 4)
 
 
-def _matches_swarm_profile(relative_path: str, profile: str) -> bool:
-    if profile == "all_tracked":
-        return True
-
+def _matches_code_config_tests_profile(relative_path: str) -> bool:
     path = PurePosixPath(relative_path)
     name = path.name.lower()
     extension = path.suffix.lower()
@@ -3805,6 +3808,84 @@ def _matches_swarm_profile(relative_path: str, profile: str) -> bool:
     if "tests" in parts or name.startswith("test_") or name.endswith("_test.py"):
         return True
     return False
+
+
+def _list_code_config_test_swarm_files(
+    repo_dir: Path,
+    *,
+    scope_include: tuple[str, ...],
+    scope_exclude: tuple[str, ...],
+) -> list[Path]:
+    eligible: list[Path] = []
+    for entry in list_repo_file_entries(repo_dir):
+        if scope_include and not _matches_any(entry.relative_path, scope_include):
+            continue
+        if _matches_any(entry.relative_path, scope_exclude):
+            continue
+        if _matches_code_config_tests_profile(entry.relative_path):
+            eligible.append(entry.path)
+    return eligible
+
+
+def _list_pr_changed_swarm_files(repo_dir: Path, *, base_ref: str) -> list[Path]:
+    changed_paths = _git_changed_paths(repo_dir, base_ref=base_ref)
+    eligible: list[Path] = []
+    seen: set[str] = set()
+    for relative_path in changed_paths:
+        if relative_path in seen or _is_runtime_managed_relative(relative_path):
+            continue
+        seen.add(relative_path)
+        candidate = repo_dir / relative_path
+        if candidate.is_symlink() or not candidate.is_file():
+            continue
+        eligible.append(candidate.resolve())
+    return eligible
+
+
+def _git_changed_paths(repo_dir: Path, *, base_ref: str) -> list[str]:
+    try:
+        result = subprocess.run(
+            [
+                "git",
+                "diff",
+                "--name-status",
+                "--find-renames",
+                "--find-copies",
+                f"{base_ref}...HEAD",
+            ],
+            cwd=repo_dir,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError as exc:
+        raise RuntimeError(
+            f"Unable to inspect changed files against base ref {base_ref!r}: {exc}"
+        ) from exc
+
+    if result.returncode != 0:
+        detail = result.stderr.strip() or result.stdout.strip() or f"git diff exited with {result.returncode}"
+        raise RuntimeError(
+            f"Unable to inspect changed files against base ref {base_ref!r}: {detail}"
+        )
+
+    changed_paths: list[str] = []
+    for raw_line in result.stdout.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        parts = line.split("\t")
+        if len(parts) < 2:
+            continue
+        status = parts[0].strip().upper()
+        kind = status[:1]
+        if kind not in {"A", "C", "M", "R"}:
+            continue
+        raw_path = parts[-1].strip()
+        if not raw_path:
+            continue
+        changed_paths.append(_normalize_repo_relative_path(raw_path))
+    return changed_paths
 
 
 def _matches_any(relative_path: str, globs: tuple[str, ...]) -> bool:

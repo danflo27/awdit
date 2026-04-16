@@ -1315,6 +1315,82 @@ class SwarmTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "outside the configured readable repo scope"):
                     tools.run("read_file", {"path": "app/link.py"})
 
+    def test_pr_changed_files_mode_selects_only_processable_changed_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            repo_dir = root / "repo"
+            outside_file = root / "shared" / "linked.py"
+            _write(outside_file, "print('linked')\n")
+            _write(repo_dir / "app" / "added.py", "print('added')\n")
+            _write(repo_dir / "app" / "modified.py", "print('modified')\n")
+            _write(repo_dir / "app" / "copied.py", "print('copied')\n")
+            _write(repo_dir / "app" / "renamed_new.py", "print('renamed')\n")
+            _write(repo_dir / "runs" / "managed.py", "print('managed')\n")
+            (repo_dir / "app").mkdir(parents=True, exist_ok=True)
+            (repo_dir / "app" / "link.py").symlink_to(outside_file)
+            loaded = self._loaded_config_from_text(
+                repo_dir,
+                _config_text().replace(
+                    'profile = "code_config_tests"',
+                    'profile = "pr_changed_files"',
+                    1,
+                ),
+            )
+
+            git_result = mock.Mock(
+                returncode=0,
+                stdout="\n".join(
+                    [
+                        "A\tapp/added.py",
+                        "M\tapp/modified.py",
+                        "C100\tapp/original.py\tapp/copied.py",
+                        "R087\tapp/renamed_old.py\tapp/renamed_new.py",
+                        "D\tapp/deleted.py",
+                        "M\tapp/missing.py",
+                        "M\tapp/link.py",
+                        "M\truns/managed.py",
+                    ]
+                )
+                + "\n",
+                stderr="",
+            )
+            with mock.patch("swarm.subprocess.run", return_value=git_result):
+                eligible = list_eligible_swarm_files(repo_dir, loaded, base_ref="main")
+
+            self.assertEqual(
+                [
+                    (repo_dir / "app" / "added.py").resolve(),
+                    (repo_dir / "app" / "modified.py").resolve(),
+                    (repo_dir / "app" / "copied.py").resolve(),
+                    (repo_dir / "app" / "renamed_new.py").resolve(),
+                ],
+                eligible,
+            )
+
+    def test_repo_tools_can_ignore_scope_filters_but_still_block_runtime_managed_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_dir = Path(tmp_dir) / "repo"
+            _write(repo_dir / "app" / "service.py", "print('service')\n")
+            _write(repo_dir / "config" / "settings.yml", "feature: true\n")
+            _write(repo_dir / "runs" / "generated.txt", "internal\n")
+            loaded = self._loaded_config(repo_dir)
+            tools = RepoReadOnlyTools(
+                cwd=repo_dir,
+                scope_include=loaded.effective.scope.include,
+                scope_exclude=loaded.effective.scope.exclude,
+                use_scope_filters=False,
+            )
+
+            config_listing = json.loads(tools.run("list_scope_files", {"path_glob": "config/*.yml"}))
+            config_file = json.loads(tools.run("read_file", {"path": "config/settings.yml"}))
+            runs_listing = json.loads(tools.run("list_scope_files", {"path_glob": "runs/**"}))
+
+            self.assertEqual(["config/settings.yml"], config_listing["paths"])
+            self.assertEqual("config/settings.yml", config_file["path"])
+            self.assertEqual([], runs_listing["paths"])
+            with self.assertRaisesRegex(RuntimeError, "outside the configured readable repo scope"):
+                tools.run("read_file", {"path": "runs/generated.txt"})
+
     def test_repo_tools_allow_only_current_run_staged_shared_resources(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             repo_dir = Path(tmp_dir) / "repo"

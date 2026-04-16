@@ -117,7 +117,7 @@ proof = "gpt-5.4-mini"
 # Optional.
 # Options:
 #   - "code_config_tests": code, config, and test files only
-#   - "all_tracked": every tracked repo file except runtime-managed paths
+#   - "pr_changed_files": one worker per changed file in the current branch diff
 profile = "code_config_tests"
 
 [swarm.budget]

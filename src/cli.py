@@ -58,6 +58,8 @@ from terminal_ui import (
     prompt_input,
 )
 
+DEFAULT_SWARM_BASE_REF = "main"
+
 
 @dataclass(frozen=True)
 class RuntimeResources:
@@ -107,6 +109,15 @@ def main(argv: list[str] | None = None) -> int:
     swarm_parser = subparsers.add_parser(
         "swarm",
         help="Run the repo-wide black-hat sweep startup flow.",
+    )
+    swarm_parser.add_argument(
+        "--config",
+        type=Path,
+        help="Load swarm config from this path instead of repo-root config/config.toml.",
+    )
+    swarm_parser.add_argument(
+        "--base-ref",
+        help='Use this git base ref for `pr_changed_files` swarm mode. Defaults to "main".',
     )
     swarm_parser.set_defaults(handler=_handle_swarm)
 
@@ -216,11 +227,12 @@ def _handle_init_config(args: argparse.Namespace) -> int:
     return 0
 
 
-def _handle_swarm(_: argparse.Namespace) -> int:
+def _handle_swarm(args: argparse.Namespace) -> int:
     cwd = Path.cwd()
+    config_path = args.config.expanduser().resolve() if args.config is not None else None
     migrate_legacy_runtime_layout(cwd)
     try:
-        loaded = load_effective_config(cwd=cwd)
+        loaded = load_effective_config(cwd=cwd, config_path=config_path)
     except ConfigError as exc:
         _print_line(f"Config error: {exc}")
         return 1
@@ -228,6 +240,11 @@ def _handle_swarm(_: argparse.Namespace) -> int:
     if loaded.effective.swarm is None:
         _print_line("Config error: missing required [swarm] config block.")
         return 1
+    file_mode = loaded.effective.swarm.eligible_file_profile
+    if args.base_ref and file_mode != "pr_changed_files":
+        _print_line('Config error: --base-ref is only valid when [swarm.files].profile = "pr_changed_files".')
+        return 1
+    base_ref = args.base_ref or (DEFAULT_SWARM_BASE_REF if file_mode == "pr_changed_files" else None)
 
     _print_section_heading("Starting new swarm run...")
     run_id, run_dir = _allocate_run_dir(cwd)
@@ -267,7 +284,7 @@ def _handle_swarm(_: argparse.Namespace) -> int:
             _print_section_heading("Swarm canceled before launch.")
             return 0
 
-        eligible_files = list_eligible_swarm_files(cwd, current)
+        eligible_files = list_eligible_swarm_files(cwd, current, base_ref=base_ref)
         snapshot = _persist_swarm_startup_snapshot(
             cwd=cwd,
             loaded=current,
@@ -276,9 +293,10 @@ def _handle_swarm(_: argparse.Namespace) -> int:
             shared_resources=shared_resources,
             danger_map_result=result,
             eligible_files=eligible_files,
+            base_ref=base_ref,
             prompt_bundle=prompt_bundle,
         )
-        _print_swarm_preflight(cwd, current, snapshot, result, prompt_bundle, eligible_files)
+        _print_swarm_preflight(cwd, current, snapshot, result, prompt_bundle, eligible_files, base_ref=base_ref)
 
         update_run_status(
             cwd=cwd,
@@ -298,6 +316,22 @@ def _handle_swarm(_: argparse.Namespace) -> int:
         _print_section_heading(f"Swarm startup failed: {exc}")
         _print_line(f"Failure diagnostics: {diagnostic_path}")
         return 1
+
+    if current.effective.swarm.eligible_file_profile == "pr_changed_files" and not eligible_files:
+        update_run_status(
+            cwd=cwd,
+            run_id=run_id,
+            status="completed",
+            completed=True,
+        )
+        _print_section_heading("No processable changed files remain for swarm.")
+        if base_ref is not None:
+            _print_line(f"Base ref: {base_ref}")
+        _print_line(
+            "PR changed-files mode filtered out deleted, missing, symlinked, and runtime-managed paths."
+        )
+        _print_line("Swarm finished without launching workers.")
+        return 0
 
     _print_section_heading("Swarm startup preflight is ready.")
     if not _confirm("Launch swarm?", default=True, separated=True):
@@ -547,6 +581,7 @@ def _persist_swarm_startup_snapshot(
     shared_resources: tuple[str, ...],
     danger_map_result,
     eligible_files: list[Path],
+    base_ref: str | None,
     prompt_bundle,
 ) -> SwarmStartupSnapshot:
     prompts_dir = run_dir / "prompts"
@@ -572,6 +607,7 @@ def _persist_swarm_startup_snapshot(
         danger_map_result=danger_map_result,
         shared_manifest=shared_manifest,
         eligible_files=eligible_files,
+        base_ref=base_ref,
     )
 
     run_json = run_dir / "run.json"
@@ -594,6 +630,7 @@ def _persist_swarm_startup_snapshot(
                     },
                     "files": {
                         "profile": loaded.effective.swarm.eligible_file_profile,
+                        "base_ref": base_ref,
                     },
                     "budget": {
                         "tokens": loaded.effective.swarm.token_budget,
@@ -648,6 +685,7 @@ def _write_swarm_digest(
     danger_map_result,
     shared_manifest: Path,
     eligible_files: list[Path],
+    base_ref: str | None,
 ) -> None:
     lines = [
         "# Swarm digest",
@@ -680,15 +718,34 @@ def _write_swarm_digest(
             f"- Danger-map reasoning: `{loaded.effective.swarm.reasoning.danger_map}`",
             f"- Seed reasoning: `{loaded.effective.swarm.reasoning.seed}`",
             f"- Proof reasoning: `{loaded.effective.swarm.reasoning.proof}`",
-            f"- Eligible profile: `{loaded.effective.swarm.eligible_file_profile}`",
+            f"- File handling mode: `{loaded.effective.swarm.eligible_file_profile}`",
             f"- Budget mode: `{loaded.effective.swarm.budget_mode}`",
             f"- Token budget: `{loaded.effective.swarm.token_budget}`",
         ]
     )
+    if base_ref is not None:
+        lines.append(f"- Base ref: `{base_ref}`")
     path.write_text("\n".join(lines).strip() + "\n", encoding="utf-8")
 
 
-def _print_swarm_preflight(cwd: Path, loaded, snapshot, danger_map_result, prompt_bundle, eligible_files: list[Path]) -> None:
+def _render_swarm_file_mode(profile: str) -> str:
+    if profile == "code_config_tests":
+        return "code + config + tests"
+    if profile == "pr_changed_files":
+        return "PR changed files"
+    return profile.replace("_", " ")
+
+
+def _print_swarm_preflight(
+    cwd: Path,
+    loaded,
+    snapshot,
+    danger_map_result,
+    prompt_bundle,
+    eligible_files: list[Path],
+    *,
+    base_ref: str | None,
+) -> None:
     seed_volume = summarize_seed_request_volume(
         cwd=cwd,
         loaded=loaded,
@@ -708,10 +765,9 @@ def _print_swarm_preflight(cwd: Path, loaded, snapshot, danger_map_result, promp
     _print_line(f"    Rate-limit retries: {loaded.effective.swarm.rate_limit_max_retries}")
     _print_line("")
     _print_line("  Context")
-    _print_line(
-        "    File profile: "
-        f"{loaded.effective.swarm.eligible_file_profile.replace('_', ' ')}"
-    )
+    _print_line(f"    File handling mode: {_render_swarm_file_mode(loaded.effective.swarm.eligible_file_profile)}")
+    if base_ref is not None:
+        _print_line(f"    Base ref: {base_ref}")
     _print_line(f"    Eligible files discovered: {len(eligible_files)}")
     _print_line("    Seed input mode: compact metadata + paged read_file")
     _print_line("    Proof stage: read-only validation")

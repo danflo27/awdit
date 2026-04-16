@@ -21,7 +21,7 @@ SLOT_NAMES = (
     "solver_2",
 )
 REASONING_EFFORT_VALUES = ("low", "medium", "high")
-SWARM_ELIGIBLE_FILE_PROFILES = ("code_config_tests", "all_tracked")
+SWARM_ELIGIBLE_FILE_PROFILES = ("code_config_tests", "pr_changed_files")
 SWARM_PRESET_VALUES = ("safe", "balanced", "fast")
 SWARM_BUDGET_MODE_VALUES = ("advisory", "enforced")
 DEFAULT_SWARM_REASONING_EFFORTS = {
@@ -512,7 +512,7 @@ def summarize_config(loaded: LoadedConfig) -> list[tuple[str, str, str]]:
                     proof_model_source.label if proof_model_source else f"preset default ({loaded.effective.swarm.preset})",
                 ),
                 (
-                    "Swarm file profile",
+                    "Swarm file handling mode",
                     loaded.effective.swarm.eligible_file_profile,
                     file_profile_source.label if file_profile_source else f"preset default ({loaded.effective.swarm.preset})",
                 ),
@@ -1351,7 +1351,7 @@ def render_config_scaffold() -> str:
             # Optional.
             # Options:
             #   - "code_config_tests": code, config, and test files only
-            #   - "all_tracked": every tracked repo file except runtime-managed paths
+            #   - "pr_changed_files": one worker per changed file in the current branch diff
             profile = "code_config_tests"
 
             [swarm.budget]

@@ -112,4 +112,4 @@ The implementation should add a CI-safe `awdit swarm` mode, use a trusted bundle
 - Same-repo PRs are supported by default.
 - Fork PRs are skipped by default because running untrusted fork code with the adopting repo's `OPENAI_API_KEY` is unsafe.
 - Reportable findings are surfaced via PR comment, summary, and artifacts, but do not fail the workflow by default.
-- "Every file changed in the PR" means the explicit PR file list is the source of truth, not `eligible_file_profile`.
+- "Every file changed in the PR" means the explicit PR file list is the source of truth, not `[swarm.files].profile`.

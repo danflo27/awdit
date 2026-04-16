@@ -85,7 +85,7 @@ user> y
 
 awdit> Swarm preflight
 awdit>   Mode: repo-wide black-hat sweep
-awdit>   File profile: code + config + tests
+awdit>   File handling mode: code + config + tests
 awdit>   Eligible files discovered: 6
 awdit>   Token budget: 120000
 awdit>   Sweep model: gpt-5.4-mini
@@ -307,14 +307,15 @@ Swarm-only section:
 - `swarm`
 
 The `swarm` section should define:
-- `sweep_model`
-- `proof_model`
-- `eligible_file_profile`
-- `token_budget`
-- `allow_no_limit`
-- `seed_max_parallel` (optional, defaults to `2`)
-- `proof_max_parallel` (optional, defaults to `1`)
-- `rate_limit_max_retries` (optional, defaults to `3`)
+- `mode.preset`
+- `models.sweep`
+- `models.proof`
+- `files.profile`
+- `budget.tokens`
+- `budget.mode`
+- `parallelism.seed` (optional, defaults to `2`)
+- `parallelism.proof` (optional, defaults to `1`)
+- `retries.rate_limits` (optional, defaults to `3`)
 - `reasoning.danger_map` (optional, defaults to `high`)
 - `reasoning.seed` (optional, defaults to `low`)
 - `reasoning.proof` (optional, defaults to `medium`)
@@ -353,15 +354,26 @@ reasoning_effort = "low"
 prompt_file = "prompts/hunter_1.md"
 
 # Swarm-only path
-[swarm]
-sweep_model = "gpt-5.4-mini"
-proof_model = "gpt-5.4"
-eligible_file_profile = "code_config_tests"
-token_budget = 120000
-allow_no_limit = true
-seed_max_parallel = 2
-proof_max_parallel = 1
-rate_limit_max_retries = 3
+[swarm.mode]
+preset = "safe"
+
+[swarm.models]
+sweep = "gpt-5.4-mini"
+proof = "gpt-5.4"
+
+[swarm.files]
+profile = "code_config_tests"
+
+[swarm.budget]
+tokens = 120000
+mode = "enforced"
+
+[swarm.parallelism]
+seed = 2
+proof = 1
+
+[swarm.retries]
+rate_limits = 3
 
 [swarm.reasoning]
 danger_map = "high"
