@@ -769,7 +769,7 @@ class SwarmCliTests(unittest.TestCase):
                         }
                     ]
                 ),
-                ["n", "y", "y", "y"],
+                ["n", "y", "y", "y", "y"],
             )
 
             self.assertEqual(0, result)
@@ -1023,6 +1023,179 @@ class SwarmCliTests(unittest.TestCase):
             self.assertIn("foreign-reference.md", shared_manifest)
             self.assertEqual(str(config_path.resolve()), run_json["config_path"])
 
+    def test_swarm_checked_in_generic_config_finds_foreign_repo_code_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_dir = Path(tmp_dir) / "target-repo"
+            stdout = io.StringIO()
+            checked_in_config = Path(__file__).resolve().parents[1] / "config" / "config.toml"
+            _write(repo_dir / "app" / "service.py", "print('hello')\n")
+            _write(repo_dir / "tests" / "test_service.py", "def test_ok():\n    assert True\n")
+            _write(repo_dir / ".gitignore", ".env\n")
+            identity = RepoIdentity(
+                repo_name=repo_dir.name,
+                repo_key=f"{repo_dir.name}_deadbeef",
+                source_kind="repo_path",
+                source_value=str(repo_dir.resolve()),
+                repo_dir=repo_dir.resolve(),
+            )
+
+            with (
+                mock.patch("cli.Path.cwd", return_value=repo_dir),
+                mock.patch("cli._make_run_id", return_value="2026-04-06_121500"),
+                mock.patch(
+                    "cli.OpenAIResponsesProvider.from_loaded_config",
+                    return_value=BackgroundSequenceProvider(
+                        [
+                            {
+                                "trust_boundaries": ["api boundary"],
+                                "risky_sinks": ["sql write path"],
+                                "auth_assumptions": ["session cookie is trusted"],
+                                "hot_paths": ["app/service.py"],
+                                "notes": ["watch org scoping"],
+                            }
+                        ]
+                    ),
+                ),
+                mock.patch("cli.resolve_repo_identity", return_value=identity),
+                mock.patch("swarm.resolve_repo_identity", return_value=identity),
+                mock.patch("builtins.input", side_effect=self._input_mock(["n", "y", "y", "n"], stdout)),
+                mock.patch("sys.stdout", stdout),
+                mock.patch.dict("os.environ", {"OPENAI_API_KEY": "token"}, clear=False),
+            ):
+                result = main(["swarm", "--config", str(checked_in_config)])
+
+            self.assertEqual(0, result)
+            run_json = json.loads(
+                ((runs_root(repo_dir) / "2026-04-06_121500") / "run.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(str(checked_in_config.resolve()), run_json["config_path"])
+            self.assertIn("app/service.py", run_json["eligible_files"])
+            self.assertIn("tests/test_service.py", run_json["eligible_files"])
+            self.assertNotEqual([".gitignore"], run_json["eligible_files"])
+
+    def test_swarm_warns_when_repo_wide_scope_ratio_is_below_20_percent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_dir = Path(tmp_dir) / "repo"
+            stdout = io.StringIO()
+            checked_in_config = Path(__file__).resolve().parents[1] / "config" / "config.toml"
+            _write(repo_dir / "app" / "service.py", "print('hello')\n")
+            _write(repo_dir / ".gitignore", ".env\n")
+            for index in range(10):
+                _write(repo_dir / "docs" / f"note_{index}.md", f"note {index}\n")
+            identity = RepoIdentity(
+                repo_name=repo_dir.name,
+                repo_key=f"{repo_dir.name}_deadbeef",
+                source_kind="repo_path",
+                source_value=str(repo_dir.resolve()),
+                repo_dir=repo_dir.resolve(),
+            )
+
+            with (
+                mock.patch("cli.Path.cwd", return_value=repo_dir),
+                mock.patch("cli._make_run_id", return_value="2026-04-06_121500"),
+                mock.patch(
+                    "cli.OpenAIResponsesProvider.from_loaded_config",
+                    return_value=BackgroundSequenceProvider(
+                        [
+                            {
+                                "trust_boundaries": ["api boundary"],
+                                "risky_sinks": ["sql write path"],
+                                "auth_assumptions": ["session cookie is trusted"],
+                                "hot_paths": ["app/service.py"],
+                                "notes": ["watch org scoping"],
+                            }
+                        ]
+                    ),
+                ),
+                mock.patch("cli.resolve_repo_identity", return_value=identity),
+                mock.patch("swarm.resolve_repo_identity", return_value=identity),
+                mock.patch("builtins.input", side_effect=self._input_mock(["n", "y", "y", "y", "n"], stdout)),
+                mock.patch("sys.stdout", stdout),
+                mock.patch.dict("os.environ", {"OPENAI_API_KEY": "token"}, clear=False),
+            ):
+                result = main(["swarm", "--config", str(checked_in_config)])
+
+            self.assertEqual(0, result)
+            output = stdout.getvalue()
+            self.assertIn("Tracked files discovered: 12", output)
+            self.assertIn("Eligible files discovered: 2", output)
+            self.assertIn("Eligible/tracked ratio: 16.67%", output)
+            self.assertIn("Continue despite narrow scope? [y/N]", output)
+            self.assertLess(
+                output.index("Continue despite narrow scope? [y/N]"),
+                output.index("Launch swarm? [Y/n]"),
+            )
+
+            run_dir = runs_root(repo_dir) / "2026-04-06_121500"
+            run_json = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+            digest = (run_dir / "derived_context" / "swarm_digest.md").read_text(encoding="utf-8")
+
+            self.assertTrue(run_json["scope_diagnostics"]["warning_triggered"])
+            self.assertEqual(12, run_json["scope_diagnostics"]["tracked_file_count"])
+            self.assertEqual(2, run_json["scope_diagnostics"]["eligible_file_count"])
+            self.assertEqual([".gitignore", "app/service.py"], run_json["scope_diagnostics"]["sampled_eligible_files"])
+            self.assertIn("## Scope diagnostics", digest)
+            self.assertIn("- Eligible/tracked ratio: `16.67%`", digest)
+            self.assertIn("- Narrow-scope warning: `yes`", digest)
+
+    def test_swarm_does_not_warn_when_repo_wide_scope_ratio_is_at_least_20_percent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_dir = Path(tmp_dir) / "repo"
+            stdout = io.StringIO()
+            checked_in_config = Path(__file__).resolve().parents[1] / "config" / "config.toml"
+            _write(repo_dir / "app" / "service.py", "print('hello')\n")
+            _write(repo_dir / ".gitignore", ".env\n")
+            for index in range(8):
+                _write(repo_dir / "docs" / f"note_{index}.md", f"note {index}\n")
+            identity = RepoIdentity(
+                repo_name=repo_dir.name,
+                repo_key=f"{repo_dir.name}_deadbeef",
+                source_kind="repo_path",
+                source_value=str(repo_dir.resolve()),
+                repo_dir=repo_dir.resolve(),
+            )
+
+            with (
+                mock.patch("cli.Path.cwd", return_value=repo_dir),
+                mock.patch("cli._make_run_id", return_value="2026-04-06_121500"),
+                mock.patch(
+                    "cli.OpenAIResponsesProvider.from_loaded_config",
+                    return_value=BackgroundSequenceProvider(
+                        [
+                            {
+                                "trust_boundaries": ["api boundary"],
+                                "risky_sinks": ["sql write path"],
+                                "auth_assumptions": ["session cookie is trusted"],
+                                "hot_paths": ["app/service.py"],
+                                "notes": ["watch org scoping"],
+                            }
+                        ]
+                    ),
+                ),
+                mock.patch("cli.resolve_repo_identity", return_value=identity),
+                mock.patch("swarm.resolve_repo_identity", return_value=identity),
+                mock.patch("builtins.input", side_effect=self._input_mock(["n", "y", "y", "n"], stdout)),
+                mock.patch("sys.stdout", stdout),
+                mock.patch.dict("os.environ", {"OPENAI_API_KEY": "token"}, clear=False),
+            ):
+                result = main(["swarm", "--config", str(checked_in_config)])
+
+            self.assertEqual(0, result)
+            output = stdout.getvalue()
+            self.assertIn("Tracked files discovered: 10", output)
+            self.assertIn("Eligible files discovered: 2", output)
+            self.assertIn("Eligible/tracked ratio: 20.00%", output)
+            self.assertNotIn("Continue despite narrow scope?", output)
+
+            run_json = json.loads(
+                ((runs_root(repo_dir) / "2026-04-06_121500") / "run.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertFalse(run_json["scope_diagnostics"]["warning_triggered"])
+
     def test_swarm_prints_live_worker_progress(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             repo_dir = Path(tmp_dir) / "repo"
@@ -1062,7 +1235,7 @@ class SwarmCliTests(unittest.TestCase):
                         },
                     ]
                 ),
-                ["n", "y", "y", "y"],
+                ["n", "y", "y", "y", "y"],
             )
 
             self.assertEqual(0, result)
@@ -1108,7 +1281,7 @@ class SwarmCliTests(unittest.TestCase):
                         },
                     ]
                 ),
-                ["n", "e", "focus on auth boundaries", "y", "y", "y"],
+                ["n", "e", "focus on auth boundaries", "y", "y", "y", "y"],
             )
 
             self.assertEqual(0, result)
@@ -1161,7 +1334,7 @@ class SwarmCliTests(unittest.TestCase):
                 repo_dir,
                 loaded,
                 first_provider,
-                ["n", "e", "focus on auth boundaries", "y", "y", "y"],
+                ["n", "e", "focus on auth boundaries", "y", "y", "y", "y"],
                 run_id="2026-04-06_121500",
             )
             self.assertEqual(0, first_result)
@@ -1170,7 +1343,7 @@ class SwarmCliTests(unittest.TestCase):
                 repo_dir,
                 loaded,
                 second_provider,
-                ["n", "y", "y", "y", "y"],
+                ["n", "y", "y", "y", "y", "y"],
                 run_id="2026-04-06_121600",
             )
 
@@ -1208,7 +1381,7 @@ class SwarmCliTests(unittest.TestCase):
                         }
                     ]
                 ),
-                ["n", "y", "y", "y"],
+                ["n", "y", "y", "y", "y"],
             )
 
             self.assertEqual(0, result)
@@ -1309,7 +1482,7 @@ class SwarmCliTests(unittest.TestCase):
                         },
                     ]
                 ),
-                ["n", "y", "y", "y"],
+                ["n", "y", "y", "y", "y"],
             )
 
             self.assertEqual(0, result)
@@ -1388,7 +1561,7 @@ class SwarmCliTests(unittest.TestCase):
                         }
                     ]
                 ),
-                ["n", "y", "y", "y"],
+                ["n", "y", "y", "y", "y"],
             )
 
             self.assertEqual(0, result)
@@ -1483,7 +1656,7 @@ class SwarmCliTests(unittest.TestCase):
                             },
                         ]
                     ),
-                    ["n", "y", "y", "y"],
+                    ["n", "y", "y", "y", "n"],
                 )
 
             self.assertEqual(0, result)

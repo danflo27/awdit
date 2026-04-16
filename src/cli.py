@@ -45,6 +45,7 @@ from swarm import (
     freeze_swarm_prompt_bundle,
     generate_danger_map,
     list_eligible_swarm_files,
+    list_repo_file_entries,
     load_danger_map_result,
     run_swarm_sweep,
     summarize_seed_request_volume,
@@ -59,6 +60,8 @@ from terminal_ui import (
 )
 
 DEFAULT_SWARM_BASE_REF = "main"
+SWARM_NARROW_SCOPE_RATIO_THRESHOLD = 0.20
+SWARM_SCOPE_SAMPLE_LIMIT = 5
 
 
 @dataclass(frozen=True)
@@ -87,6 +90,19 @@ class SwarmStartupSnapshot:
     prompt_bundle_manifest: Path
     shared_manifest: Path
     swarm_digest: Path
+    scope_diagnostics: SwarmScopeDiagnostics
+
+
+@dataclass(frozen=True)
+class SwarmScopeDiagnostics:
+    tracked_file_count: int
+    eligible_file_count: int
+    eligible_ratio: float
+    scope_include: tuple[str, ...]
+    scope_exclude: tuple[str, ...]
+    warning_triggered: bool
+    warning_reason: str | None
+    sampled_eligible_files: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -285,6 +301,7 @@ def _handle_swarm(args: argparse.Namespace) -> int:
             return 0
 
         eligible_files = list_eligible_swarm_files(cwd, current, base_ref=base_ref)
+        scope_diagnostics = _build_swarm_scope_diagnostics(cwd=cwd, loaded=current, eligible_files=eligible_files)
         snapshot = _persist_swarm_startup_snapshot(
             cwd=cwd,
             loaded=current,
@@ -293,6 +310,7 @@ def _handle_swarm(args: argparse.Namespace) -> int:
             shared_resources=shared_resources,
             danger_map_result=result,
             eligible_files=eligible_files,
+            scope_diagnostics=scope_diagnostics,
             base_ref=base_ref,
             prompt_bundle=prompt_bundle,
         )
@@ -332,6 +350,17 @@ def _handle_swarm(args: argparse.Namespace) -> int:
         )
         _print_line("Swarm finished without launching workers.")
         return 0
+
+    if snapshot.scope_diagnostics.warning_triggered:
+        if not _confirm("Continue despite narrow scope?", default=False, separated=True):
+            update_run_status(
+                cwd=cwd,
+                run_id=run_id,
+                status="canceled",
+                completed=True,
+            )
+            _print_section_heading("Swarm canceled before launch.")
+            return 0
 
     _print_section_heading("Swarm startup preflight is ready.")
     if not _confirm("Launch swarm?", default=True, separated=True):
@@ -572,6 +601,40 @@ def _review_swarm_shared_resources(
     )
 
 
+def _build_swarm_scope_diagnostics(
+    *,
+    cwd: Path,
+    loaded,
+    eligible_files: list[Path],
+) -> SwarmScopeDiagnostics:
+    tracked_file_count = len(list_repo_file_entries(cwd))
+    eligible_file_count = len(eligible_files)
+    eligible_ratio = eligible_file_count / tracked_file_count if tracked_file_count else 0.0
+    warning_reason: str | None = None
+    if (
+        loaded.effective.swarm is not None
+        and loaded.effective.swarm.eligible_file_profile == "code_config_tests"
+        and eligible_ratio < SWARM_NARROW_SCOPE_RATIO_THRESHOLD
+    ):
+        warning_reason = (
+            f"Eligible/tracked ratio {_format_swarm_ratio(eligible_ratio)} is below the "
+            f"{_format_swarm_ratio(SWARM_NARROW_SCOPE_RATIO_THRESHOLD)} narrow-scope threshold "
+            "for repo-wide swarm."
+        )
+    return SwarmScopeDiagnostics(
+        tracked_file_count=tracked_file_count,
+        eligible_file_count=eligible_file_count,
+        eligible_ratio=eligible_ratio,
+        scope_include=loaded.effective.scope.include,
+        scope_exclude=loaded.effective.scope.exclude,
+        warning_triggered=warning_reason is not None,
+        warning_reason=warning_reason,
+        sampled_eligible_files=tuple(
+            display_repo_path(cwd, path) for path in eligible_files[:SWARM_SCOPE_SAMPLE_LIMIT]
+        ),
+    )
+
+
 def _persist_swarm_startup_snapshot(
     *,
     cwd: Path,
@@ -581,6 +644,7 @@ def _persist_swarm_startup_snapshot(
     shared_resources: tuple[str, ...],
     danger_map_result,
     eligible_files: list[Path],
+    scope_diagnostics: SwarmScopeDiagnostics,
     base_ref: str | None,
     prompt_bundle,
 ) -> SwarmStartupSnapshot:
@@ -607,6 +671,7 @@ def _persist_swarm_startup_snapshot(
         danger_map_result=danger_map_result,
         shared_manifest=shared_manifest,
         eligible_files=eligible_files,
+        scope_diagnostics=scope_diagnostics,
         base_ref=base_ref,
     )
 
@@ -659,6 +724,16 @@ def _persist_swarm_startup_snapshot(
                 "derived_context": {
                     "swarm_digest": str(swarm_digest),
                 },
+                "scope_diagnostics": {
+                    "tracked_file_count": scope_diagnostics.tracked_file_count,
+                    "eligible_file_count": scope_diagnostics.eligible_file_count,
+                    "eligible_ratio": scope_diagnostics.eligible_ratio,
+                    "scope_include": list(scope_diagnostics.scope_include),
+                    "scope_exclude": list(scope_diagnostics.scope_exclude),
+                    "warning_triggered": scope_diagnostics.warning_triggered,
+                    "warning_reason": scope_diagnostics.warning_reason,
+                    "sampled_eligible_files": list(scope_diagnostics.sampled_eligible_files),
+                },
                 "eligible_files": [display_repo_path(cwd, path) for path in eligible_files],
             },
             indent=2,
@@ -675,6 +750,7 @@ def _persist_swarm_startup_snapshot(
         prompt_bundle_manifest=prompt_bundle.manifest_path,
         shared_manifest=shared_manifest,
         swarm_digest=swarm_digest,
+        scope_diagnostics=scope_diagnostics,
     )
 
 
@@ -685,6 +761,7 @@ def _write_swarm_digest(
     danger_map_result,
     shared_manifest: Path,
     eligible_files: list[Path],
+    scope_diagnostics: SwarmScopeDiagnostics,
     base_ref: str | None,
 ) -> None:
     lines = [
@@ -693,10 +770,29 @@ def _write_swarm_digest(
         f"- Repo key: `{danger_map_result.identity.repo_key}`",
         f"- Danger map: `{danger_map_result.danger_map_md}`",
         f"- Shared manifest: `{shared_manifest}`",
-        f"- Eligible file count: `{len(eligible_files)}`",
+        f"- Tracked file count: `{scope_diagnostics.tracked_file_count}`",
+        f"- Eligible file count: `{scope_diagnostics.eligible_file_count}`",
         "",
-        "## Trust boundaries",
+        "## Scope diagnostics",
+        f"- Eligible/tracked ratio: `{_format_swarm_ratio(scope_diagnostics.eligible_ratio)}`",
+        f"- Scope include globs: {_render_swarm_glob_list(scope_diagnostics.scope_include)}",
+        f"- Scope exclude globs: {_render_swarm_glob_list(scope_diagnostics.scope_exclude)}",
+        f"- Narrow-scope warning: `{'yes' if scope_diagnostics.warning_triggered else 'no'}`",
     ]
+    if scope_diagnostics.warning_reason:
+        lines.append(f"- Warning reason: {scope_diagnostics.warning_reason}")
+    lines.append("- Sample eligible files:")
+    if scope_diagnostics.sampled_eligible_files:
+        for item in scope_diagnostics.sampled_eligible_files:
+            lines.append(f"  - `{item}`")
+    else:
+        lines.append("  - (none)")
+    lines.extend(
+        [
+            "",
+        "## Trust boundaries",
+        ]
+    )
     for item in danger_map_result.payload.get("trust_boundaries") or ["(none)"]:
         lines.append(f"- {item}")
     lines.extend(["", "## Risky sinks"])
@@ -768,7 +864,19 @@ def _print_swarm_preflight(
     _print_line(f"    File handling mode: {_render_swarm_file_mode(loaded.effective.swarm.eligible_file_profile)}")
     if base_ref is not None:
         _print_line(f"    Base ref: {base_ref}")
-    _print_line(f"    Eligible files discovered: {len(eligible_files)}")
+    _print_line(f"    Tracked files discovered: {snapshot.scope_diagnostics.tracked_file_count}")
+    _print_line(f"    Eligible files discovered: {snapshot.scope_diagnostics.eligible_file_count}")
+    _print_line(f"    Eligible/tracked ratio: {_format_swarm_ratio(snapshot.scope_diagnostics.eligible_ratio)}")
+    _print_line(f"    Scope include globs: {_render_swarm_glob_list(snapshot.scope_diagnostics.scope_include)}")
+    _print_line(f"    Scope exclude globs: {_render_swarm_glob_list(snapshot.scope_diagnostics.scope_exclude)}")
+    _print_line("    Sample eligible files:")
+    if snapshot.scope_diagnostics.sampled_eligible_files:
+        for item in snapshot.scope_diagnostics.sampled_eligible_files:
+            _print_line(f"      - {item}")
+    else:
+        _print_line("      - (none)")
+    if snapshot.scope_diagnostics.warning_reason:
+        _print_line(f"    Warning: {snapshot.scope_diagnostics.warning_reason}")
     _print_line("    Seed input mode: compact metadata + paged read_file")
     _print_line("    Proof stage: read-only validation")
     _print_line("    Final report style: proof-filtered findings, grouped duplicates")
@@ -1658,3 +1766,11 @@ def _print_resource_section(
     _print_section_heading(title)
     _print_resource_items(items, cwd)
     _print_note_block(note_lines)
+
+
+def _format_swarm_ratio(value: float) -> str:
+    return f"{value:.2%}"
+
+
+def _render_swarm_glob_list(globs: tuple[str, ...]) -> str:
+    return ", ".join(globs) or "(none)"

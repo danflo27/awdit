@@ -25,6 +25,11 @@ The user experience should stay quiet and minimal:
 
 Swarm mode is a deliberate exception to the normal visible-slot pipeline. It exists for deep background-style repo-wide offensive auditing, not as the primary face of the product.
 
+The checked-in `config/config.toml` is intended to be the generic default for
+local foreign repos and future CI use. It should stay repo-agnostic by default,
+with repo-local overrides narrowing scope, resources, or validation only when a
+specific target repo needs them.
+
 ## Official Transcript
 
 Pretend repo: `~/src/tiny-notes-api`
@@ -68,11 +73,11 @@ awdit>   n. Regenerate it without extra guidance
 awdit> Accept / edit / regenerate? [Y/e/n]
 user> y
 
-awdit> Shared resources available for this run:
+awdit> Shared resources selected for this run:
 awdit>   Everything under `config/resources/shared/` is included by default.
 awdit>   Repo config usually only needs `[resources.shared] exclude = [...]`.
 awdit>   Use `[resources.shared] include = [...]` only for explicit URLs or out-of-tree paths.
-awdit>   1. `config/resources/shared/http-threat-notes.md`
+awdit>   (none)
 awdit> Use / edit / exit? [Y/e/n]
 user> y
 [* write runs/2026-04-05_174212/resources/shared/manifest.md *]
@@ -86,7 +91,17 @@ user> y
 awdit> Swarm preflight
 awdit>   Mode: repo-wide black-hat sweep
 awdit>   File handling mode: code + config + tests
+awdit>   Tracked files discovered: 6
 awdit>   Eligible files discovered: 6
+awdit>   Eligible/tracked ratio: 100.00%
+awdit>   Scope include globs: (none)
+awdit>   Scope exclude globs: **/__pycache__/**, **/*.egg-info/**, .venv/**, venv/**, .env, .env.*
+awdit>   Sample eligible files:
+awdit>     - src/app.py
+awdit>     - src/auth.py
+awdit>     - src/routes/notes.py
+awdit>     - src/db.py
+awdit>     - tests/test_notes.py
 awdit>   Token budget: 120000
 awdit>   Sweep model: gpt-5.4-mini
 awdit>   Proof model: gpt-5.4
@@ -334,8 +349,8 @@ base_url = "https://api.openai.com/v1"
 allowed_models = ["gpt-5.4", "gpt-5.4-mini"]
 
 [scope]
-include = ["src/**", "tests/**", "config/**"]
-exclude = ["docs/**", ".env", "config/resources/**"]
+include = []
+exclude = ["**/__pycache__/**", "**/*.egg-info/**", ".venv/**", "venv/**", ".env", ".env.*"]
 
 [repo_memory]
 enabled = true
@@ -344,7 +359,7 @@ confirm_refresh_on_startup = true
 auto_update_on_completion = true
 
 [resources.shared]
-include = ["docs/architecture.md"]
+include = []
 exclude = []
 
 # Review-only path

@@ -1367,6 +1367,26 @@ class SwarmTests(unittest.TestCase):
                 eligible,
             )
 
+    def test_code_config_tests_mode_honors_explicit_scope_globs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_dir = Path(tmp_dir) / "repo"
+            _write(repo_dir / "app" / "service.py", "print('service')\n")
+            _write(repo_dir / "lib" / "helper.py", "print('helper')\n")
+            _write(repo_dir / "tests" / "test_service.py", "def test_ok():\n    assert True\n")
+            loaded = self._loaded_config_from_text(
+                repo_dir,
+                _config_text().replace('include = ["app/**", "tests/**"]', 'include = ["lib/**"]', 1),
+            )
+
+            eligible = list_eligible_swarm_files(repo_dir, loaded)
+
+            self.assertEqual(
+                [
+                    (repo_dir / "lib" / "helper.py").resolve(),
+                ],
+                eligible,
+            )
+
     def test_repo_tools_can_ignore_scope_filters_but_still_block_runtime_managed_paths(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             repo_dir = Path(tmp_dir) / "repo"

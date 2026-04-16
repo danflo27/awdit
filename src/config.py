@@ -718,8 +718,8 @@ def _normalize_and_validate(
 
     validation_raw = _require_table(raw, ("validation",))
     checks_raw = validation_raw.get("checks")
-    if not isinstance(checks_raw, list) or not checks_raw:
-        raise ConfigError("validation.checks must be a non-empty list.")
+    if not isinstance(checks_raw, list):
+        raise ConfigError("validation.checks must be a list.")
     checks: list[ValidationCheck] = []
     for index, item in enumerate(checks_raw):
         if not isinstance(item, dict):
@@ -1251,7 +1251,10 @@ def render_config_scaffold() -> str:
             # Repo-scoped awdit config scaffold.
             # This file is intentionally verbose and self-documenting.
             # Optional sections say when they may be omitted and list every accepted value nearby.
-            # Recommended path: keep the safe swarm preset and only override grouped swarm sections you truly need.
+            # The checked-in default is intentionally repo-agnostic so it can be reused for
+            # local foreign repos and future CI runs.
+            # Recommended path: keep the safe swarm preset and only override grouped sections
+            # you truly need.
 
             active_provider = "openai"
 
@@ -1261,30 +1264,23 @@ def render_config_scaffold() -> str:
             allowed_models = ["gpt-5.4", "gpt-5.4-mini"]
 
             [scope]
-            include = [
-              "src/**",
-              "tests/**",
-              "config/prompts/**",
-              "config/config.toml",
-              "config/config.toml.example",
-              "pyproject.toml",
-              "uv.lock",
-              ".gitignore",
-            ]
+            include = []
             exclude = [
-              "src/__pycache__/**",
-              "tests/__pycache__/**",
-              "src/*.egg-info/**",
-              "config/resources/**",
-              "docs/**",
+              "**/__pycache__/**",
+              "**/*.egg-info/**",
+              ".venv/**",
+              "venv/**",
               ".env",
-              ".env.example",
+              ".env.*",
             ]
 
-            [[validation.checks]]
-            name = "pytest"
-            command = "pytest -q"
-            timeout_seconds = 600
+            # Optional.
+            # Add [[validation.checks]] blocks only for repo-specific commands you want awdit to run.
+            # Example:
+            # [[validation.checks]]
+            # name = "pytest"
+            # command = "pytest -q"
+            # timeout_seconds = 600
 
             [repo_memory]
             enabled = true
@@ -1293,15 +1289,12 @@ def render_config_scaffold() -> str:
             auto_update_on_completion = true
 
             # Optional.
-            # config/resources/shared/ is auto-included by discovery unless excluded here.
+            # config/resources/shared/ is auto-included by discovery when present unless excluded here.
             # Options:
-            #   - include: explicit URLs or out-of-tree paths only
+            #   - include: explicit URLs or out-of-tree paths only; keep this empty in generic configs
             #   - exclude: glob patterns relative to config/resources/shared/
             [resources.shared]
-            include = [
-              "../docs/architecture.md",
-              "../docs/agent-isolation-workflow.md",
-            ]
+            include = []
             exclude = []
 
             # Optional per-slot resource overrides.

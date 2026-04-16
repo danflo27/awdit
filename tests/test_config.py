@@ -15,6 +15,7 @@ from config import (
     default_slot_resources_path,
     discover_resource_files,
     load_effective_config,
+    render_config_scaffold,
     resolve_resource_section_items,
     save_repo_overrides,
 )
@@ -130,6 +131,42 @@ def _user_config_text() -> str:
 
 
 class ConfigTests(unittest.TestCase):
+    def test_checked_in_repo_config_is_generic_and_loadable(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        config_path = repo_root / "config" / "config.toml"
+
+        loaded = load_effective_config(
+            cwd=repo_root,
+            config_path=config_path,
+            env={"OPENAI_API_KEY": "token"},
+        )
+
+        self.assertEqual((), loaded.effective.scope.include)
+        self.assertEqual(
+            (
+                "**/__pycache__/**",
+                "**/*.egg-info/**",
+                ".venv/**",
+                "venv/**",
+                ".env",
+                ".env.*",
+            ),
+            loaded.effective.scope.exclude,
+        )
+        self.assertEqual((), loaded.effective.resources.shared.include)
+        self.assertEqual((), loaded.effective.validation_checks)
+
+    def test_rendered_scaffold_uses_generic_defaults(self) -> None:
+        scaffold = render_config_scaffold()
+
+        self.assertIn("[scope]", scaffold)
+        self.assertIn("include = []", scaffold)
+        self.assertIn('exclude = [\n  "**/__pycache__/**"', scaffold)
+        self.assertIn("# [[validation.checks]]", scaffold)
+        self.assertNotIn("\n[[validation.checks]]\n", scaffold)
+        self.assertIn("[resources.shared]", scaffold)
+        self.assertIn("include = []", scaffold)
+
     def test_repo_config_loads_declared_values(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)

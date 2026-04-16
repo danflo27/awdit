@@ -52,14 +52,14 @@ The implementation should add a CI-safe `awdit swarm` mode, use a trusted bundle
   - report file paths
 - [ ] Keep existing markdown reports unchanged.
 
-### 5. Bundle a trusted CI config for foreign repos
+### 5. Use the generic checked-in config for foreign repos and CI
 
-- [ ] Add a bundled CI config and prompt set inside `awdit`.
-- [ ] Configure it to use `OPENAI_API_KEY`.
+- [ ] Keep `config/config.toml` repo-agnostic by default.
+- [ ] Configure the CI path to use `OPENAI_API_KEY`.
 - [ ] Disable any approval-style or human-in-the-loop startup behavior for CI.
 - [ ] Avoid repo-specific shared resource assumptions.
 - [ ] Disable repo memory or make it fully non-blocking in CI.
-- [ ] Make the reusable workflow always use this trusted config.
+- [ ] Make the reusable workflow use the checked-in generic config by default.
 
 ### 6. Add a reusable GitHub Actions workflow
 
