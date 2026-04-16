@@ -5,11 +5,17 @@ import os
 from dataclasses import dataclass
 from typing import Any, Callable, Iterable
 
-from openai import NOT_GIVEN, OpenAI
+import httpx
+from openai import APIConnectionError, APITimeoutError, NOT_GIVEN, OpenAI
 
 
 ToolExecutor = Callable[[str, dict[str, Any]], str]
 ProviderEventCallback = Callable[[str, dict[str, Any]], None]
+
+
+DEFAULT_BACKGROUND_REQUEST_TIMEOUT_SECONDS = 30.0
+DEFAULT_BACKGROUND_CONNECT_TIMEOUT_SECONDS = 5.0
+DEFAULT_BACKGROUND_POLL_TRANSIENT_ERROR_LIMIT = 3
 
 
 @dataclass(frozen=True)
@@ -63,6 +69,12 @@ class OpenAIResponsesProvider:
         client: OpenAI | None = None,
     ) -> None:
         self._client = client or OpenAI(base_url=base_url, api_key=api_key)
+        self._background_request_timeout = httpx.Timeout(
+            timeout=DEFAULT_BACKGROUND_REQUEST_TIMEOUT_SECONDS,
+            connect=DEFAULT_BACKGROUND_CONNECT_TIMEOUT_SECONDS,
+        )
+        self._background_poll_transient_error_limit = DEFAULT_BACKGROUND_POLL_TRANSIENT_ERROR_LIMIT
+        self._background_poll_transient_errors: dict[str, int] = {}
 
     @classmethod
     def from_loaded_config(cls, loaded) -> OpenAIResponsesProvider:
@@ -201,8 +213,11 @@ class OpenAIResponsesProvider:
             tools=list(tools),
             background=True,
             store=True,
+            timeout=self._background_request_timeout,
         )
-        return ProviderBackgroundHandle(response_id=getattr(response, "id", ""))
+        response_id = getattr(response, "id", "")
+        self._background_poll_transient_errors.pop(response_id, None)
+        return ProviderBackgroundHandle(response_id=response_id)
 
     def continue_background_turn(
         self,
@@ -221,8 +236,12 @@ class OpenAIResponsesProvider:
             tools=list(tools),
             background=True,
             store=True,
+            timeout=self._background_request_timeout,
         )
-        return ProviderBackgroundHandle(response_id=getattr(response, "id", previous_response_id))
+        self._background_poll_transient_errors.pop(previous_response_id, None)
+        response_id = getattr(response, "id", previous_response_id)
+        self._background_poll_transient_errors.pop(response_id, None)
+        return ProviderBackgroundHandle(response_id=response_id)
 
     def poll_background_turn(
         self,
@@ -234,7 +253,27 @@ class OpenAIResponsesProvider:
         text_format: dict[str, Any] | None = None,
         event_callback: ProviderEventCallback | None = None,
     ) -> BackgroundPollResult:
-        response = self._client.responses.retrieve(handle.response_id)
+        try:
+            response = self._client.responses.retrieve(
+                handle.response_id,
+                timeout=self._background_request_timeout,
+            )
+        except Exception as exc:
+            if not self._is_retryable_background_poll_error(exc):
+                raise
+            transient_errors = self._background_poll_transient_errors.get(handle.response_id, 0) + 1
+            self._background_poll_transient_errors[handle.response_id] = transient_errors
+            if transient_errors <= self._background_poll_transient_error_limit:
+                return BackgroundPollResult(
+                    status="running",
+                    response_id=handle.response_id,
+                    final_text="",
+                    tool_traces=(),
+                    failure_message=self.classify_provider_failure(exc),
+                )
+            raise
+
+        self._background_poll_transient_errors.pop(handle.response_id, None)
         failure_message = self.classify_provider_failure(response)
         if failure_message is not None:
             self._emit_usage_event(
@@ -318,7 +357,11 @@ class OpenAIResponsesProvider:
         )
 
     def cancel_background_turn(self, handle: ProviderBackgroundHandle) -> str:
-        response = self._client.responses.cancel(handle.response_id)
+        response = self._client.responses.cancel(
+            handle.response_id,
+            timeout=self._background_request_timeout,
+        )
+        self._background_poll_transient_errors.pop(handle.response_id, None)
         return str(getattr(response, "status", "unknown"))
 
     def classify_provider_failure(self, value: Any) -> str | None:
@@ -511,3 +554,14 @@ class OpenAIResponsesProvider:
             return int(value)
         except (TypeError, ValueError):
             return None
+
+    def _is_retryable_background_poll_error(self, exc: Exception) -> bool:
+        return isinstance(
+            exc,
+            (
+                APITimeoutError,
+                APIConnectionError,
+                httpx.TimeoutException,
+                httpx.TransportError,
+            ),
+        )

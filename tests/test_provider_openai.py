@@ -4,6 +4,9 @@ import unittest
 from types import SimpleNamespace
 from unittest import mock
 
+import httpx
+from openai import APITimeoutError
+
 from provider_openai import OpenAIResponsesProvider, ProviderBackgroundHandle
 
 
@@ -35,6 +38,7 @@ class FakeResponses:
         self.create_calls = []
         self.retrieve_calls = []
         self.cancel_calls = []
+        self.cancel_call_kwargs = []
         self._stream_manager = None
         self._retrieve_results = []
         self._create_results = []
@@ -47,12 +51,16 @@ class FakeResponses:
         self.create_calls.append(kwargs)
         return self._create_results.pop(0)
 
-    def retrieve(self, response_id):
-        self.retrieve_calls.append(response_id)
-        return self._retrieve_results.pop(0)
+    def retrieve(self, response_id, **kwargs):
+        self.retrieve_calls.append({"response_id": response_id, **kwargs})
+        result = self._retrieve_results.pop(0)
+        if isinstance(result, BaseException):
+            raise result
+        return result
 
-    def cancel(self, response_id):
+    def cancel(self, response_id, **kwargs):
         self.cancel_calls.append(response_id)
+        self.cancel_call_kwargs.append(kwargs)
         return SimpleNamespace(status="cancelled")
 
 
@@ -164,9 +172,75 @@ class ProviderTests(unittest.TestCase):
 
         self.assertEqual("bg_1", handle.response_id)
         self.assertEqual({"effort": "low"}, responses.create_calls[0]["reasoning"])
+        self.assertEqual(30.0, responses.create_calls[0]["timeout"].read)
+        self.assertEqual(30.0, responses.retrieve_calls[0]["timeout"].read)
         self.assertEqual("running", poll_one.status)
         self.assertEqual("completed", poll_two.status)
         self.assertEqual("done", poll_two.final_text)
+
+    def test_background_poll_treats_transient_timeout_as_running_for_existing_handle(self) -> None:
+        responses = FakeResponses()
+        request = httpx.Request("GET", "https://api.openai.com/v1/responses/bg_timeout")
+        responses._retrieve_results = [
+            APITimeoutError(request=request),
+            SimpleNamespace(id="bg_timeout", status="completed", error=None, output=[], output_text="done"),
+        ]
+        provider = OpenAIResponsesProvider(
+            base_url="https://api.openai.com/v1",
+            api_key="token",
+            client=FakeClient(responses),
+        )
+
+        poll_one = provider.poll_background_turn(
+            handle=ProviderBackgroundHandle(response_id="bg_timeout"),
+            model="gpt-5.4-mini",
+            tools=[],
+            tool_executor=lambda name, args: "",
+        )
+        poll_two = provider.poll_background_turn(
+            handle=ProviderBackgroundHandle(response_id=poll_one.response_id),
+            model="gpt-5.4-mini",
+            tools=[],
+            tool_executor=lambda name, args: "",
+        )
+
+        self.assertEqual("running", poll_one.status)
+        self.assertIn("APITimeoutError", poll_one.failure_message or "")
+        self.assertEqual("completed", poll_two.status)
+        self.assertEqual("done", poll_two.final_text)
+        self.assertEqual(30.0, responses.retrieve_calls[0]["timeout"].read)
+
+    def test_background_poll_raises_after_repeated_transient_timeouts(self) -> None:
+        responses = FakeResponses()
+        request = httpx.Request("GET", "https://api.openai.com/v1/responses/bg_timeout")
+        responses._retrieve_results = [
+            APITimeoutError(request=request),
+            APITimeoutError(request=request),
+            APITimeoutError(request=request),
+            APITimeoutError(request=request),
+        ]
+        provider = OpenAIResponsesProvider(
+            base_url="https://api.openai.com/v1",
+            api_key="token",
+            client=FakeClient(responses),
+        )
+
+        for _ in range(3):
+            poll_result = provider.poll_background_turn(
+                handle=ProviderBackgroundHandle(response_id="bg_timeout"),
+                model="gpt-5.4-mini",
+                tools=[],
+                tool_executor=lambda name, args: "",
+            )
+            self.assertEqual("running", poll_result.status)
+
+        with self.assertRaises(APITimeoutError):
+            provider.poll_background_turn(
+                handle=ProviderBackgroundHandle(response_id="bg_timeout"),
+                model="gpt-5.4-mini",
+                tools=[],
+                tool_executor=lambda name, args: "",
+            )
 
     def test_background_start_passes_prompt_cache_key_and_text_format(self) -> None:
         responses = FakeResponses()
@@ -206,6 +280,7 @@ class ProviderTests(unittest.TestCase):
 
         self.assertEqual("cancelled", status)
         self.assertEqual(["bg_123"], responses.cancel_calls)
+        self.assertEqual(30.0, responses.cancel_call_kwargs[0]["timeout"].read)
 
     def test_background_usage_event_waits_for_terminal_poll(self) -> None:
         responses = FakeResponses()
