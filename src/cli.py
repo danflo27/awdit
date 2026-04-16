@@ -50,6 +50,13 @@ from swarm import (
     summarize_seed_request_volume,
     SwarmWorkerFailure,
 )
+from terminal_ui import (
+    ModerateSpacingArgumentParser,
+    print_line,
+    print_lines,
+    print_section,
+    prompt_input,
+)
 
 
 @dataclass(frozen=True)
@@ -88,8 +95,8 @@ class ResourceItemInfo:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="awdit")
-    subparsers = parser.add_subparsers(dest="command")
+    parser = ModerateSpacingArgumentParser(prog="awdit")
+    subparsers = parser.add_subparsers(dest="command", parser_class=ModerateSpacingArgumentParser)
 
     review_parser = subparsers.add_parser(
         "review",
@@ -133,7 +140,7 @@ def _handle_review(_: argparse.Namespace) -> int:
     try:
         loaded = load_effective_config(cwd=cwd)
     except ConfigError as exc:
-        print(f"Config error: {exc}")
+        _print_line(f"Config error: {exc}")
         return 1
 
     current, config_patch = _run_config_override_menu(loaded)
@@ -148,52 +155,47 @@ def _handle_review(_: argparse.Namespace) -> int:
     effective_resources = _build_effective_resource_defaults(current, cwd)
     shared_resources = _review_shared_resources(effective_resources.shared, cwd)
     if shared_resources is None:
-        print("Review canceled before launch.")
+        _print_section_heading("Review canceled before launch.")
         return 0
 
     slot_resources = effective_resources.slots
-    if _confirm("Review slot-specific resources before launch?", default=False):
+    if _confirm("Review slot-specific resources before launch?", default=False, separated=True):
         reviewed_slots = _review_slot_resources(slot_resources, cwd)
         if reviewed_slots is None:
-            print("Review canceled before launch.")
+            _print_section_heading("Review canceled before launch.")
             return 0
         slot_resources = reviewed_slots
 
     final_resources = RuntimeResources(shared=shared_resources, slots=slot_resources)
     snapshot = _persist_run_resource_snapshot(cwd, current, final_resources)
 
-    print("")
-    print("Final effective config")
+    _print_section_heading("Final effective config")
     _print_summary(current)
-    _print_run_resource_summary(cwd, final_resources)
-    print("")
-    print("Run-scoped resource snapshot")
-    print(f"- Run id: {snapshot.run_id}")
-    print(f"- Run metadata: {snapshot.run_json}")
-    print(f"- Prompt snapshots: {snapshot.prompts_dir}")
-    print(f"- Shared resource manifest: {snapshot.shared_manifest}")
+    _print_section_heading("Run-scoped resource snapshot")
+    _print_line(f"- Run id: {snapshot.run_id}")
+    _print_line(f"- Run metadata: {snapshot.run_json}")
+    _print_line(f"- Prompt snapshots: {snapshot.prompts_dir}")
+    _print_line(f"- Shared resource manifest: {snapshot.shared_manifest}")
     for slot_name in SLOT_NAMES:
         manifest = snapshot.slot_manifests.get(slot_name)
         if manifest is None:
             continue
         label = slot_name.replace("_", " ").title()
-        print(f"- {label} resource manifest: {manifest}")
-    print(f"- Resource summary: {snapshot.summary_path}")
+        _print_line(f"- {label} resource manifest: {manifest}")
+    _print_line(f"- Resource summary: {snapshot.summary_path}")
+    _print_run_resource_summary(cwd, final_resources)
 
     if config_patch:
-        print("")
-        print(
+        _print_section_heading(
             f"Note: config-backed changes were not saved. Update {current.config_path} "
             "manually if you want to keep them."
         )
 
-    print("")
-    if _confirm("Enter one-slot runtime prototype mode?", default=False):
+    if _confirm("Enter one-slot runtime prototype mode?", default=False, separated=True):
         return _run_one_slot_runtime(cwd, current, snapshot)
 
-    print("")
-    print("Startup resource review complete.")
-    print("Full audit pipeline beyond startup resource staging is not implemented yet.")
+    _print_section_heading("Startup resource review complete.")
+    _print_line("Full audit pipeline beyond startup resource staging is not implemented yet.")
     return 0
 
 
@@ -202,15 +204,15 @@ def _handle_init_config(args: argparse.Namespace) -> int:
     config_dir = cwd / "config"
     config_path = config_dir / "config.toml"
     if config_path.exists() and not args.force:
-        print(
+        _print_line(
             f"Refusing to overwrite existing config at {config_path}. "
             "Re-run with --force if you want to replace it."
         )
         return 1
     config_dir.mkdir(parents=True, exist_ok=True)
     config_path.write_text(render_config_scaffold(), encoding="utf-8")
-    print(f"Wrote grouped config scaffold: {config_path}")
-    print("Review the inline comments, then adjust scope, resources, prompts, and swarm overrides as needed.")
+    _print_section_heading(f"Wrote grouped config scaffold: {config_path}")
+    _print_line("Review the inline comments, then adjust scope, resources, prompts, and swarm overrides as needed.")
     return 0
 
 
@@ -220,14 +222,14 @@ def _handle_swarm(_: argparse.Namespace) -> int:
     try:
         loaded = load_effective_config(cwd=cwd)
     except ConfigError as exc:
-        print(f"Config error: {exc}")
+        _print_line(f"Config error: {exc}")
         return 1
 
     if loaded.effective.swarm is None:
-        print("Config error: missing required [swarm] config block.")
+        _print_line("Config error: missing required [swarm] config block.")
         return 1
 
-    print("Starting new swarm run...")
+    _print_section_heading("Starting new swarm run...")
     run_id, run_dir = _allocate_run_dir(cwd)
     provider = OpenAIResponsesProvider.from_loaded_config(loaded)
     identity = resolve_repo_identity(cwd)
@@ -262,7 +264,7 @@ def _handle_swarm(_: argparse.Namespace) -> int:
                 status="canceled",
                 completed=True,
             )
-            print("Swarm canceled before launch.")
+            _print_section_heading("Swarm canceled before launch.")
             return 0
 
         eligible_files = list_eligible_swarm_files(cwd, current)
@@ -293,25 +295,24 @@ def _handle_swarm(_: argparse.Namespace) -> int:
             completed=True,
         )
         _record_swarm_failure_state(cwd=cwd, run_id=run_id, diagnostic_path=diagnostic_path, exc=exc)
-        print(f"Swarm startup failed: {exc}")
-        print(f"Failure diagnostics: {diagnostic_path}")
+        _print_section_heading(f"Swarm startup failed: {exc}")
+        _print_line(f"Failure diagnostics: {diagnostic_path}")
         return 1
 
-    print("")
-    print("Swarm startup preflight is ready.")
-    if not _confirm("Launch swarm?", default=True):
+    _print_section_heading("Swarm startup preflight is ready.")
+    if not _confirm("Launch swarm?", default=True, separated=True):
         update_run_status(
             cwd=cwd,
             run_id=run_id,
             status="canceled",
             completed=True,
         )
-        print("Swarm canceled before launch.")
+        _print_section_heading("Swarm canceled before launch.")
         return 0
 
     try:
-        print("Launching swarm batch...")
-        print(f"Sweep stage started: {len(eligible_files)} file workers queued.")
+        _print_section_heading("Launching swarm batch...")
+        _print_section_heading(f"Sweep stage started: {len(eligible_files)} file workers queued.")
         sweep_result = run_swarm_sweep(
             cwd=cwd,
             loaded=current,
@@ -338,28 +339,26 @@ def _handle_swarm(_: argparse.Namespace) -> int:
             completed=True,
         )
         _record_swarm_failure_state(cwd=cwd, run_id=run_id, diagnostic_path=diagnostic_path, exc=exc)
-        print(f"Swarm execution failed: {exc}")
-        print(f"Failure diagnostics: {diagnostic_path}")
+        _print_section_heading(f"Swarm execution failed: {exc}")
+        _print_line(f"Failure diagnostics: {diagnostic_path}")
         return 1
 
-    print("")
-    print("Swarm complete.")
-    print("")
-    print("Final artifacts")
-    print("  Ranked findings:")
-    print(f"    {sweep_result.final_ranked_findings}")
-    print("  Seed ledger:")
-    print(f"    {sweep_result.seed_ledger}")
-    print("  Duplicate and case groups:")
-    print(f"    {sweep_result.case_groups}")
-    print("  Proof artifacts:")
-    print(f"    {sweep_result.proofs_dir}")
-    print("  Usage summary:")
-    print(f"    {sweep_result.usage_summary}")
-    print("  Tool trace log:")
-    print(f"    {sweep_result.tool_trace_log}")
-    print("  Shared resource manifest:")
-    print(f"    {snapshot.shared_manifest}")
+    _print_section_heading("Swarm complete.")
+    _print_section_heading("Final artifacts")
+    _print_line("  Ranked findings:")
+    _print_line(f"    {sweep_result.final_ranked_findings}")
+    _print_line("  Seed ledger:")
+    _print_line(f"    {sweep_result.seed_ledger}")
+    _print_line("  Duplicate and case groups:")
+    _print_line(f"    {sweep_result.case_groups}")
+    _print_line("  Proof artifacts:")
+    _print_line(f"    {sweep_result.proofs_dir}")
+    _print_line("  Usage summary:")
+    _print_line(f"    {sweep_result.usage_summary}")
+    _print_line("  Tool trace log:")
+    _print_line(f"    {sweep_result.tool_trace_log}")
+    _print_line("  Shared resource manifest:")
+    _print_line(f"    {snapshot.shared_manifest}")
     return 0
 
 
@@ -430,24 +429,23 @@ def _prepare_swarm_danger_map(
 ):
     identity = resolve_repo_identity(cwd)
     migrate_legacy_repo_memory_dir(cwd, identity)
-    print(f"Repository detected: `{identity.repo_name}`")
+    _print_line(f"Repository detected: `{identity.repo_name}`")
 
     result = load_danger_map_result(cwd, repo_key)
     if result is None:
-        print("No repo danger map exists for this repository yet.")
-        print("Swarm mode requires a repo danger map before launch.")
+        _print_line("No repo danger map exists for this repository yet.")
+        _print_line("Swarm mode requires a repo danger map before launch.")
         result = _generate_swarm_danger_map(
             cwd=cwd,
             loaded=loaded,
             provider=provider,
             prompt_bundle=prompt_bundle,
         )
-        print("")
-        print("Repo danger map ready:")
-        print(f"  {result.danger_map_md}")
+        _print_section_heading("Repo danger map ready:")
+        _print_line(f"  {result.danger_map_md}")
     else:
-        print("Existing repo danger map found:")
-        print(f"  {result.danger_map_md}")
+        _print_section_heading("Existing repo danger map found:")
+        _print_line(f"  {result.danger_map_md}")
         if loaded.effective.repo_memory.confirm_refresh_on_startup and _confirm(
             "Refresh repo danger map before swarm startup?",
             default=True,
@@ -458,23 +456,25 @@ def _prepare_swarm_danger_map(
                 provider=provider,
                 prompt_bundle=prompt_bundle,
             )
-            print("")
-            print("Updated repo danger map ready:")
-            print(f"  {result.danger_map_md}")
+            _print_section_heading("Updated repo danger map ready:")
+            _print_line(f"  {result.danger_map_md}")
 
     guidance_notes: tuple[str, ...] = ()
     while True:
-        print("Review the map, then choose:")
-        print("  y. Accept it and continue")
-        print("  e. Enter corrections or guidance, then regenerate it")
-        print("  n. Regenerate it without extra guidance")
-        choice = input("Accept / edit / regenerate? [Y/e/n] ").strip().lower()
+        _print_section_heading("Review the map, then choose:")
+        _print_lines(
+            [
+                "  y. Accept it and continue",
+                "  e. Enter corrections or guidance, then regenerate it",
+                "  n. Regenerate it without extra guidance",
+            ]
+        )
+        choice = _prompt("Accept / edit / regenerate? [Y/e/n] ", separated=True).strip().lower()
         if choice in {"", "y", "yes"}:
             return result
         if choice == "e":
-            print("")
-            print("Enter corrections or guidance for danger-map regeneration:")
-            guidance = input("> ").strip()
+            _print_section_heading("Enter corrections or guidance for danger-map regeneration:")
+            guidance = _prompt("> ").strip()
             if guidance:
                 append_repo_guidance(result.repo_comments_md, guidance)
                 guidance_notes = (*guidance_notes, guidance)
@@ -485,9 +485,8 @@ def _prepare_swarm_danger_map(
                 prompt_bundle=prompt_bundle,
                 guidance_notes=guidance_notes,
             )
-            print("")
-            print("Updated repo danger map ready:")
-            print(f"  {result.danger_map_md}")
+            _print_section_heading("Updated repo danger map ready:")
+            _print_line(f"  {result.danger_map_md}")
             continue
         if choice == "n":
             result = _generate_swarm_danger_map(
@@ -496,11 +495,10 @@ def _prepare_swarm_danger_map(
                 provider=provider,
                 prompt_bundle=prompt_bundle,
             )
-            print("")
-            print("Updated repo danger map ready:")
-            print(f"  {result.danger_map_md}")
+            _print_section_heading("Updated repo danger map ready:")
+            _print_line(f"  {result.danger_map_md}")
             continue
-        print("Invalid choice. Use y, e, or n.")
+        _print_section_heading("Invalid choice. Use y, e, or n.")
 
 
 def _generate_swarm_danger_map(
@@ -511,7 +509,7 @@ def _generate_swarm_danger_map(
     prompt_bundle,
     guidance_notes: tuple[str, ...] = (),
 ):
-    print("Generating repo danger map...")
+    _print_section_heading("Generating repo danger map...")
     return generate_danger_map(
         cwd=cwd,
         loaded=loaded,
@@ -700,31 +698,30 @@ def _print_swarm_preflight(cwd: Path, loaded, snapshot, danger_map_result, promp
         shared_manifest_path=snapshot.shared_manifest,
         eligible_files=eligible_files,
     )
-    print("")
-    print("Swarm preflight")
-    print("  Execution")
-    print(f"    Preset: {loaded.effective.swarm.preset}")
-    print(f"    Sweep model: {loaded.effective.swarm.sweep_model}")
-    print(f"    Proof model: {loaded.effective.swarm.proof_model}")
-    print(f"    Seed parallelism: {loaded.effective.swarm.seed_max_parallel}")
-    print(f"    Proof parallelism: {loaded.effective.swarm.proof_max_parallel}")
-    print(f"    Rate-limit retries: {loaded.effective.swarm.rate_limit_max_retries}")
-    print("")
-    print("  Context")
-    print(
+    _print_section_heading("Swarm preflight")
+    _print_line("  Execution")
+    _print_line(f"    Preset: {loaded.effective.swarm.preset}")
+    _print_line(f"    Sweep model: {loaded.effective.swarm.sweep_model}")
+    _print_line(f"    Proof model: {loaded.effective.swarm.proof_model}")
+    _print_line(f"    Seed parallelism: {loaded.effective.swarm.seed_max_parallel}")
+    _print_line(f"    Proof parallelism: {loaded.effective.swarm.proof_max_parallel}")
+    _print_line(f"    Rate-limit retries: {loaded.effective.swarm.rate_limit_max_retries}")
+    _print_line("")
+    _print_line("  Context")
+    _print_line(
         "    File profile: "
         f"{loaded.effective.swarm.eligible_file_profile.replace('_', ' ')}"
     )
-    print(f"    Eligible files discovered: {len(eligible_files)}")
-    print("    Seed input mode: compact metadata + paged read_file")
-    print("    Proof stage: read-only validation")
-    print("    Final report style: proof-filtered findings, grouped duplicates")
-    print("")
-    print("  Safety")
-    print(f"    Budget mode: {loaded.effective.swarm.budget_mode}")
-    print(f"    Token budget: {loaded.effective.swarm.token_budget}")
-    print(f"    Estimated peak seed request tokens: {seed_volume.peak_parallel_estimated_tokens}")
-    print(
+    _print_line(f"    Eligible files discovered: {len(eligible_files)}")
+    _print_line("    Seed input mode: compact metadata + paged read_file")
+    _print_line("    Proof stage: read-only validation")
+    _print_line("    Final report style: proof-filtered findings, grouped duplicates")
+    _print_line("")
+    _print_line("  Safety")
+    _print_line(f"    Budget mode: {loaded.effective.swarm.budget_mode}")
+    _print_line(f"    Token budget: {loaded.effective.swarm.token_budget}")
+    _print_line(f"    Estimated peak seed request tokens: {seed_volume.peak_parallel_estimated_tokens}")
+    _print_line(
         "    Largest seed request: "
         f"{seed_volume.max_job_target_file or '(n/a)'} (~{seed_volume.max_job_estimated_tokens} tokens)"
     )
@@ -732,14 +729,14 @@ def _print_swarm_preflight(cwd: Path, loaded, snapshot, danger_map_result, promp
         loaded.effective.swarm.budget_mode == "advisory"
         and seed_volume.peak_parallel_estimated_tokens > loaded.effective.swarm.token_budget
     ):
-        print("    Warning: peak seed estimate exceeds the configured advisory budget.")
-    print("")
-    print("  Artifacts")
-    print(f"    Repo danger map: {danger_map_result.danger_map_md}")
-    print(f"    Shared resource manifest: {snapshot.shared_manifest}")
-    print(f"    Swarm digest: {snapshot.swarm_digest}")
-    print(f"    Prompt bundle manifest: {snapshot.prompt_bundle_manifest}")
-    print(f"    Tool trace log: {snapshot.run_dir / 'swarm' / 'tool_trace.jsonl'}")
+        _print_line("    Warning: peak seed estimate exceeds the configured advisory budget.")
+    _print_line("")
+    _print_line("  Artifacts")
+    _print_line(f"    Repo danger map: {danger_map_result.danger_map_md}")
+    _print_line(f"    Shared resource manifest: {snapshot.shared_manifest}")
+    _print_line(f"    Swarm digest: {snapshot.swarm_digest}")
+    _print_line(f"    Prompt bundle manifest: {snapshot.prompt_bundle_manifest}")
+    _print_line(f"    Tool trace log: {snapshot.run_dir / 'swarm' / 'tool_trace.jsonl'}")
 
 
 def _print_swarm_progress(event_type: str, data: dict[str, Any]) -> None:
@@ -752,7 +749,7 @@ def _print_swarm_progress(event_type: str, data: dict[str, Any]) -> None:
         if stage_name == "seed":
             return
         worker_count = _coerce_progress_int(data.get("worker_count"))
-        print(
+        _print_section_heading(
             f"{_swarm_stage_title(stage_name)} stage started: "
             f"{worker_count} {_swarm_worker_noun(stage_name, worker_count)} queued.",
             flush=True,
@@ -763,7 +760,7 @@ def _print_swarm_progress(event_type: str, data: dict[str, Any]) -> None:
         if stage_name == "seed":
             return
         completed_workers = _coerce_progress_int(data.get("completed_workers"))
-        print(
+        _print_section_heading(
             f"{_swarm_stage_title(stage_name)} stage complete: "
             f"{completed_workers} {_swarm_worker_noun(stage_name, completed_workers)} finished.",
             flush=True,
@@ -771,12 +768,12 @@ def _print_swarm_progress(event_type: str, data: dict[str, Any]) -> None:
         return
 
     if event_type == "worker_started":
-        print(f"[* {stage_name} worker {worker_id} started: {action} *]", flush=True)
+        _print_line(f"[* {stage_name} worker {worker_id} started: {action} *]", flush=True)
         return
 
     if event_type == "worker_tool_call_requested":
         summary = str(data.get("summary", "") or "").strip() or f"using {data.get('tool_name', 'a tool')}"
-        print(
+        _print_line(
             f"[* {stage_name} worker {worker_id} is {summary} *]",
             flush=True,
         )
@@ -787,19 +784,19 @@ def _print_swarm_progress(event_type: str, data: dict[str, Any]) -> None:
         continuation = bool(data.get("continuation"))
         wait_target = f"continuing {label}" if continuation else f"starting {label}"
         if isinstance(delay_seconds, (int, float)):
-            print(
+            _print_line(
                 f"[* {stage_name} worker {worker_id} is waiting {float(delay_seconds):.2f}s for a safe TPM window before {wait_target} *]",
                 flush=True,
             )
             return
-        print(
+        _print_line(
             f"[* {stage_name} worker {worker_id} is waiting for a safe TPM window before {wait_target} *]",
             flush=True,
         )
         return
 
     if event_type == "worker_degraded":
-        print(
+        _print_line(
             f"[* {stage_name} worker {worker_id} is trimming shared context before retrying {label} safely *]",
             flush=True,
         )
@@ -809,13 +806,13 @@ def _print_swarm_progress(event_type: str, data: dict[str, Any]) -> None:
         reason = str(data.get("reason", "") or "").strip()
         delay_seconds = data.get("delay_seconds")
         if reason == "rate_limit" and isinstance(delay_seconds, (int, float)):
-            print(
+            _print_line(
                 f"[* {stage_name} worker {worker_id} retrying {label} after rate limit "
                 f"({float(delay_seconds):.2f}s cooldown) *]",
                 flush=True,
             )
             return
-        print(f"[* {stage_name} worker {worker_id} retrying {label} after {reason or 'failure'} *]", flush=True)
+        _print_line(f"[* {stage_name} worker {worker_id} retrying {label} after {reason or 'failure'} *]", flush=True)
         return
 
     if event_type == "worker_completed":
@@ -823,18 +820,18 @@ def _print_swarm_progress(event_type: str, data: dict[str, Any]) -> None:
         elapsed_suffix = ""
         if isinstance(elapsed_seconds, (int, float)):
             elapsed_suffix = f" ({float(elapsed_seconds):.2f}s)"
-        print(f"[* {stage_name} worker {worker_id} completed: {label}{elapsed_suffix} *]", flush=True)
+        _print_line(f"[* {stage_name} worker {worker_id} completed: {label}{elapsed_suffix} *]", flush=True)
         return
 
     if event_type == "worker_failed":
         failure_message = str(data.get("failure_message", "") or "").strip()
         if failure_message:
-            print(
+            _print_line(
                 f"[* {stage_name} worker {worker_id} failed: {label} ({failure_message}) *]",
                 flush=True,
             )
             return
-        print(f"[* {stage_name} worker {worker_id} failed: {label} *]", flush=True)
+        _print_line(f"[* {stage_name} worker {worker_id} failed: {label} *]", flush=True)
 
 
 def _swarm_stage_title(stage_name: str) -> str:
@@ -865,35 +862,35 @@ def _handle_list_models(_: argparse.Namespace) -> int:
     try:
         loaded = load_effective_config(cwd=cwd)
     except ConfigError as exc:
-        print(f"Config error: {exc}")
+        _print_line(f"Config error: {exc}")
         return 1
 
     provider_name = loaded.effective.active_provider
     if provider_name != "openai":
-        print(f"Provider {provider_name!r} does not support live model listing yet.")
+        _print_line(f"Provider {provider_name!r} does not support live model listing yet.")
         return 1
 
     try:
         provider = OpenAIResponsesProvider.from_loaded_config(loaded)
         model_ids = provider.list_model_ids()
     except Exception as exc:
-        print(f"Failed to fetch models: {exc}")
+        _print_line(f"Failed to fetch models: {exc}")
         return 1
 
-    print(f"Available {provider_name} models for this account:")
+    _print_section_heading(f"Available {provider_name} models for this account:")
     if not model_ids:
-        print("- (none returned)")
+        _print_line("- (none returned)")
         return 0
     for model_id in model_ids:
-        print(f"- {model_id}")
+        _print_line(f"- {model_id}")
     return 0
 
 
 def _run_one_slot_runtime(cwd: Path, loaded, snapshot: RunResourceSnapshot) -> int:
     transcript_path = _prototype_transcript_path(snapshot)
     with _prototype_transcript_capture(transcript_path):
-        print("Prototype runtime setup")
-        print(f"Prototype transcript: {transcript_path}")
+        _print_section_heading("Prototype runtime setup")
+        _print_line(f"Prototype transcript: {transcript_path}")
         runtime = OneSlotRuntime(
             cwd=cwd,
             loaded=loaded,
@@ -911,20 +908,22 @@ def _run_config_override_menu(loaded):
     if not _confirm("Adjust config-backed settings before resource review?", default=False):
         return current, config_patch
 
-    print("")
-    print("Override mode: change operational settings and type 'done' at any menu point to stop.")
-    print("Prompt files, providers, storage paths, and merge rules must be changed in config files.")
+    _print_section_heading("Override mode: change operational settings and type 'done' at any menu point to stop.")
+    _print_line("Prompt files, providers, storage paths, and merge rules must be changed in config files.")
 
     while True:
-        print("")
-        print("Override menu")
-        print("  1. Slot models")
-        print("  2. Scope include globs")
-        print("  3. Scope exclude globs")
-        print("  4. Validation checks")
-        print("  5. Show current summary")
-        print("  6. Done")
-        choice = input("> ").strip().lower()
+        _print_section_heading("Override menu")
+        _print_lines(
+            [
+                "  1. Slot models",
+                "  2. Scope include globs",
+                "  3. Scope exclude globs",
+                "  4. Validation checks",
+                "  5. Show current summary",
+                "  6. Done",
+            ]
+        )
+        choice = _prompt("> ").strip().lower()
         if choice in {"6", "done", "d"}:
             break
         if choice == "1":
@@ -954,7 +953,7 @@ def _run_config_override_menu(loaded):
         if choice == "5":
             _print_summary(current)
             continue
-        print("Invalid choice. Pick 1-6 or type 'done'.")
+        _print_section_heading("Invalid choice. Pick 1-6 or type 'done'.")
 
     return current, config_patch
 
@@ -965,20 +964,19 @@ def _edit_slot_models(loaded) -> dict[str, object]:
     for slot_name in SLOT_NAMES:
         current_value = loaded.effective.slots[slot_name].default_model
         label = slot_name.replace("_", " ").title()
-        print("")
-        print(f"{label} model (current: {current_value})")
+        _print_section_heading(f"{label} model (current: {current_value})")
         for index, model in enumerate(provider.allowed_models, start=1):
-            print(f"  {index}. {model}")
-        raw = input("Select number or press Enter to keep current: ").strip()
+            _print_line(f"  {index}. {model}")
+        raw = _prompt("Select number or press Enter to keep current: ").strip()
         if not raw:
             continue
         try:
             choice = int(raw)
         except ValueError:
-            print("Invalid choice, keeping current.")
+            _print_section_heading("Invalid choice, keeping current.")
             continue
         if choice < 1 or choice > len(provider.allowed_models):
-            print("Invalid choice, keeping current.")
+            _print_section_heading("Invalid choice, keeping current.")
             continue
         patch["slots"][slot_name] = {"default_model": provider.allowed_models[choice - 1]}
     if not patch["slots"]:
@@ -988,9 +986,8 @@ def _edit_slot_models(loaded) -> dict[str, object]:
 
 def _edit_scope_list(loaded, *, key: str) -> dict[str, object]:
     current_items = getattr(loaded.effective.scope, key)
-    print("")
-    print(f"Current {key} globs: {', '.join(current_items) or '(none)'}")
-    raw = input(
+    _print_section_heading(f"Current {key} globs: {', '.join(current_items) or '(none)'}")
+    raw = _prompt(
         f"Enter comma-separated {key} globs, '-' to clear, or press Enter to keep current: "
     ).strip()
     if not raw:
@@ -1004,25 +1001,24 @@ def _edit_scope_list(loaded, *, key: str) -> dict[str, object]:
 
 
 def _edit_validation_checks() -> dict[str, object]:
-    print("")
-    print("Replace validation checks. Leave the check name blank when you are done.")
+    _print_section_heading("Replace validation checks. Leave the check name blank when you are done.")
     checks: list[dict[str, object]] = []
     while True:
-        name = input("Check name: ").strip()
+        name = _prompt("Check name: ").strip()
         if not name:
             break
-        command = input("Command: ").strip()
-        timeout_raw = input("Timeout seconds: ").strip()
+        command = _prompt("Command: ").strip()
+        timeout_raw = _prompt("Timeout seconds: ").strip()
         if not command or not timeout_raw:
-            print("Check skipped because command or timeout was blank.")
+            _print_section_heading("Check skipped because command or timeout was blank.")
             continue
         try:
             timeout_seconds = int(timeout_raw)
         except ValueError:
-            print("Timeout must be an integer. Check skipped.")
+            _print_section_heading("Timeout must be an integer. Check skipped.")
             continue
         if timeout_seconds <= 0:
-            print("Timeout must be positive. Check skipped.")
+            _print_section_heading("Timeout must be positive. Check skipped.")
             continue
         checks.append(
             {
@@ -1032,7 +1028,7 @@ def _edit_validation_checks() -> dict[str, object]:
             }
         )
     if not checks:
-        print("No validation changes captured.")
+        _print_section_heading("No validation changes captured.")
         return {}
     return {"validation": {"checks": checks}}
 
@@ -1114,26 +1110,25 @@ def _review_slot_resources(
 ) -> dict[str, tuple[str, ...]] | None:
     reviewed = {slot_name: tuple(items) for slot_name, items in current_items.items()}
     while True:
-        print("")
-        print("Slot-specific resources")
+        _print_section_heading("Slot-specific resources")
         for index, slot_name in enumerate(SLOT_NAMES, start=1):
             label = slot_name.replace("_", " ").title()
             count = len(reviewed[slot_name])
             summary = f"{count} resource{'s' if count != 1 else ''}"
-            print(f"  {index}. {label}: {summary}")
-        print(f"  {len(SLOT_NAMES) + 1}. Done")
-        raw = input("> ").strip()
+            _print_line(f"  {index}. {label}: {summary}")
+        _print_line(f"  {len(SLOT_NAMES) + 1}. Done")
+        raw = _prompt("> ").strip()
         if not raw:
             continue
         try:
             choice = int(raw)
         except ValueError:
-            print("Invalid choice.")
+            _print_section_heading("Invalid choice.")
             continue
         if choice == len(SLOT_NAMES) + 1:
             return reviewed
         if choice < 1 or choice > len(SLOT_NAMES):
-            print("Invalid choice.")
+            _print_section_heading("Invalid choice.")
             continue
         slot_name = SLOT_NAMES[choice - 1]
         label = slot_name.replace("_", " ").title()
@@ -1167,29 +1162,27 @@ def _review_resource_list(
 ) -> tuple[str, ...] | None:
     while True:
         _print_resource_section(title, current_items, cwd=cwd, note_lines=note_lines)
-        raw = input(prompt).strip().lower()
+        raw = _prompt(prompt, separated=True).strip().lower()
         if raw in {"", "y", "yes"}:
             missing = _missing_local_resources(current_items)
             if missing:
-                print("")
-                print("Cannot continue with missing local resources:")
+                _print_section_heading("Cannot continue with missing local resources:")
                 for item in missing:
-                    print(f"  - `{_display_resource_item(item.resolved, cwd)}`")
-                print("Edit the list or exit.")
+                    _print_line(f"  - `{_display_resource_item(item.resolved, cwd)}`")
+                _print_line("Edit the list or exit.")
                 continue
             return current_items
         if raw == "e":
-            print("")
-            print(edit_help)
-            edited = input(edit_prompt).strip()
+            _print_section_heading(edit_help)
+            edited = _prompt(edit_prompt, separated=True).strip()
             try:
                 return _parse_exact_resource_list(edited, cwd)
             except ValueError as exc:
-                print(f"Invalid resource list: {exc}")
+                _print_section_heading(f"Invalid resource list: {exc}")
                 continue
         if raw in {"n", "no"}:
             return None
-        print("Invalid choice. Use y, e, or n.")
+        _print_section_heading("Invalid choice. Use y, e, or n.")
 
 
 def _parse_exact_resource_list(raw: str, cwd: Path) -> tuple[str, ...]:
@@ -1390,7 +1383,7 @@ def _print_summary(loaded) -> None:
     _print_section_heading("Effective config summary")
     rows = summarize_config(loaded)
     if not rows:
-        print("(none)")
+        _print_line("(none)")
     else:
         label_width = max(len(label) for label, _, _ in rows)
         for label, value, source in rows:
@@ -1402,7 +1395,7 @@ def _print_summary(loaded) -> None:
                 subsequent_indent=" " * len(prefix),
             )
             for line in wrapped:
-                print(line)
+                _print_line(line)
     _print_note_block(
         [
             "Resource folders under config/resources/shared/ and config/resources/slots/<slot> are included automatically by default unless repo config excludes them.",
@@ -1411,10 +1404,11 @@ def _print_summary(loaded) -> None:
 
 
 def _print_run_resource_summary(cwd: Path, resources: RuntimeResources) -> None:
-    print("- Shared resources for this run:")
+    _print_section_heading("Resources selected for this run")
+    _print_line("- Shared resources for this run:")
     _print_resource_items(resources.shared, cwd)
     slot_count = sum(1 for items in resources.slots.values() if items)
-    print(f"- Slot-specific resource sets with items: {slot_count}")
+    _print_line(f"- Slot-specific resource sets with items: {slot_count}")
 
 
 def _display_resource_item(item: str, cwd: Path) -> str:
@@ -1559,32 +1553,43 @@ def _prototype_transcript_capture(path: Path):
         transcript_writer.close()
 
 
-def _confirm(prompt: str, *, default: bool) -> bool:
+def _print_line(line: str = "", *, flush: bool = False) -> None:
+    print_line(line, flush=flush)
+
+
+def _print_lines(lines: list[str] | tuple[str, ...], *, flush: bool = False) -> None:
+    print_lines(lines, flush=flush)
+
+
+def _print_section_heading(title: str, *, flush: bool = False) -> None:
+    print_section(title, flush=flush)
+
+
+def _prompt(prompt: str, *, separated: bool = False) -> str:
+    return prompt_input(prompt, separated=separated)
+
+
+def _confirm(prompt: str, *, default: bool, separated: bool = False) -> bool:
     suffix = "[Y/n]" if default else "[y/N]"
-    raw = input(f"{prompt} {suffix} ").strip().lower()
+    raw = _prompt(f"{prompt} {suffix} ", separated=separated).strip().lower()
     if not raw:
         return default
     return raw in {"y", "yes"}
 
 
-def _print_section_heading(title: str) -> None:
-    print("")
-    print(title)
-
-
 def _print_note_block(lines: list[str]) -> None:
-    print("Note for user:")
+    _print_section_heading("Note for user:")
     for line in lines:
         for wrapped in textwrap.wrap(line, width=88):
-            print(f"  {wrapped}")
+            _print_line(f"  {wrapped}")
 
 
 def _print_resource_items(items: tuple[str, ...], cwd: Path) -> None:
     if not items:
-        print("  (none)")
+        _print_line("  (none)")
         return
     for index, item in enumerate(_classify_resource_items(items), start=1):
-        print(f"  {index}. `{_display_resource_item(item.resolved, cwd)}` [{item.kind}]")
+        _print_line(f"  {index}. `{_display_resource_item(item.resolved, cwd)}` [{item.kind}]")
 
 
 def _print_resource_section(

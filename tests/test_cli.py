@@ -135,6 +135,36 @@ class BackgroundSequenceProvider:
         return None
 
 
+def _assert_no_triple_newlines(testcase: unittest.TestCase, text: str) -> None:
+    testcase.assertNotIn("\n\n\n", text)
+
+
+class HelpFormattingTests(unittest.TestCase):
+    def _capture_help(self, argv: list[str]) -> str:
+        stdout = io.StringIO()
+        with mock.patch("sys.stdout", stdout):
+            with self.assertRaises(SystemExit) as exc_info:
+                main(argv)
+        self.assertEqual(0, exc_info.exception.code)
+        return stdout.getvalue()
+
+    def test_root_help_uses_moderate_spacing(self) -> None:
+        output = self._capture_help(["--help"])
+
+        self.assertIn(
+            "usage: awdit [-h] {review,swarm,init-config,list-models} ...\n\npositional arguments:",
+            output,
+        )
+        self.assertIn("\n\noptions:\n", output)
+        _assert_no_triple_newlines(self, output)
+
+    def test_swarm_help_uses_moderate_spacing(self) -> None:
+        output = self._capture_help(["swarm", "--help"])
+
+        self.assertIn("usage: awdit swarm [-h]\n\noptions:\n", output)
+        _assert_no_triple_newlines(self, output)
+
+
 class ReviewCliTests(unittest.TestCase):
     def _input_mock(self, inputs: list[str], stdout: io.StringIO):
         remaining = list(inputs)
@@ -215,6 +245,22 @@ class ReviewCliTests(unittest.TestCase):
             self.assertIn("Run-scoped resource snapshot", output)
             self.assertIn("Enter one-slot runtime prototype mode?", output)
             self.assertLess(output.index("Run-scoped resource snapshot"), output.index("Enter one-slot runtime prototype mode?"))
+
+    def test_review_output_uses_moderate_spacing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_dir = Path(tmp_dir) / "repo"
+            _write(repo_dir / "config" / "resources" / "shared" / "refund-boundaries.md", "shared")
+            loaded = self._loaded_config(repo_dir)
+
+            result, output = self._run_review(repo_dir, loaded, ["n", "y", "n"])
+
+            self.assertEqual(0, result)
+            self.assertIn("Resource defaults\n\nNote for user:", output)
+            self.assertIn("Final effective config\n\nEffective config summary", output)
+            self.assertIn("Run-scoped resource snapshot\n- Run id:", output)
+            self.assertIn("Resource summary:", output)
+            self.assertIn("\n\nResources selected for this run\n- Shared resources for this run:", output)
+            _assert_no_triple_newlines(self, output)
 
     def test_review_can_enter_runtime_and_run_foreground_dispatch(self) -> None:
         class FakeProvider:
@@ -358,6 +404,7 @@ class ReviewCliTests(unittest.TestCase):
             transcript = transcript_path.read_text(encoding="utf-8")
             self.assertIn("streamed reply", transcript)
             self.assertIn("Foreground dispatch dispatch_", transcript)
+            _assert_no_triple_newlines(self, transcript)
 
     def test_review_can_run_background_dispatch_and_keep_status_available(self) -> None:
         class FakeBackgroundProvider:
@@ -431,6 +478,7 @@ class ReviewCliTests(unittest.TestCase):
             self.assertIn("Runtime status", stdout.getvalue())
             self.assertIn("Recent events", stdout.getvalue())
             self.assertIn("dispatch-bg", stdout.getvalue())
+            _assert_no_triple_newlines(self, stdout.getvalue())
 
     def test_list_models_prints_available_openai_models(self) -> None:
         class FakeProvider:
@@ -787,12 +835,19 @@ class SwarmCliTests(unittest.TestCase):
             self.assertEqual(0, result)
             self.assertIn("[* seed worker SEED-001 started: inspect app/service.py *]", output)
             self.assertIn("[* seed worker SEED-001 completed: app/service.py (", output)
+            self.assertIn("Launching swarm batch...\n\nSweep stage started: 1 file workers queued.", output)
             self.assertIn("Proof stage started: 1 issue worker queued.", output)
+            self.assertIn(
+                "Proof stage started: 1 issue worker queued.\n[* proof worker SWM-001 started: validate promoted finding for app/service.py *]",
+                output,
+            )
             self.assertIn(
                 "[* proof worker SWM-001 started: validate promoted finding for app/service.py *]",
                 output,
             )
             self.assertIn("[* proof worker SWM-001 completed: app/service.py (", output)
+            self.assertIn("Swarm complete.\n\nFinal artifacts", output)
+            _assert_no_triple_newlines(self, output)
 
     def test_swarm_edit_regenerates_danger_map_and_appends_guidance(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

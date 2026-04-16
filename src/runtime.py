@@ -17,6 +17,7 @@ from provider_openai import (
     ProviderTurnResult,
     ToolTraceRecord,
 )
+from terminal_ui import print_line, print_lines, print_section, prompt_input, write_fragment
 
 
 def _timestamp() -> str:
@@ -204,13 +205,16 @@ class OneSlotRuntime:
         self._write_status_snapshot()
 
     def interactive_loop(self) -> int:
-        print("")
-        print("One-slot runtime prototype mode")
-        print("- Slot: Hunter 1")
-        print("- Dispatch commands: dispatch-fg, dispatch-bg")
-        print("Type 'help' for commands.")
+        print_section("One-slot runtime prototype mode")
+        print_lines(
+            [
+                "- Slot: Hunter 1",
+                "- Dispatch commands: dispatch-fg, dispatch-bg",
+                "Type 'help' for commands.",
+            ]
+        )
         while True:
-            raw = input("runtime> ").strip().lower()
+            raw = prompt_input("runtime> ").strip().lower()
             if raw == "dispatch-fg":
                 self._interactive_dispatch(mode="foreground")
                 continue
@@ -227,20 +231,20 @@ class OneSlotRuntime:
                 self._print_artifacts()
                 continue
             if raw == "compact":
-                print(self.request_compaction())
+                print_section(self.request_compaction())
                 continue
             if raw == "help":
                 self._print_help()
                 continue
             if raw == "quit":
                 allowed, message = self.request_shutdown()
-                print(message)
+                print_section(message)
                 if allowed:
                     return 0
                 continue
             if not raw:
                 continue
-            print("Unknown command. Type 'help' for commands.")
+            print_section("Unknown command. Type 'help' for commands.")
 
     def submit_dispatch(
         self,
@@ -414,76 +418,79 @@ class OneSlotRuntime:
         return [str(path) for path in sorted(self.artifacts_root.iterdir())]
 
     def _interactive_dispatch(self, *, mode: str) -> None:
-        print("")
         work_label = self._generated_work_label(mode=mode)
         work_key = self._generated_work_key(mode=mode)
-        print("Dispatch summary")
-        print(f"- mode: {mode}")
-        print(f"- label: {work_label}")
-        print(f"- key: {work_key}")
+        print_section("Dispatch summary")
+        print_lines(
+            [
+                f"- mode: {mode}",
+                f"- label: {work_label}",
+                f"- key: {work_key}",
+            ]
+        )
 
         accepted, message, dispatch_id = self.submit_dispatch(
             work_label=work_label,
             work_key=work_key,
             mode=mode,
         )
-        print(message)
+        print_section(message)
         if not accepted or dispatch_id is None:
             return
         if mode == "foreground":
             self._foreground_dispatch_id = dispatch_id
             self._foreground_stream_open = False
-            print(f"Foreground dispatch {dispatch_id} progress:")
-            print("- queued; waiting for worker and provider events...")
+            print_section(f"Foreground dispatch {dispatch_id} progress:")
+            print_line("- queued; waiting for worker and provider events...")
             record = self.wait_for_dispatch(dispatch_id, timeout_seconds=60.0)
             if self._foreground_stream_open:
-                print("")
+                print_line("")
             self._foreground_dispatch_id = None
             self._foreground_stream_open = False
-            print(f"Foreground dispatch {dispatch_id} finished with status={record.status}.")
+            print_section(f"Foreground dispatch {dispatch_id} finished with status={record.status}.")
 
     def _print_status(self) -> None:
         snapshot_path = self._write_status_snapshot()
-        print("")
-        print("Runtime status")
+        print_section("Runtime status")
         for key, value in self.latest_status().items():
-            print(f"- {key}: {value}")
-        print(f"- snapshot: {snapshot_path}")
+            print_line(f"- {key}: {value}")
+        print_line(f"- snapshot: {snapshot_path}")
 
     def _print_events(self) -> None:
-        print("")
-        print("Recent events")
+        print_section("Recent events")
         events = self.recent_events(limit=20)
         if not events:
-            print("- (none)")
+            print_line("- (none)")
             return
         for event in events:
-            print(
+            print_line(
                 f"- {event['timestamp']} {event['event_type']} "
                 f"(epoch={event['epoch_id']} dispatch={event['dispatch_id']}): {event['message']}"
             )
 
     def _print_artifacts(self) -> None:
-        print("")
-        print("Artifacts")
+        print_section("Artifacts")
         artifact_paths = self.list_artifact_paths()
         if not artifact_paths:
-            print("- (none)")
+            print_line("- (none)")
             return
         for path in artifact_paths:
-            print(f"- {path}")
+            print_line(f"- {path}")
 
     def _print_help(self) -> None:
-        print("")
-        print("Commands")
-        print("- dispatch-fg: launch Hunter 1 in foreground mode")
-        print("- dispatch-bg: launch Hunter 1 in background mode")
-        print("- status: show current runtime state and write a status snapshot")
-        print("- events: show recent lifecycle events")
-        print("- artifacts: list runtime artifact directories")
-        print("- compact: compact immediately if idle, or defer until current work completes")
-        print("- help: show this help")
-        print("- quit: exit only when the runtime is idle")
+        print_section("Commands")
+        print_lines(
+            [
+                "- dispatch-fg: launch Hunter 1 in foreground mode",
+                "- dispatch-bg: launch Hunter 1 in background mode",
+                "- status: show current runtime state and write a status snapshot",
+                "- events: show recent lifecycle events",
+                "- artifacts: list runtime artifact directories",
+                "- compact: compact immediately if idle, or defer until current work completes",
+                "- help: show this help",
+                "- quit: exit only when the runtime is idle",
+            ]
+        )
 
     def _start_worker_if_needed_locked(self) -> None:
         if self._worker_thread is not None:
@@ -725,7 +732,7 @@ class OneSlotRuntime:
     ) -> None:
         if event_type == "output_delta" and dispatch_id == self._foreground_dispatch_id:
             delta = data.get("delta", "")
-            print(delta, end="", flush=True)
+            write_fragment(delta, flush=True)
             self._foreground_stream_open = True
             return
         if event_type == "background_poll":
@@ -1042,7 +1049,7 @@ class OneSlotRuntime:
                 detail += f" [{', '.join(tool_names)}]"
             if response_id:
                 detail += f" response={response_id}"
-            print(f"[progress] {event.timestamp} provider requested {detail}")
+            print_line(f"[progress] {event.timestamp} provider requested {detail}")
             return
 
         if event.event_type == "provider_usage":
@@ -1051,16 +1058,14 @@ class OneSlotRuntime:
             output_tokens = self._coerce_nonnegative_int(event.data.get("output_tokens"))
             total_tokens = self._coerce_nonnegative_int(event.data.get("total_tokens"))
             cached_tokens = self._coerce_nonnegative_int(event.data.get("cached_input_tokens"))
-            print(
+            print_line(
                 "[progress] "
                 f"{event.timestamp} usage response={response_id or 'n/a'} "
                 f"in={input_tokens} out={output_tokens} total={total_tokens} cached_in={cached_tokens}"
             )
             return
 
-        print(
-            f"[progress] {event.timestamp} {event.event_type}: {event.message}"
-        )
+        print_line(f"[progress] {event.timestamp} {event.event_type}: {event.message}")
 
     def _write_status_snapshot(self) -> Path:
         snapshot_path = self.snapshots_dir / f"{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}.json"
