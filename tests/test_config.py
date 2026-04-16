@@ -470,6 +470,68 @@ class ConfigTests(unittest.TestCase):
 
             self.assertEqual("shell-token", loaded.resolved_env["OPENAI_API_KEY"])
 
+    def test_explicit_env_file_overrides_repo_dotenv(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            repo_dir = root / "repo"
+            config_path = repo_dir / "config" / "config.toml"
+            env_file_path = root / "external-config" / ".env"
+
+            _write_prompt_tree(repo_dir / "config")
+            _write(config_path, _user_config_text())
+            _write(default_repo_env_path(repo_dir), "OPENAI_API_KEY=repo-token")
+            _write(env_file_path, "OPENAI_API_KEY=env-file-token")
+
+            loaded = load_effective_config(
+                cwd=repo_dir,
+                config_path=config_path,
+                env_file_path=env_file_path,
+                env={},
+            )
+
+            self.assertEqual("env-file-token", loaded.resolved_env["OPENAI_API_KEY"])
+
+    def test_explicit_env_overrides_explicit_env_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            repo_dir = root / "repo"
+            config_path = repo_dir / "config" / "config.toml"
+            env_file_path = root / "external-config" / ".env"
+
+            _write_prompt_tree(repo_dir / "config")
+            _write(config_path, _user_config_text())
+            _write(default_repo_env_path(repo_dir), "OPENAI_API_KEY=repo-token")
+            _write(env_file_path, "OPENAI_API_KEY=env-file-token")
+
+            loaded = load_effective_config(
+                cwd=repo_dir,
+                config_path=config_path,
+                env_file_path=env_file_path,
+                env={"OPENAI_API_KEY": "shell-token"},
+            )
+
+            self.assertEqual("shell-token", loaded.resolved_env["OPENAI_API_KEY"])
+
+    def test_missing_explicit_env_file_raises(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            repo_dir = root / "repo"
+            config_path = repo_dir / "config" / "config.toml"
+            env_file_path = root / "external-config" / ".env"
+
+            _write_prompt_tree(repo_dir / "config")
+            _write(config_path, _user_config_text())
+
+            with self.assertRaises(ConfigError) as ctx:
+                load_effective_config(
+                    cwd=repo_dir,
+                    config_path=config_path,
+                    env_file_path=env_file_path,
+                    env={},
+                )
+
+            self.assertIn(f"Missing env file at {env_file_path.resolve()}", str(ctx.exception))
+
     def test_missing_repo_config_raises(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)

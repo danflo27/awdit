@@ -6,6 +6,11 @@ Build a reusable GitHub Actions workflow that runs `awdit swarm` against the exa
 
 The implementation should add a CI-safe `awdit swarm` mode, use a trusted bundled CI config instead of repo-controlled config, and expose machine-readable outputs so the workflow does not need to scrape markdown.
 
+Current local guidance: cross-repo operators can pass `--env-file PATH` when provider
+credentials should come from outside the analyzed repo. The reusable workflow should not rely
+on checked-in `.env` files and should continue to inject `OPENAI_API_KEY` through GitHub
+Actions `secrets` and `env`.
+
 ## TODO
 
 ### 1. Add a CI-safe swarm CLI path

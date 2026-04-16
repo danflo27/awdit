@@ -161,10 +161,8 @@ class HelpFormattingTests(unittest.TestCase):
     def test_swarm_help_uses_moderate_spacing(self) -> None:
         output = self._capture_help(["swarm", "--help"])
 
-        self.assertIn(
-            "usage: awdit swarm [-h] [--config CONFIG] [--base-ref BASE_REF]\n\noptions:\n",
-            output,
-        )
+        self.assertIn("usage: awdit swarm [-h] [--config CONFIG] [--env-file ENV_FILE]", output)
+        self.assertIn("[--base-ref BASE_REF]\n\noptions:\n", output)
         _assert_no_triple_newlines(self, output)
 
 
@@ -1021,6 +1019,65 @@ class SwarmCliTests(unittest.TestCase):
             run_json = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
 
             self.assertIn("foreign-reference.md", shared_manifest)
+            self.assertEqual(str(config_path.resolve()), run_json["config_path"])
+
+    def test_swarm_can_load_external_env_file_for_foreign_repo(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            repo_dir = root / "target-repo"
+            external_dir = root / "external-config"
+            config_path = external_dir / "swarm.toml"
+            env_file_path = external_dir / ".env"
+            stdout = io.StringIO()
+            _write(repo_dir / "app" / "service.py", "print('hello')\n")
+            _write_prompt_tree(external_dir)
+            _write(config_path, _user_config_text())
+            _write(env_file_path, "OPENAI_API_KEY=env-file-token")
+            identity = RepoIdentity(
+                repo_name=repo_dir.name,
+                repo_key=f"{repo_dir.name}_deadbeef",
+                source_kind="repo_path",
+                source_value=str(repo_dir.resolve()),
+                repo_dir=repo_dir.resolve(),
+            )
+
+            def _provider_from_loaded_config(loaded):
+                self.assertEqual("env-file-token", loaded.resolved_env["OPENAI_API_KEY"])
+                return BackgroundSequenceProvider(
+                    [
+                        {
+                            "trust_boundaries": ["api boundary"],
+                            "risky_sinks": ["sql write path"],
+                            "auth_assumptions": ["session cookie is trusted"],
+                            "hot_paths": ["app/service.py"],
+                            "notes": ["watch org scoping"],
+                        }
+                    ]
+                )
+
+            with (
+                mock.patch("cli.Path.cwd", return_value=repo_dir),
+                mock.patch("cli._make_run_id", return_value="2026-04-06_121500"),
+                mock.patch(
+                    "cli.OpenAIResponsesProvider.from_loaded_config",
+                    side_effect=_provider_from_loaded_config,
+                ),
+                mock.patch("cli.resolve_repo_identity", return_value=identity),
+                mock.patch("swarm.resolve_repo_identity", return_value=identity),
+                mock.patch("builtins.input", side_effect=self._input_mock(["n", "y", "y", "n"], stdout)),
+                mock.patch("sys.stdout", stdout),
+                mock.patch.dict("os.environ", {}, clear=True),
+            ):
+                result = main(["swarm", "--config", str(config_path), "--env-file", str(env_file_path)])
+
+            self.assertEqual(0, result)
+            self.assertIn("Swarm preflight", stdout.getvalue())
+
+            run_json = json.loads(
+                ((runs_root(repo_dir) / "2026-04-06_121500") / "run.json").read_text(
+                    encoding="utf-8"
+                )
+            )
             self.assertEqual(str(config_path.resolve()), run_json["config_path"])
 
     def test_swarm_checked_in_generic_config_finds_foreign_repo_code_files(self) -> None:

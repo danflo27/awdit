@@ -121,7 +121,7 @@ profile = "code_config_tests"
 #       - "enforced": scheduler blocks or degrades oversized work to stay inside the budget
 #       - "advisory": budget is reported, but faster presets may push harder
 tokens = 120000
-mode = "enforced"
+mode = "advisory"
 
 [swarm.parallelism]
 # Optional.
@@ -143,7 +143,7 @@ rate_limits = 3
 # Omit any individual value to inherit the built-in default for that stage.
 # Options for every field: "low", "medium", "high"
 danger_map = "medium"
-seed = "low"
+seed = "medium"
 proof = "medium"
 
 [swarm.prompts]

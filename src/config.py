@@ -263,11 +263,14 @@ def load_effective_config(
     *,
     cwd: Path | None = None,
     config_path: Path | None = None,
+    env_file_path: Path | None = None,
     env: Mapping[str, str] | None = None,
 ) -> LoadedConfig:
     cwd = cwd or Path.cwd()
     config_path = config_path or default_repo_config_path(cwd)
-    environ = _resolve_runtime_env(cwd=cwd, env=env)
+    if env_file_path is not None:
+        env_file_path = env_file_path.expanduser().resolve()
+    environ = _resolve_runtime_env(cwd=cwd, env_file_path=env_file_path, env=env)
 
     if not config_path.exists():
         raise ConfigError(
@@ -351,9 +354,12 @@ def apply_runtime_overrides_with_env(
 def _resolve_runtime_env(
     *,
     cwd: Path,
+    env_file_path: Path | None,
     env: Mapping[str, str] | None,
 ) -> dict[str, str]:
     base_env = dict(_load_dotenv_file(default_repo_env_path(cwd)))
+    if env_file_path is not None:
+        base_env.update(_load_dotenv_file(env_file_path, required=True))
     if env is None:
         base_env.update(os.environ)
     else:
@@ -361,8 +367,10 @@ def _resolve_runtime_env(
     return base_env
 
 
-def _load_dotenv_file(path: Path) -> dict[str, str]:
+def _load_dotenv_file(path: Path, *, required: bool = False) -> dict[str, str]:
     if not path.exists():
+        if required:
+            raise ConfigError(f"Missing env file at {path}.")
         return {}
 
     loaded: dict[str, str] = {}

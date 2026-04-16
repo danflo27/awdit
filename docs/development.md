@@ -36,6 +36,15 @@ uv run awdit list-models
 uv run awdit review
 ```
 
+## Provider Credentials
+
+For local development, `awdit` reads provider credentials from either:
+
+- shell environment variables such as `OPENAI_API_KEY`
+- repo-root `.env`
+
+When both are present, shell environment variables win over `.env`.
+
 ## Terminal UX
 
 CLI presentation should follow CRAP principles: color, repetition, alignment, and proximity.
@@ -57,6 +66,21 @@ uv run --project /Users/df/projects/awdit awdit review
 
 That runs the `awdit` project environment while keeping the target repository as the current
 working tree for the review.
+
+If the provider key lives outside the target repository, pass it explicitly for `swarm` runs:
+
+```bash
+cd /path/to/target-repo
+uv run --project /Users/df/projects/awdit awdit swarm \
+  --config /Users/df/projects/awdit/config/config.toml \
+  --env-file /Users/df/projects/awdit/.env
+```
+
+Use `--config` to choose the config source and `--env-file` to choose the secrets file. Keep
+them explicit so cross-repo runs do not depend on the target repo's `.env`.
+
+In GitHub Actions, do not rely on `.env` files. Inject `OPENAI_API_KEY` through workflow
+`secrets` and `env:` so the job environment remains the source of truth.
 
 ## Undoing An Older Editable `pip` Install
 

@@ -132,6 +132,11 @@ def main(argv: list[str] | None = None) -> int:
         help="Load swarm config from this path instead of repo-root config/config.toml.",
     )
     swarm_parser.add_argument(
+        "--env-file",
+        type=Path,
+        help="Load provider env vars from this file after repo-root .env and before shell env.",
+    )
+    swarm_parser.add_argument(
         "--base-ref",
         help='Use this git base ref for `pr_changed_files` swarm mode. Defaults to "main".',
     )
@@ -246,9 +251,10 @@ def _handle_init_config(args: argparse.Namespace) -> int:
 def _handle_swarm(args: argparse.Namespace) -> int:
     cwd = Path.cwd()
     config_path = args.config.expanduser().resolve() if args.config is not None else None
+    env_file_path = args.env_file.expanduser().resolve() if args.env_file is not None else None
     migrate_legacy_runtime_layout(cwd)
     try:
-        loaded = load_effective_config(cwd=cwd, config_path=config_path)
+        loaded = load_effective_config(cwd=cwd, config_path=config_path, env_file_path=env_file_path)
     except ConfigError as exc:
         _print_line(f"Config error: {exc}")
         return 1
