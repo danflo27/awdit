@@ -1,3 +1,5 @@
+> **Archived 2026-04-17.** Essential dev-quickstart content folded into the repo-root [README.md](../../README.md). Preserved for historical context; do not treat as current.
+
 # Development
 
 ## Package Manager
@@ -66,6 +68,18 @@ uv run --project /Users/df/projects/awdit awdit review
 
 That runs the `awdit` project environment while keeping the target repository as the current
 working tree for the review.
+
+By default, durable awdit-managed artifacts now accumulate under the awdit project root rather
+than under the target repo:
+
+- `repos/<repo_key>/`
+- `runs/<run_id>/`
+- `worktrees/<run_id>/`
+- `state/awdit.db`
+
+If you want those folders somewhere else, set `AWDIT_DATA_ROOT` before launching `awdit`.
+The target repo still controls repo identity, tracked-file scope, config lookup, and git-aware
+inspection. Only managed storage moves to the shared awdit data root.
 
 If the provider key lives outside the target repository, pass it explicitly for `swarm` runs:
 

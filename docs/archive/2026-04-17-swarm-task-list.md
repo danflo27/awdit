@@ -1,3 +1,5 @@
+> **Archived 2026-04-17.** No direct successor. This was an ephemeral checkpoint log, not a document. Current open work lives under [roadmap/](../roadmap/). Preserved for historical context; do not treat as current.
+
 # Swarm MVP Task List
 
 ## Completed

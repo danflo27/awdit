@@ -1,3 +1,5 @@
+> **Archived 2026-04-17.** Still-open UX items rolled into [roadmap/ux.md](../roadmap/ux.md). Preserved for historical context; do not treat as current.
+
 # Notes from prototype testing
 
 03-29-2026

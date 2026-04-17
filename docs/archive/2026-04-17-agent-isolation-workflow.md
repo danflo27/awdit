@@ -1,3 +1,5 @@
+> **Archived 2026-04-17.** Folded into [decisions/0001-review-pipeline.md](../decisions/0001-review-pipeline.md). Preserved for historical context; do not treat as current.
+
 # Agent Isolation Workflow
 
 This document is the canonical reference for the run-time slot/session isolation model.

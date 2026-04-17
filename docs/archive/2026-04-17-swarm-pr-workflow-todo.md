@@ -1,3 +1,5 @@
+> **Archived 2026-04-17.** Superseded by [roadmap/review-ci-workflow.md](../roadmap/review-ci-workflow.md). The CI mechanics here (per-PR file list, non-interactive mode, JSON summary, sticky PR comment) now apply to `awdit review`, not `awdit swarm` (which is local-only). Preserved for historical context; do not treat as current.
+
 # TODO: Reusable PR Swarm Workflow
 
 ## Summary

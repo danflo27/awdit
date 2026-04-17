@@ -1,3 +1,5 @@
+> **Archived 2026-04-17.** Split into [decisions/0001-review-pipeline.md](../decisions/0001-review-pipeline.md) (pipeline + isolation) and [decisions/0005-storage-and-artifacts.md](../decisions/0005-storage-and-artifacts.md) (storage). Open questions moved to [roadmap/open-questions.md](../roadmap/open-questions.md). Preserved for historical context; do not treat as current.
+
 # awdit Architecture
 
 ## Status
@@ -89,7 +91,7 @@ Local git refs are the default path when both local and GitHub inputs are possib
 
 ### Repo-Scoped Memory
 Every repository has one evolving repo-scoped security area under:
-- `repos/<repo_key>/`
+- `<awdit-data-root>/repos/<repo_key>/`
 
 This area stores:
 - danger map artifacts
@@ -345,10 +347,14 @@ flowchart LR
 
 ### Storage Model
 awdit stores two kinds of data:
-- repo-scoped living intelligence under `repos/<repo_key>/`
-- run-scoped immutable artifacts under `runs/<run_id>/`
-- run-local solver worktrees under `worktrees/<run_id>/`
-- persistent app state under `state/` (for example `state/awdit.db` and future scoreboard artifacts)
+- repo-scoped living intelligence under `<awdit-data-root>/repos/<repo_key>/`
+- run-scoped immutable artifacts under `<awdit-data-root>/runs/<run_id>/`
+- run-local solver worktrees under `<awdit-data-root>/worktrees/<run_id>/`
+- persistent app state under `<awdit-data-root>/state/` (for example `state/awdit.db` and future scoreboard artifacts)
+
+`<awdit-data-root>` defaults to the awdit checkout location and may be overridden with
+`AWDIT_DATA_ROOT`. The analyzed repo remains the source of truth for config, git identity,
+tracked-file enumeration, and scope filtering.
 
 ### Repo-Scoped Living Intelligence
 Expected repo-scoped areas include:
@@ -397,13 +403,13 @@ configured prompt files declared in `config/config.toml`.
 ### Storage Diagram
 ```mermaid
 flowchart TB
-    subgraph Repo["repos/<repo_key>/ living intelligence"]
+    subgraph Repo["<awdit-data-root>/repos/<repo_key>/ living intelligence"]
         DM["danger_map.md / danger_map.json"]
         RM["truth-labeled memory + repo comments"]
         CI["canonical case index + variant links"]
     end
 
-    subgraph Run["runs/<run_id>/ immutable artifacts"]
+    subgraph Run["<awdit-data-root>/runs/<run_id>/ immutable artifacts"]
         RJ["run.json"]
         DG["derived_context/"]
         PR["prompts/"]

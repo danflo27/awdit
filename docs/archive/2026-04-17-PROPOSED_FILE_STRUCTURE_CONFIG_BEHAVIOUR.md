@@ -1,3 +1,5 @@
+> **Archived 2026-04-17.** Superseded by [decisions/0005-storage-and-artifacts.md](../decisions/0005-storage-and-artifacts.md). Preserved for historical context; do not treat as current.
+
 Proposed awdit resource and artifact structure
 =============================================
 

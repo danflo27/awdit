@@ -1,3 +1,5 @@
+> **Archived 2026-04-17.** No direct successor. This was an aspirational operator transcript for `awdit review`; locked decisions live under [decisions/](../decisions/) and open UX items live under [roadmap/ux.md](../roadmap/ux.md). Preserved for historical context; do not treat as current.
+
 Pretend repo: ~/src/acme-payments
 
 $ cd ~/src/acme-payments

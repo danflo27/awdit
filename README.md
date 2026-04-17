@@ -1,34 +1,67 @@
 # awdit
 
-`awdit` is a docs-first project for an AI-assisted security audit workflow that coordinates competing hunter, skeptic, referee, and solver agents around a single interactive CLI. The current design keeps visible persistent slot identities per run, cluster-first candidate handling, orchestrator-owned warm slot sessions with checkpoint-based rehydration and disposable attached provider handles, bounded skeptic/referee debate only, and a coordinator that acts as a traceable assembler rather than a hidden substantive judge. The repository is intentionally architecture-first at this stage, with the current design captured in [docs/architecture.md](docs/architecture.md), the canonical slot/session workflow diagram in [docs/agent-isolation-workflow.md](docs/agent-isolation-workflow.md), and a full pretend end-to-end operator transcript in [docs/e2e-cli-walkthrough.txt](docs/e2e-cli-walkthrough.txt).
+`awdit` is an AI-assisted security audit CLI. It runs two top-level commands against a target repository:
 
-The current implemented slice is the startup resource flow for `awdit review`:
-- awdit loads the effective config and resource defaults
-- everything under `config/resources/shared/` and `config/resources/slots/<slot>/` is included by default unless excluded in repo config
-- the operator can accept, replace, or exit with the `y / e / n` review flow
-- the final selected resources are frozen under `runs/<run_id>/resources/`
-- local files and folders are staged into the run folder, while URLs are currently recorded in manifests without being fetched
+- **`awdit review`** — the primary audit pipeline. Two competing hunter slots, two skeptics, two referees, and two solvers run in a fixed-order pipeline with bounded debate and a human truth review before any fix work. Designed for robustness. Runs locally or in CI.
+- **`awdit swarm`** — a broader, cheaper repo-wide offensive sweep. One adversarial worker per eligible file, two-stage sweep → proof, one ranked report. Local only.
 
-## Cost and Context Management
+The project is early and architecture-led. The live design is captured as ADRs under [docs/decisions/](docs/decisions/); in-flight work is tracked under [docs/roadmap/](docs/roadmap/).
 
-Cost and context management are always first-class concerns in `awdit`.
-- Runs should capture provider usage telemetry so token growth and context pressure are visible.
-- For each dispatch, usage summaries are persisted under `runs/<run_id>/session_state/artifacts/<slot>/<dispatch_id>/usage_summary.json`.
-- Dispatch records also include `usage_stats_ref` and `usage_totals` for quick inspection during failure triage.
+## Design
 
-## Development
+Start with the ADRs — read them in order:
 
-Use `uv` for local development and project commands.
+- [0001 — Review pipeline](docs/decisions/0001-review-pipeline.md) — stages, role rules, coordinator responsibilities, slot/session lifecycle, bounded debate
+- [0002 — Swarm](docs/decisions/0002-swarm.md) — one-agent-per-file sweep, proof ladder, configuration surface
+- [0003 — Command split and workflows](docs/decisions/0003-command-split-and-workflows.md) — review runs locally or in CI; swarm is local-only
+- [0004 — Scope and file selection](docs/decisions/0004-scope-and-file-selection.md) — `git ls-files` minus `scope.exclude` as the shared baseline
+- [0005 — Storage and artifacts](docs/decisions/0005-storage-and-artifacts.md) — data-root layout, run-scoped vs repo-scoped split, forward-facing Markdown rule
 
-- Create or refresh the project environment with `uv sync`
-- Run tests with `uv run pytest -q`
-- Run the CLI from the repo with `uv run awdit --help`
-- List live OpenAI models for the active config with `uv run awdit list-models`
+## Roadmap
 
-Dependency resolution is intentionally conservative: [pyproject.toml](pyproject.toml) sets
-`[tool.uv] exclude-newer = "2026-03-15T00:00:00Z"` which reflects a 14-day buffer as of
-2026-03-29. Refresh that timestamp deliberately and periodically if the project needs to keep
-the same rolling dependency-cooldown policy.
+- [review-ci-workflow.md](docs/roadmap/review-ci-workflow.md) — `awdit review` in GitHub Actions: `--ci`, `--pr`, machine-readable summary, reusable workflow
+- [open-questions.md](docs/roadmap/open-questions.md) — design questions deliberately left open
+- [ux.md](docs/roadmap/ux.md) — CLI polish backlog
 
-See [docs/development.md](docs/development.md) for the UV-first workflow, including uninstalling
-an older editable `pip` install and using `awdit` from other repositories.
+## Running
+
+Use `uv` for everything.
+
+```bash
+cd /path/to/awdit
+uv sync                         # create or refresh the env
+uv run pytest -q                # run tests
+uv run awdit --help             # show commands
+uv run awdit list-models        # list live models for the active provider
+uv run awdit review             # start a review wizard in the current repo
+```
+
+### Running awdit against another repository
+
+awdit-managed state (run artifacts, repo memory, worktrees, local DB) lives under the awdit project root by default — **never** inside the analyzed repo. Cross-repo runs are first class:
+
+```bash
+cd /path/to/target-repo
+uv run --project /path/to/awdit awdit review \
+  --config /path/to/awdit/config/config.toml \
+  --env-file /path/to/awdit/.env
+```
+
+`--config` and `--env-file` keep config and secrets outside the analyzed repo. Set `AWDIT_DATA_ROOT` if you want managed storage somewhere other than the awdit checkout. See [0005 — Storage and artifacts](docs/decisions/0005-storage-and-artifacts.md) for the full layout.
+
+### Provider credentials
+
+For local runs, awdit reads `OPENAI_API_KEY` from either the shell environment or a repo-root `.env` (shell wins). In CI, never use `.env` — inject the key through GitHub Actions `secrets` and `env:`.
+
+## Repository layout
+
+- `src/` — implementation
+- `config/` — checked-in defaults: `config.toml`, `prompts/`, `resources/shared/`, `resources/slots/<slot>/`
+- `tests/` — pytest suite
+- `docs/decisions/` — ADRs (the live design contract)
+- `docs/roadmap/` — in-flight and backlog work
+- `docs/archive/` — superseded planning docs, frozen for historical context only ([archive index](docs/archive/README.md))
+
+## Dependency cooldown
+
+Dependency resolution is intentionally conservative. [pyproject.toml](pyproject.toml) sets `[tool.uv] exclude-newer` to a timestamp that represents a rolling ~14-day buffer. Refresh that timestamp deliberately if you want to preserve the same cooldown policy when pulling new dependencies.

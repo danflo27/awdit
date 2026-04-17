@@ -1,3 +1,5 @@
+> **Archived 2026-04-17.** Superseded by [decisions/0002-swarm.md](../decisions/0002-swarm.md). Note: the "swarm as CI workflow" sections are now out of date — `awdit swarm` is local-only; CI runs use `awdit review`. See [roadmap/review-ci-workflow.md](../roadmap/review-ci-workflow.md). Preserved for historical context; do not treat as current.
+
 # Repo-Wide Black-Hat Auditing
 
 ## Standard Mode
@@ -33,6 +35,10 @@ specific target repo needs them.
 ## Official Transcript
 
 Pretend repo: `~/src/tiny-notes-api`
+
+In this transcript, managed artifact paths such as `repos/...`, `runs/...`, and `state/awdit.db`
+are shown relative to awdit's shared data root. By default that root is the awdit checkout, and
+operators may override it with `AWDIT_DATA_ROOT`.
 
 Pretend repo shape:
 - `src/app.py`
@@ -245,7 +251,7 @@ v1 operator model:
 
 v1 runtime model:
 - read-only against the repo under review
-- writes only run-scoped artifacts
+- writes repo memory, run artifacts, worktrees, and state under the shared awdit data root
 - requires the repo danger-map step before launch
 - reuses the current shared-resource flow
 - shows one preflight confirm screen before the batch begins
@@ -413,7 +419,7 @@ The confirm screen for `awdit swarm` should surface:
 
 ## Run Artifacts
 
-Swarm mode should keep its run-local artifacts under `runs/<run_id>/swarm/`.
+Swarm mode should keep its run-local artifacts under `<awdit-data-root>/runs/<run_id>/swarm/`.
 
 Expected directories:
 
