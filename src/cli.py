@@ -48,7 +48,7 @@ from swarm import (
     list_repo_file_entries,
     load_danger_map_result,
     run_swarm_sweep,
-    summarize_seed_request_volume,
+    summarize_claim_request_volume,
     SwarmWorkerFailure,
 )
 from terminal_ui import (
@@ -406,7 +406,6 @@ def _handle_swarm(args: argparse.Namespace) -> int:
 
     try:
         _print_section_heading("Launching swarm batch...")
-        _print_section_heading(f"Sweep stage started: {len(eligible_files)} file workers queued.")
         sweep_result = run_swarm_sweep(
             cwd=cwd,
             loaded=current,
@@ -446,27 +445,32 @@ def _handle_swarm(args: argparse.Namespace) -> int:
         _print_line(f"Failure diagnostics: {diagnostic_path}")
         return 1
 
-    _print_section_heading("Swarm complete.")
-    _print_section_heading("Final artifacts")
-    _print_line("  Ranked findings:")
-    _print_line(f"    {sweep_result.final_ranked_findings}")
-    _print_line("  Seed ledger:")
-    _print_line(f"    {sweep_result.seed_ledger}")
-    _print_line("  Duplicate and case groups:")
-    _print_line(f"    {sweep_result.case_groups}")
-    _print_line("  Proof artifacts:")
-    _print_line(f"    {sweep_result.proofs_dir}")
-    _print_line("  Usage summary:")
-    _print_line(f"    {sweep_result.usage_summary}")
-    _print_line("  Tool trace log:")
-    _print_line(f"    {sweep_result.tool_trace_log}")
-    _print_line("  Shared resource manifest:")
-    _print_line(f"    {snapshot.shared_manifest}")
+    verified = sum(1 for item in sweep_result.verifications if item.meets_report_bar)
+    filtered = sum(1 for item in sweep_result.verifications if not item.meets_report_bar)
+    if verified == 0:
+        headline = "Swarm complete. No findings cleared the report bar."
+    else:
+        noun = "finding" if verified == 1 else "findings"
+        headline = f"Swarm complete. {verified} verified {noun}, {filtered} filtered."
+    _print_section_heading(headline)
+    _print_line("")
+    _print_line("Open this:")
+    _print_line(f"  {sweep_result.findings}")
+    _print_line("")
+    _print_line("Other artifacts:")
+    _print_line(f"  Summary:            {sweep_result.summary}")
+    _print_line(f"  All claims:         {sweep_result.all_claims}")
+    _print_line(f"  Case groups:        {sweep_result.case_groups}")
+    _print_line(f"  Verified cases:     {sweep_result.validated_dir}")
+    _print_line(f"  Per-claim details:  {sweep_result.claims_dir}")
+    _print_line(f"  Usage summary:      {sweep_result.usage_summary}")
+    _print_line(f"  Tool trace log:     {sweep_result.tool_trace_log}")
+    _print_line(f"  Shared manifest:    {snapshot.shared_manifest}")
     return 0
 
 
 def _persist_swarm_failure_diagnostic(*, run_id: str, run_dir: Path, exc: Exception) -> Path:
-    diagnostic_path = run_dir / "swarm" / "failure_diagnostic.json"
+    diagnostic_path = run_dir / "swarm" / "debug" / "failure_diagnostic.json"
     diagnostic_path.parent.mkdir(parents=True, exist_ok=True)
     if isinstance(exc, SwarmWorkerFailure):
         failures = [item.to_dict() for item in exc.diagnostics]
@@ -763,8 +767,8 @@ def _persist_swarm_startup_snapshot(
                         "seed": loaded.effective.swarm.reasoning.seed,
                         "proof": loaded.effective.swarm.reasoning.proof,
                     },
-                    "usage_summary": str(run_dir / "swarm" / "usage_summary.json"),
-                    "tool_trace_log": str(run_dir / "swarm" / "tool_trace.jsonl"),
+                    "usage_summary": str(run_dir / "swarm" / "debug" / "usage_summary.json"),
+                    "tool_trace_log": str(run_dir / "swarm" / "debug" / "tool_trace.jsonl"),
                     "prompt_bundle": prompt_bundle.to_dict(),
                 },
                 "resources": {
@@ -860,10 +864,10 @@ def _write_swarm_digest(
             "## Swarm settings",
             f"- Preset: `{loaded.effective.swarm.preset}`",
             f"- Sweep model: `{loaded.effective.swarm.sweep_model}`",
-            f"- Proof model: `{loaded.effective.swarm.proof_model}`",
+            f"- Verify model: `{loaded.effective.swarm.proof_model}`",
             f"- Danger-map reasoning: `{loaded.effective.swarm.reasoning.danger_map}`",
-            f"- Seed reasoning: `{loaded.effective.swarm.reasoning.seed}`",
-            f"- Proof reasoning: `{loaded.effective.swarm.reasoning.proof}`",
+            f"- Claim reasoning: `{loaded.effective.swarm.reasoning.seed}`",
+            f"- Verify reasoning: `{loaded.effective.swarm.reasoning.proof}`",
             f"- File handling mode: `{loaded.effective.swarm.eligible_file_profile}`",
             f"- Budget mode: `{loaded.effective.swarm.budget_mode}`",
             f"- Token budget: `{loaded.effective.swarm.token_budget}`",
@@ -893,7 +897,7 @@ def _print_swarm_preflight(
     base_ref: str | None,
     data_root: Path | None = None,
 ) -> None:
-    seed_volume = summarize_seed_request_volume(
+    claim_volume = summarize_claim_request_volume(
         cwd=cwd,
         loaded=loaded,
         prompt_bundle=prompt_bundle,
@@ -907,9 +911,9 @@ def _print_swarm_preflight(
     _print_line("  Execution")
     _print_line(f"    Preset: {loaded.effective.swarm.preset}")
     _print_line(f"    Sweep model: {loaded.effective.swarm.sweep_model}")
-    _print_line(f"    Proof model: {loaded.effective.swarm.proof_model}")
-    _print_line(f"    Seed parallelism: {loaded.effective.swarm.seed_max_parallel}")
-    _print_line(f"    Proof parallelism: {loaded.effective.swarm.proof_max_parallel}")
+    _print_line(f"    Verify model: {loaded.effective.swarm.proof_model}")
+    _print_line(f"    Claim parallelism: {loaded.effective.swarm.seed_max_parallel}")
+    _print_line(f"    Verify parallelism: {loaded.effective.swarm.proof_max_parallel}")
     _print_line(f"    Rate-limit retries: {loaded.effective.swarm.rate_limit_max_retries}")
     _print_line("")
     _print_line("  Context")
@@ -929,30 +933,30 @@ def _print_swarm_preflight(
         _print_line("      - (none)")
     if snapshot.scope_diagnostics.warning_reason:
         _print_line(f"    Warning: {snapshot.scope_diagnostics.warning_reason}")
-    _print_line("    Seed input mode: compact metadata + paged read_file")
-    _print_line("    Proof stage: read-only validation")
-    _print_line("    Final report style: proof-filtered findings, grouped duplicates")
+    _print_line("    Claim input mode: compact metadata + paged read_file")
+    _print_line("    Verify stage: read-only validation")
+    _print_line("    Final report style: verified findings, grouped duplicates")
     _print_line("")
     _print_line("  Safety")
     _print_line(f"    Budget mode: {loaded.effective.swarm.budget_mode}")
     _print_line(f"    Token budget: {loaded.effective.swarm.token_budget}")
-    _print_line(f"    Estimated peak seed request tokens: {seed_volume.peak_parallel_estimated_tokens}")
+    _print_line(f"    Estimated peak claim request tokens: {claim_volume.peak_parallel_estimated_tokens}")
     _print_line(
-        "    Largest seed request: "
-        f"{seed_volume.max_job_target_file or '(n/a)'} (~{seed_volume.max_job_estimated_tokens} tokens)"
+        "    Largest claim request: "
+        f"{claim_volume.max_job_target_file or '(n/a)'} (~{claim_volume.max_job_estimated_tokens} tokens)"
     )
     if (
         loaded.effective.swarm.budget_mode == "advisory"
-        and seed_volume.peak_parallel_estimated_tokens > loaded.effective.swarm.token_budget
+        and claim_volume.peak_parallel_estimated_tokens > loaded.effective.swarm.token_budget
     ):
-        _print_line("    Warning: peak seed estimate exceeds the configured advisory budget.")
+        _print_line("    Warning: peak claim estimate exceeds the configured advisory budget.")
     _print_line("")
     _print_line("  Artifacts")
     _print_line(f"    Repo danger map: {danger_map_result.danger_map_md}")
     _print_line(f"    Shared resource manifest: {snapshot.shared_manifest}")
     _print_line(f"    Swarm digest: {snapshot.swarm_digest}")
     _print_line(f"    Prompt bundle manifest: {snapshot.prompt_bundle_manifest}")
-    _print_line(f"    Tool trace log: {snapshot.run_dir / 'swarm' / 'tool_trace.jsonl'}")
+    _print_line(f"    Tool trace log: {snapshot.run_dir / 'swarm' / 'debug' / 'tool_trace.jsonl'}")
 
 
 def _print_swarm_progress(event_type: str, data: dict[str, Any]) -> None:
@@ -962,8 +966,6 @@ def _print_swarm_progress(event_type: str, data: dict[str, Any]) -> None:
     action = str(data.get("action", "") or "").strip() or f"work on {label}"
 
     if event_type == "stage_started":
-        if stage_name == "seed":
-            return
         worker_count = _coerce_progress_int(data.get("worker_count"))
         _print_section_heading(
             f"{_swarm_stage_title(stage_name)} stage started: "
@@ -973,8 +975,6 @@ def _print_swarm_progress(event_type: str, data: dict[str, Any]) -> None:
         return
 
     if event_type == "stage_completed":
-        if stage_name == "seed":
-            return
         completed_workers = _coerce_progress_int(data.get("completed_workers"))
         _print_section_heading(
             f"{_swarm_stage_title(stage_name)} stage complete: "
@@ -1051,15 +1051,17 @@ def _print_swarm_progress(event_type: str, data: dict[str, Any]) -> None:
 
 
 def _swarm_stage_title(stage_name: str) -> str:
-    if stage_name == "seed":
+    if stage_name == "claim":
         return "Sweep"
+    if stage_name == "verify":
+        return "Verify"
     return stage_name.replace("_", " ").title() or "Swarm"
 
 
 def _swarm_worker_noun(stage_name: str, count: int) -> str:
-    if stage_name == "proof":
-        singular = "issue worker"
-    elif stage_name == "seed":
+    if stage_name == "verify":
+        singular = "case worker"
+    elif stage_name == "claim":
         singular = "file worker"
     else:
         singular = "worker"

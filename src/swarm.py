@@ -114,6 +114,33 @@ PROOF_CONTRADICTION_PHRASES = (
     "theoretical only",
     "hardening concern",
 )
+
+# Short, user-facing vocabulary for why a verification was filtered out of the
+# final findings list. The raw ``filter_reason`` string stays on disk in the
+# per-claim artifact; FINDINGS.md/SUMMARY.md summarize with these buckets.
+FILTER_BUCKETS = (
+    "duplicate",
+    "intended_behavior",
+    "out_of_scope",
+    "not_exploitable",
+    "not_reproducible",
+    "insufficient_evidence",
+    "other",
+)
+
+# Two-line glossary used as a footer on user-facing reports so operators do
+# not have to hunt for what each term means.
+REPORT_GLOSSARY = (
+    "**Glossary.** _Claim_: one worker's strongest candidate finding for a file. "
+    "_Case_: cluster of duplicate claims verified as a single issue."
+)
+PROOF_STATE_GLOSSARY = (
+    "**Proof states.** `hypothesized` (idea only) \u2192 "
+    "`path_grounded` (reachable code path) \u2192 "
+    "`written_proof` (tight written exploit) \u2192 "
+    "`executed_proof` (executable repro). "
+    "Only `written_proof` and `executed_proof` meet the report bar."
+)
 RATE_LIMIT_RETRY_PATTERN = re.compile(
     r"please try again in\s+([0-9]+(?:\.[0-9]+)?)\s*(ms|milliseconds?|s|sec(?:onds?)?)\b",
     re.IGNORECASE,
@@ -189,8 +216,8 @@ class RepoFileEntry:
 
 
 @dataclass(frozen=True)
-class SwarmSeedResult:
-    seed_id: str
+class SwarmClaim:
+    claim_id: str
     target_file: str
     outcome: str
     severity_bucket: str
@@ -201,7 +228,7 @@ class SwarmSeedResult:
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "seed_id": self.seed_id,
+            "claim_id": self.claim_id,
             "target_file": self.target_file,
             "outcome": self.outcome,
             "severity_bucket": self.severity_bucket,
@@ -213,45 +240,45 @@ class SwarmSeedResult:
 
 
 @dataclass(frozen=True)
-class SwarmIssueCandidate:
+class SwarmCase:
     case_id: str
-    primary_seed_id: str
+    primary_claim_id: str
     primary_target_file: str
     severity_bucket: str
     claim: str
     evidence: tuple[str, ...]
     related_files: tuple[str, ...]
     notes: tuple[str, ...]
-    seed_ids: tuple[str, ...]
-    duplicate_seed_ids: tuple[str, ...]
+    claim_ids: tuple[str, ...]
+    duplicate_claim_ids: tuple[str, ...]
     target_files: tuple[str, ...]
     grouping_keys: tuple[str, ...]
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "case_id": self.case_id,
-            "primary_seed_id": self.primary_seed_id,
+            "primary_claim_id": self.primary_claim_id,
             "primary_target_file": self.primary_target_file,
             "severity_bucket": self.severity_bucket,
             "claim": self.claim,
             "evidence": list(self.evidence),
             "related_files": list(self.related_files),
             "notes": list(self.notes),
-            "seed_ids": list(self.seed_ids),
-            "duplicate_seed_ids": list(self.duplicate_seed_ids),
+            "claim_ids": list(self.claim_ids),
+            "duplicate_claim_ids": list(self.duplicate_claim_ids),
             "target_files": list(self.target_files),
             "grouping_keys": list(self.grouping_keys),
         }
 
 
 @dataclass(frozen=True)
-class SwarmProofResult:
+class SwarmVerification:
     case_id: str
-    primary_seed_id: str
+    primary_claim_id: str
     primary_target_file: str
     severity_bucket: str
-    seed_ids: tuple[str, ...]
-    duplicate_seed_ids: tuple[str, ...]
+    claim_ids: tuple[str, ...]
+    duplicate_claim_ids: tuple[str, ...]
     outcome: str
     proof_state: str
     claim: str
@@ -273,11 +300,11 @@ class SwarmProofResult:
     def to_dict(self) -> dict[str, Any]:
         return {
             "case_id": self.case_id,
-            "primary_seed_id": self.primary_seed_id,
+            "primary_claim_id": self.primary_claim_id,
             "primary_target_file": self.primary_target_file,
             "severity_bucket": self.severity_bucket,
-            "seed_ids": list(self.seed_ids),
-            "duplicate_seed_ids": list(self.duplicate_seed_ids),
+            "claim_ids": list(self.claim_ids),
+            "duplicate_claim_ids": list(self.duplicate_claim_ids),
             "outcome": self.outcome,
             "proof_state": self.proof_state,
             "claim": self.claim,
@@ -292,17 +319,18 @@ class SwarmProofResult:
 
 @dataclass(frozen=True)
 class SwarmSweepResult:
-    seeds_dir: Path
-    proofs_dir: Path
-    reports_dir: Path
+    swarm_root: Path
+    claims_dir: Path
+    validated_dir: Path
+    debug_dir: Path
     tool_trace_log: Path
-    seed_results: tuple[SwarmSeedResult, ...]
-    issue_candidates: tuple[SwarmIssueCandidate, ...]
-    proof_results: tuple[SwarmProofResult, ...]
-    seed_ledger: Path
+    claim_results: tuple[SwarmClaim, ...]
+    cases: tuple[SwarmCase, ...]
+    verifications: tuple[SwarmVerification, ...]
+    findings: Path
+    summary: Path
+    all_claims: Path
     case_groups: Path
-    final_ranked_findings: Path
-    final_summary: Path
     usage_summary: Path
 
 
@@ -335,7 +363,7 @@ class ActiveSwarmWorker:
 
 
 @dataclass(frozen=True)
-class SwarmSeedRequestVolume:
+class SwarmClaimRequestVolume:
     job_count: int
     total_estimated_tokens: int
     peak_parallel_estimated_tokens: int
@@ -421,7 +449,7 @@ DANGER_MAP_RESPONSE_FORMAT = {
     },
 }
 
-SEED_RESPONSE_FORMAT = {
+CLAIM_RESPONSE_FORMAT = {
     "type": "json_schema",
     "name": "swarm_seed_response",
     "strict": True,
@@ -440,7 +468,7 @@ SEED_RESPONSE_FORMAT = {
     },
 }
 
-PROOF_RESPONSE_FORMAT = {
+VERIFICATION_RESPONSE_FORMAT = {
     "type": "json_schema",
     "name": "swarm_proof_response",
     "strict": True,
@@ -903,26 +931,26 @@ def render_danger_map_markdown(payload: dict[str, Any]) -> str:
     return "\n".join(lines).strip() + "\n"
 
 
-def build_seed_input(
+def build_claim_input(
     *,
-    seed_id: str,
+    claim_id: str,
     target_file: str,
     swarm_digest_text: str,
     shared_manifest_text: str,
     target_size_bytes: int,
     context_level: str = "compact",
 ) -> str:
-    swarm_digest_summary = _compact_seed_context(
+    swarm_digest_summary = _compact_claim_context(
         swarm_digest_text,
         max_chars=2400 if context_level == "compact" else 800,
     )
-    shared_manifest_summary = _compact_seed_context(
+    shared_manifest_summary = _compact_claim_context(
         shared_manifest_text,
         max_chars=1400 if context_level == "compact" else 500,
     )
     payload = {
-        "task_type": "seed_file",
-        "seed_id": seed_id,
+        "task_type": "claim_file",
+        "claim_id": claim_id,
         "lease_key": f"file:{target_file}",
         "target_file": target_file,
         "context_level": context_level,
@@ -959,7 +987,7 @@ def _staged_shared_resource_files(shared_manifest_path: Path) -> tuple[Path, ...
     return tuple(staged_files)
 
 
-def _compact_seed_context(text: str, *, max_chars: int) -> str:
+def _compact_claim_context(text: str, *, max_chars: int) -> str:
     compact_lines: list[str] = []
     for raw_line in text.splitlines():
         line = raw_line.rstrip()
@@ -979,7 +1007,7 @@ def _compact_seed_context(text: str, *, max_chars: int) -> str:
     return compact_text[:max_chars].rstrip() + "\n..."
 
 
-def render_seed_instructions(
+def render_claim_instructions(
     *,
     template: str,
     target_file: str,
@@ -1109,10 +1137,10 @@ def _swarm_job_action(job: SwarmWorkerJob) -> str:
     if action:
         return action
     label = _swarm_job_label(job)
-    if job.worker_type == "seed_file":
+    if job.worker_type == "claim_file":
         return f"inspect {label}"
-    if job.worker_type == "proof_issue":
-        return f"validate promoted finding for {label}"
+    if job.worker_type == "verify_case":
+        return f"verify promoted case for {label}"
     if job.worker_type == "danger_map":
         return f"map repo attack surface for {label}"
     return f"process {label}"
@@ -1933,7 +1961,7 @@ class SwarmStageTokenLimiter:
         self._current_stage_parallel_ceiling = self._configured_parallel_limit
 
 
-def _build_seed_worker_jobs(
+def _build_claim_worker_jobs(
     *,
     cwd: Path,
     loaded,
@@ -1941,27 +1969,27 @@ def _build_seed_worker_jobs(
     eligible_files: list[Path],
     swarm_digest_text: str,
     shared_manifest_text: str,
-    seed_output_path: str,
+    claim_output_path: str,
     tool_schemas: tuple[dict[str, Any], ...],
 ) -> tuple[list[SwarmWorkerJob], list[tuple[str, str]]]:
     template = prompt_asset.read_text()
     jobs: list[SwarmWorkerJob] = []
-    ordered_seed_metadata: list[tuple[str, str]] = []
+    ordered_claim_metadata: list[tuple[str, str]] = []
     for index, target_path in enumerate(eligible_files, start=1):
-        seed_id = f"SEED-{index:03d}"
+        claim_id = f"CLAIM-{index:03d}"
         target_file = display_repo_path(cwd, target_path)
-        ordered_seed_metadata.append((seed_id, target_file))
+        ordered_claim_metadata.append((claim_id, target_file))
         target_size_bytes = target_path.stat().st_size
-        compact_input = build_seed_input(
-            seed_id=seed_id,
+        compact_input = build_claim_input(
+            claim_id=claim_id,
             target_file=target_file,
             target_size_bytes=target_size_bytes,
             swarm_digest_text=swarm_digest_text,
             shared_manifest_text=shared_manifest_text,
             context_level="compact",
         )
-        minimal_input = build_seed_input(
-            seed_id=seed_id,
+        minimal_input = build_claim_input(
+            claim_id=claim_id,
             target_file=target_file,
             target_size_bytes=target_size_bytes,
             swarm_digest_text=swarm_digest_text,
@@ -1970,29 +1998,29 @@ def _build_seed_worker_jobs(
         )
         jobs.append(
             SwarmWorkerJob(
-                worker_id=seed_id,
-                worker_type="seed_file",
+                worker_id=claim_id,
+                worker_type="claim_file",
                 lease_key=f"file:{target_file}",
                 model=loaded.effective.swarm.sweep_model,
                 reasoning_effort=loaded.effective.swarm.reasoning.seed,
-                instructions=render_seed_instructions(
+                instructions=render_claim_instructions(
                     template=template,
                     target_file=target_file,
-                    output_path=seed_output_path,
+                    output_path=claim_output_path,
                 ),
                 input_text=compact_input,
                 prompt_cache_key=prompt_asset.prompt_cache_key,
-                text_format=SEED_RESPONSE_FORMAT,
+                text_format=CLAIM_RESPONSE_FORMAT,
                 tools=tool_schemas,
                 progress_label=target_file,
                 progress_action=f"inspect {target_file}",
                 input_variants=(compact_input, minimal_input),
             )
         )
-    return jobs, ordered_seed_metadata
+    return jobs, ordered_claim_metadata
 
 
-def summarize_seed_request_volume(
+def summarize_claim_request_volume(
     *,
     cwd: Path,
     loaded,
@@ -2002,18 +2030,18 @@ def summarize_seed_request_volume(
     shared_manifest_path: Path,
     eligible_files: list[Path],
     data_root: Path | None = None,
-) -> SwarmSeedRequestVolume:
+) -> SwarmClaimRequestVolume:
     swarm_digest_text = swarm_digest_path.read_text(encoding="utf-8")
     shared_manifest_text = shared_manifest_path.read_text(encoding="utf-8")
-    seed_output_path = _managed_runtime_display_path(run_dir / "swarm" / "seeds", data_root=data_root)
-    jobs, ordered_seed_metadata = _build_seed_worker_jobs(
+    claim_output_path = _managed_runtime_display_path(run_dir / "swarm" / "claims", data_root=data_root)
+    jobs, ordered_claim_metadata = _build_claim_worker_jobs(
         cwd=cwd,
         loaded=loaded,
         prompt_asset=prompt_bundle.seed,
         eligible_files=eligible_files,
         swarm_digest_text=swarm_digest_text,
         shared_manifest_text=shared_manifest_text,
-        seed_output_path=seed_output_path,
+        claim_output_path=claim_output_path,
         tool_schemas=(),
     )
     estimates = [_estimate_job_request_tokens(job) for job in jobs]
@@ -2021,11 +2049,11 @@ def summarize_seed_request_volume(
     peak_parallel_estimate = sum(sorted(estimates, reverse=True)[:peak_count])
     max_job_target_file = ""
     max_job_estimate = 0
-    for estimate, (_, target_file) in zip(estimates, ordered_seed_metadata, strict=False):
+    for estimate, (_, target_file) in zip(estimates, ordered_claim_metadata, strict=False):
         if estimate > max_job_estimate:
             max_job_estimate = estimate
             max_job_target_file = target_file
-    return SwarmSeedRequestVolume(
+    return SwarmClaimRequestVolume(
         job_count=len(jobs),
         total_estimated_tokens=sum(estimates),
         peak_parallel_estimated_tokens=peak_parallel_estimate,
@@ -2034,12 +2062,12 @@ def summarize_seed_request_volume(
     )
 
 
-def normalize_seed_payload(
+def normalize_claim_payload(
     *,
     payload: dict[str, Any],
-    seed_id: str,
+    claim_id: str,
     target_file: str,
-) -> SwarmSeedResult:
+) -> SwarmClaim:
     outcome = str(payload.get("outcome", "") or "").strip().lower()
     if outcome not in {"finding", "no_finding"}:
         outcome = "finding" if str(payload.get("claim", "")).strip() else "no_finding"
@@ -2054,8 +2082,8 @@ def normalize_seed_payload(
     if outcome == "no_finding":
         claim = ""
 
-    return SwarmSeedResult(
-        seed_id=seed_id,
+    return SwarmClaim(
+        claim_id=claim_id,
         target_file=target_file,
         outcome=outcome,
         severity_bucket=severity_bucket,
@@ -2066,43 +2094,43 @@ def normalize_seed_payload(
     )
 
 
-def parse_seed_payload(
+def parse_claim_payload(
     *,
     payload: dict[str, Any],
-    seed_id: str,
+    claim_id: str,
     target_file: str,
-) -> SwarmSeedResult:
+) -> SwarmClaim:
     _require_payload_keys(
         payload,
         ("outcome", "severity_bucket", "claim", "evidence", "related_files", "notes"),
     )
-    return normalize_seed_payload(payload=payload, seed_id=seed_id, target_file=target_file)
+    return normalize_claim_payload(payload=payload, claim_id=claim_id, target_file=target_file)
 
 
-def build_proof_input(
+def build_verification_input(
     *,
-    issue_candidate: SwarmIssueCandidate,
-    issue_seed_results: tuple[SwarmSeedResult, ...],
+    case: SwarmCase,
+    case_claim_results: tuple[SwarmClaim, ...],
     swarm_digest_text: str,
     shared_manifest_text: str,
 ) -> str:
     payload = {
-        "task_type": "proof_issue",
-        "case_id": issue_candidate.case_id,
-        "lease_key": f"issue:{issue_candidate.case_id}",
+        "task_type": "verify_case",
+        "case_id": case.case_id,
+        "lease_key": f"case:{case.case_id}",
         "shared_manifest_markdown": shared_manifest_text,
         "swarm_digest_markdown": swarm_digest_text,
-        "issue_candidate": issue_candidate.to_dict(),
-        "promoted_seeds": [result.to_dict() for result in issue_seed_results],
+        "case": case.to_dict(),
+        "promoted_claims": [result.to_dict() for result in case_claim_results],
     }
     return json.dumps(payload, indent=2)
 
 
-def normalize_proof_payload(
+def normalize_verification_payload(
     *,
     payload: dict[str, Any],
-    issue_candidate: SwarmIssueCandidate,
-) -> SwarmProofResult:
+    case: SwarmCase,
+) -> SwarmVerification:
     proof_state = str(payload.get("proof_state", "") or "").strip().lower()
     if proof_state not in PROOF_STATE_VALUES:
         proof_state = "written_proof" if _string_list(payload.get("repro_steps")) else "hypothesized"
@@ -2120,7 +2148,7 @@ def normalize_proof_payload(
     elif not filter_reason:
         filter_reason = "insufficient proof for final report"
 
-    claim = str(payload.get("claim", "") or "").strip() or issue_candidate.claim
+    claim = str(payload.get("claim", "") or "").strip() or case.claim
     summary = str(payload.get("summary", "") or "").strip()
     notes = tuple(_string_list(payload.get("notes")))
 
@@ -2130,13 +2158,13 @@ def normalize_proof_payload(
         proof_state = "path_grounded"
         filter_reason = f"proof summary contradicts reportable outcome: {contradiction_phrase}"
 
-    return SwarmProofResult(
-        case_id=issue_candidate.case_id,
-        primary_seed_id=issue_candidate.primary_seed_id,
-        primary_target_file=issue_candidate.primary_target_file,
-        severity_bucket=issue_candidate.severity_bucket,
-        seed_ids=issue_candidate.seed_ids,
-        duplicate_seed_ids=issue_candidate.duplicate_seed_ids,
+    return SwarmVerification(
+        case_id=case.case_id,
+        primary_claim_id=case.primary_claim_id,
+        primary_target_file=case.primary_target_file,
+        severity_bucket=case.severity_bucket,
+        claim_ids=case.claim_ids,
+        duplicate_claim_ids=case.duplicate_claim_ids,
         outcome=outcome,
         proof_state=proof_state,
         claim=claim,
@@ -2149,11 +2177,11 @@ def normalize_proof_payload(
     )
 
 
-def parse_proof_payload(
+def parse_verification_payload(
     *,
     payload: dict[str, Any],
-    issue_candidate: SwarmIssueCandidate,
-) -> SwarmProofResult:
+    case: SwarmCase,
+) -> SwarmVerification:
     _require_payload_keys(
         payload,
         (
@@ -2168,67 +2196,67 @@ def parse_proof_payload(
             "filter_reason",
         ),
     )
-    return normalize_proof_payload(payload=payload, issue_candidate=issue_candidate)
+    return normalize_verification_payload(payload=payload, case=case)
 
 
-def promote_issue_candidates(seed_results: list[SwarmSeedResult]) -> tuple[SwarmIssueCandidate, ...]:
-    promoted = [result for result in seed_results if result.outcome == "finding"]
+def promote_cases(claim_results: list[SwarmClaim]) -> tuple[SwarmCase, ...]:
+    promoted = [result for result in claim_results if result.outcome == "finding"]
     if not promoted:
         return ()
 
-    seed_lookup = {result.seed_id: result for result in promoted}
-    adjacency: dict[str, set[str]] = {result.seed_id: set() for result in promoted}
-    grouping_keys_by_seed: dict[str, set[str]] = {result.seed_id: set() for result in promoted}
+    claim_lookup = {result.claim_id: result for result in promoted}
+    adjacency: dict[str, set[str]] = {result.claim_id: set() for result in promoted}
+    grouping_keys_by_claim: dict[str, set[str]] = {result.claim_id: set() for result in promoted}
 
     for index, left in enumerate(promoted):
         for right in promoted[index + 1 :]:
-            grouping_keys = _issue_grouping_keys(left, right)
+            grouping_keys = _case_grouping_keys(left, right)
             if not grouping_keys:
                 continue
-            adjacency[left.seed_id].add(right.seed_id)
-            adjacency[right.seed_id].add(left.seed_id)
-            grouping_keys_by_seed[left.seed_id].update(grouping_keys)
-            grouping_keys_by_seed[right.seed_id].update(grouping_keys)
+            adjacency[left.claim_id].add(right.claim_id)
+            adjacency[right.claim_id].add(left.claim_id)
+            grouping_keys_by_claim[left.claim_id].update(grouping_keys)
+            grouping_keys_by_claim[right.claim_id].update(grouping_keys)
 
     ordered_promoted = sorted(
         promoted,
-        key=lambda item: (_severity_rank(item.severity_bucket), item.seed_id),
+        key=lambda item: (_severity_rank(item.severity_bucket), item.claim_id),
     )
 
-    issue_candidates: list[SwarmIssueCandidate] = []
+    cases: list[SwarmCase] = []
     visited: set[str] = set()
     for result in ordered_promoted:
-        if result.seed_id in visited:
+        if result.claim_id in visited:
             continue
-        pending = [result.seed_id]
+        pending = [result.claim_id]
         component_ids: list[str] = []
         while pending:
-            seed_id = pending.pop()
-            if seed_id in visited:
+            claim_id = pending.pop()
+            if claim_id in visited:
                 continue
-            visited.add(seed_id)
-            component_ids.append(seed_id)
-            pending.extend(sorted(adjacency[seed_id] - visited))
+            visited.add(claim_id)
+            component_ids.append(claim_id)
+            pending.extend(sorted(adjacency[claim_id] - visited))
 
         component = sorted(
-            (seed_lookup[seed_id] for seed_id in component_ids),
-            key=lambda item: (_severity_rank(item.severity_bucket), item.seed_id),
+            (claim_lookup[claim_id] for claim_id in component_ids),
+            key=lambda item: (_severity_rank(item.severity_bucket), item.claim_id),
         )
         primary = component[0]
-        case_id = f"SWM-{len(issue_candidates) + 1:03d}"
-        issue_candidates.append(
-            SwarmIssueCandidate(
+        case_id = f"CASE-{len(cases) + 1:03d}"
+        cases.append(
+            SwarmCase(
                 case_id=case_id,
-                primary_seed_id=primary.seed_id,
+                primary_claim_id=primary.claim_id,
                 primary_target_file=primary.target_file,
                 severity_bucket=primary.severity_bucket,
                 claim=primary.claim,
                 evidence=primary.evidence,
                 related_files=primary.related_files,
                 notes=primary.notes,
-                seed_ids=tuple(item.seed_id for item in component),
-                duplicate_seed_ids=tuple(
-                    item.seed_id for item in component if item.seed_id != primary.seed_id
+                claim_ids=tuple(item.claim_id for item in component),
+                duplicate_claim_ids=tuple(
+                    item.claim_id for item in component if item.claim_id != primary.claim_id
                 ),
                 target_files=tuple(item.target_file for item in component),
                 grouping_keys=tuple(
@@ -2236,184 +2264,351 @@ def promote_issue_candidates(seed_results: list[SwarmSeedResult]) -> tuple[Swarm
                         {
                             key
                             for item in component
-                            for key in grouping_keys_by_seed[item.seed_id]
+                            for key in grouping_keys_by_claim[item.claim_id]
                         }
                     )
                 ),
             )
         )
 
-    return tuple(issue_candidates)
+    return tuple(cases)
 
 
-def write_seed_ledger(path: Path, seed_results: list[SwarmSeedResult]) -> None:
-    lines = ["# Seed ledger", ""]
-    if not seed_results:
+def write_all_claims(path: Path, claim_results: list[SwarmClaim]) -> None:
+    """Write the full per-claim ledger under ``debug/all_claims.md``.
+
+    This is the exhaustive, file-by-file record. FINDINGS.md and SUMMARY.md
+    are the operator-facing reports; this lives in ``debug/`` for auditors.
+    """
+    lines = ["# All claims", ""]
+    if not claim_results:
         lines.append("No eligible files were processed.")
-    for result in seed_results:
-        lines.extend(
-            [
-                f"## {result.seed_id}",
-                f"- Target file: `{result.target_file}`",
-                f"- Outcome: `{result.outcome}`",
-                f"- Severity: `{result.severity_bucket}`",
-                f"- Claim: {result.claim or '(none)'}",
-                "",
-            ]
-        )
+        path.write_text("\n".join(lines).strip() + "\n", encoding="utf-8")
+        return
+    findings = [result for result in claim_results if result.outcome == "finding"]
+    no_findings = [result for result in claim_results if result.outcome != "finding"]
+    lines.extend(
+        [
+            f"- Files processed: `{len(claim_results)}`",
+            f"- Claims with a finding: `{len(findings)}`",
+            f"- No-finding outcomes: `{len(no_findings)}`",
+            "",
+        ]
+    )
+    if findings:
+        lines.extend(["## Findings", ""])
+        for result in findings:
+            lines.extend(
+                [
+                    f"### `{result.target_file}`",
+                    f"- Severity: `{result.severity_bucket}`",
+                    f"- Claim: {result.claim or '(none)'}",
+                    f"<sub>Claim ID: `{result.claim_id}`</sub>",
+                    "",
+                ]
+            )
+    if no_findings:
+        lines.extend(["## No-finding outcomes", ""])
+        for result in no_findings:
+            lines.append(
+                f"- `{result.target_file}` \u2014 outcome=`{result.outcome}`"
+                f" <sub>(`{result.claim_id}`)</sub>"
+            )
+        lines.append("")
+    lines.extend(["---", "", REPORT_GLOSSARY])
     path.write_text("\n".join(lines).strip() + "\n", encoding="utf-8")
 
 
 def write_case_groups(
     path: Path,
-    issue_candidates: tuple[SwarmIssueCandidate, ...],
-    seed_results: list[SwarmSeedResult],
-    proof_results: tuple[SwarmProofResult, ...],
-) -> None:
-    lines = ["# Case groups", ""]
-    if not issue_candidates:
-        lines.append("No seed findings were promoted into issue candidates.")
-        path.write_text("\n".join(lines).strip() + "\n", encoding="utf-8")
-        return
+    cases: tuple[SwarmCase, ...],
+    claim_results: list[SwarmClaim],
+    verifications: tuple[SwarmVerification, ...],
+) -> bool:
+    """Write the case-grouping detail file.
 
-    seed_lookup = {result.seed_id: result for result in seed_results}
-    proof_lookup = {result.case_id: result for result in proof_results}
-    for issue_candidate in issue_candidates:
-        proof_result = proof_lookup.get(issue_candidate.case_id)
+    Returns ``True`` if the file was written. When no claims were promoted
+    into cases we skip the file entirely — an empty "no groups" stub is
+    noise in ``debug/``.
+    """
+    if not cases:
+        return False
+    claim_lookup = {result.claim_id: result for result in claim_results}
+    verification_lookup = {result.case_id: result for result in verifications}
+    lines = ["# Case groups", ""]
+    for case in cases:
+        verification = verification_lookup.get(case.case_id)
         lines.extend(
             [
-                f"## {issue_candidate.case_id}",
-                f"- Primary seed: `{issue_candidate.primary_seed_id}`",
-                f"- Severity: `{issue_candidate.severity_bucket}`",
-                f"- Primary file: `{issue_candidate.primary_target_file}`",
-                f"- Seed count: `{len(issue_candidate.seed_ids)}`",
-                f"- Claim: {issue_candidate.claim}",
+                f"## `{case.primary_target_file}`",
+                f"- Severity: `{case.severity_bucket}`",
+                f"- Primary file: `{case.primary_target_file}`",
+                f"- Claim count: `{len(case.claim_ids)}`",
+                f"- Claim: {case.claim}",
             ]
         )
-        if issue_candidate.duplicate_seed_ids:
+        if case.duplicate_claim_ids:
             lines.append(
-                "- Duplicate seeds: "
-                + ", ".join(f"`{seed_id}`" for seed_id in issue_candidate.duplicate_seed_ids)
+                "- Duplicate claims: "
+                + ", ".join(f"`{claim_id}`" for claim_id in case.duplicate_claim_ids)
             )
-        if issue_candidate.grouping_keys:
+        if case.grouping_keys:
             lines.append(
-                "- Grouped via: "
-                + ", ".join(f"`{item}`" for item in issue_candidate.grouping_keys)
+                "- Grouped via: " + ", ".join(f"`{item}`" for item in case.grouping_keys)
             )
-        if proof_result is not None:
-            lines.append(f"- Proof state: `{proof_result.proof_state}`")
-            lines.append(f"- Final outcome: `{proof_result.outcome}`")
-        lines.extend(["", "### Member seeds"])
-        for seed_id in issue_candidate.seed_ids:
-            seed_result = seed_lookup[seed_id]
+        if verification is not None:
+            lines.append(f"- Proof state: `{verification.proof_state}`")
+            lines.append(f"- Final outcome: `{verification.outcome}`")
+        lines.extend(["", "### Member claims"])
+        for claim_id in case.claim_ids:
+            claim_result = claim_lookup[claim_id]
             lines.extend(
                 [
-                    f"- `{seed_result.seed_id}`",
-                    f"  target=`{seed_result.target_file}` severity=`{seed_result.severity_bucket}`",
-                    f"  claim={seed_result.claim or '(none)'}",
+                    f"- `{claim_result.target_file}`"
+                    f" severity=`{claim_result.severity_bucket}`",
+                    f"  claim={claim_result.claim or '(none)'}"
+                    f" <sub>(`{claim_result.claim_id}`)</sub>",
                 ]
             )
-        lines.append("")
+        lines.extend(
+            ["", f"<sub>Case ID: `{case.case_id}`</sub>", ""]
+        )
+    lines.extend(["---", "", REPORT_GLOSSARY])
     path.write_text("\n".join(lines).strip() + "\n", encoding="utf-8")
+    return True
 
 
-def write_final_ranked_findings(path: Path, proof_results: tuple[SwarmProofResult, ...]) -> None:
+def _verdict_line(findings: list[SwarmVerification]) -> str:
+    """One-line headline verdict used at the top of FINDINGS.md."""
+    if not findings:
+        return "**No findings cleared the proof-stage report bar.**"
+    by_severity: dict[str, int] = {}
+    for result in findings:
+        key = result.severity_bucket or "unspecified"
+        by_severity[key] = by_severity.get(key, 0) + 1
+    ordered = sorted(by_severity.items(), key=lambda kv: _severity_rank(kv[0]))
+    breakdown = ", ".join(f"{count} {severity}" for severity, count in ordered)
+    noun = "finding" if len(findings) == 1 else "findings"
+    return f"**Verdict:** {len(findings)} verified {noun} ({breakdown})."
+
+
+def _claim_ordinal_int(worker_id: str) -> int:
+    raw = _id_ordinal(worker_id)
+    try:
+        return int(raw)
+    except ValueError:
+        return 10_000_000
+
+
+def _format_verification_link(
+    verification: SwarmVerification, *, claims_rel: str, validated_rel: str
+) -> str:
+    stem = verification_artifact_stem(verification)
+    return f"{validated_rel}/{stem}.md"
+
+
+def _format_claim_link(claim_result: SwarmClaim, *, claims_rel: str) -> str:
+    stem = claim_artifact_stem(claim_result)
+    return f"{claims_rel}/{stem}.md"
+
+
+def write_findings(
+    path: Path,
+    verifications: tuple[SwarmVerification, ...],
+    *,
+    claims_rel: str = "claims",
+    validated_rel: str = "validated",
+) -> None:
+    """Write the verdict-first FINDINGS.md at the swarm/ root.
+
+    The file opens with a one-line verdict (counts by severity), lists the
+    verified findings in severity + claim-ordinal order, groups filtered
+    verifications by bucket, and closes with a two-line glossary. Each
+    entry deep-links into ``validated/<slug>-NNN.md``.
+    """
     findings = sorted(
-        [result for result in proof_results if result.meets_report_bar],
+        [result for result in verifications if result.meets_report_bar],
         key=lambda item: (
             _severity_rank(item.severity_bucket),
-            _proof_state_rank(item.proof_state),
+            _claim_ordinal_int(item.primary_claim_id),
             item.primary_target_file,
         ),
     )
     filtered = sorted(
-        [result for result in proof_results if not result.meets_report_bar],
+        [result for result in verifications if not result.meets_report_bar],
         key=lambda item: (
             _severity_rank(item.severity_bucket),
-            _proof_state_rank(item.proof_state),
+            _claim_ordinal_int(item.primary_claim_id),
             item.primary_target_file,
         ),
     )
-    lines = [
-        "# Final ranked findings",
-        "",
-    ]
-    if not findings:
-        lines.append("No findings cleared the proof-stage report bar.")
-    for index, result in enumerate(findings, start=1):
-        lines.extend(
-            [
-                f"## {index}. {result.primary_seed_id}",
-                f"- Case: `{result.case_id}`",
-                f"- Proof state: `{result.proof_state}`",
-                f"- Severity: `{result.severity_bucket}`",
-                f"- Primary file: `{result.primary_target_file}`",
-                f"- Claim: {result.claim or '(none)'}",
-            ]
-        )
-        if result.duplicate_seed_ids:
-            lines.append(
-                "- Related duplicate seeds: "
-                + ", ".join(f"`{item}`" for item in result.duplicate_seed_ids)
+    lines = ["# Findings", "", _verdict_line(findings), ""]
+    if findings:
+        for index, result in enumerate(findings, start=1):
+            link = _format_verification_link(
+                result, claims_rel=claims_rel, validated_rel=validated_rel
             )
-        if result.summary:
-            lines.append(f"- Proof summary: {result.summary}")
-        if result.citations:
-            lines.append("- Citations:")
-            for item in result.citations:
-                lines.append(f"  - {item}")
-        if result.repro_steps:
-            lines.append("- Repro steps:")
-            for item in result.repro_steps:
-                lines.append(f"  - {item}")
-        if result.notes:
-            lines.append("- Notes:")
-            for item in result.notes:
-                lines.append(f"  - {item}")
-        lines.append("")
+            heading = (
+                f"## {index}. [`{result.primary_target_file}`]({link})"
+                f" \u2014 `{result.severity_bucket}`"
+            )
+            lines.append(heading)
+            if result.claim:
+                lines.extend(["", result.claim])
+            if result.summary:
+                lines.extend(["", f"**Proof summary.** {result.summary}"])
+            details = [f"- Proof state: `{result.proof_state}`"]
+            if result.duplicate_claim_ids:
+                details.append(
+                    "- Related claims: "
+                    + ", ".join(f"`{item}`" for item in result.duplicate_claim_ids)
+                )
+            if result.citations:
+                details.append("- Citations:")
+                for item in result.citations:
+                    details.append(f"  - {item}")
+            if result.repro_steps:
+                details.append("- Repro steps:")
+                for item in result.repro_steps:
+                    details.append(f"  - {item}")
+            if result.notes:
+                details.append("- Notes:")
+                for item in result.notes:
+                    details.append(f"  - {item}")
+            lines.extend(
+                [
+                    "",
+                    *details,
+                    "",
+                    f"[Full case \u2192]({link})",
+                    "",
+                    f"<sub>Case ID: `{result.case_id}`</sub>",
+                    "",
+                ]
+            )
     if filtered:
-        lines.extend(["## Filtered out", ""])
+        buckets: dict[str, list[SwarmVerification]] = {}
         for result in filtered:
-            lines.append(
-                f"- `{result.primary_seed_id}` case=`{result.case_id}` state=`{result.proof_state}` reason={result.filter_reason or '(not provided)'}"
-            )
+            buckets.setdefault(_filter_bucket(result), []).append(result)
+        lines.extend(["## Filtered", ""])
+        lines.append(
+            "These verifications did not meet the report bar. The raw"
+            " `filter_reason` is preserved in each entry's"
+            f" `{validated_rel}/*.md` file."
+        )
+        lines.append("")
+        for bucket in FILTER_BUCKETS:
+            entries = buckets.get(bucket)
+            if not entries:
+                continue
+            lines.extend([f"### `{bucket}` ({len(entries)})", ""])
+            for entry in entries:
+                link = _format_verification_link(
+                    entry, claims_rel=claims_rel, validated_rel=validated_rel
+                )
+                lines.append(
+                    f"- [`{entry.primary_target_file}`]({link}) \u2014"
+                    f" `{entry.severity_bucket}` / `{entry.proof_state}`"
+                )
+            lines.append("")
+    lines.extend(["---", "", PROOF_STATE_GLOSSARY, "", REPORT_GLOSSARY])
     path.write_text("\n".join(lines).strip() + "\n", encoding="utf-8")
 
 
-def write_final_summary(
-    path: Path,
-    seed_results: list[SwarmSeedResult],
-    issue_candidates: tuple[SwarmIssueCandidate, ...],
-    proof_results: tuple[SwarmProofResult, ...],
-    seed_ledger: Path,
-    case_groups: Path,
-    final_ranked_findings: Path,
-    usage_summary: Path | None = None,
-) -> None:
-    findings = [result for result in proof_results if result.meets_report_bar]
-    filtered = [result for result in proof_results if not result.meets_report_bar]
+def _summary_lines(
+    *,
+    claim_results: list[SwarmClaim] | tuple[SwarmClaim, ...],
+    cases: tuple[SwarmCase, ...],
+    verifications: tuple[SwarmVerification, ...],
+    findings_rel: str,
+    all_claims_rel: str,
+    case_groups_rel: str | None,
+    prompts_rel: str | None,
+    usage_rel: str | None,
+    stage_banner: str | None = None,
+    failure: SwarmWorkerFailureDiagnostic | None = None,
+    completed_worker_ids: tuple[str, ...] = (),
+    skipped_worker_ids: tuple[str, ...] = (),
+) -> list[str]:
+    """Shared body used by both the final SUMMARY.md and partial summary.
+
+    Accepts pre-computed run-relative links so the caller decides where
+    files are actually being written.
+    """
+    findings_count = sum(1 for result in verifications if result.meets_report_bar)
+    filtered_count = sum(1 for result in verifications if not result.meets_report_bar)
     proof_state_counts = {
-        state: sum(1 for result in proof_results if result.proof_state == state)
+        state: sum(1 for result in verifications if result.proof_state == state)
         for state in PROOF_STATE_VALUES
     }
-    lines = [
-        "# Final summary",
-        "",
-        f"- Eligible files processed: `{len(seed_results)}`",
-        f"- Seed findings surfaced: `{sum(1 for result in seed_results if result.outcome == 'finding')}`",
-        f"- Promoted issue candidates: `{len(issue_candidates)}`",
-        f"- Findings kept after proof: `{len(findings)}`",
-        f"- Filtered after proof: `{len(filtered)}`",
-        "- Proof stage mode: `read-only validation`",
-        f"- Written proofs: `{proof_state_counts['written_proof']}`",
-        f"- Path-grounded only: `{proof_state_counts['path_grounded']}`",
-        f"- Hypothesized only: `{proof_state_counts['hypothesized']}`",
-        f"- Seed ledger: `{seed_ledger}`",
-        f"- Case groups: `{case_groups}`",
-        f"- Ranked findings: `{final_ranked_findings}`",
-    ]
-    if usage_summary is not None:
-        lines.append(f"- Usage summary: `{usage_summary}`")
+    heading = "# Summary" if stage_banner is None else "# Partial summary"
+    lines = [heading, ""]
+    if stage_banner is not None:
+        lines.append(f"> **Aborted during `{stage_banner}` stage.**")
+        lines.append("")
+    lines.extend(
+        [
+            f"- Eligible files processed: `{len(claim_results)}`",
+            f"- Claims with a finding: `{sum(1 for result in claim_results if result.outcome == 'finding')}`",
+            f"- Cases (clustered claims): `{len(cases)}`",
+            f"- Verified findings: `{findings_count}`",
+            f"- Filtered: `{filtered_count}`",
+        ]
+    )
+    if stage_banner is None:
+        lines.extend(
+            [
+                f"- Written proofs: `{proof_state_counts['written_proof']}`",
+                f"- Executable proofs: `{proof_state_counts['executed_proof']}`",
+                f"- Path-grounded only: `{proof_state_counts['path_grounded']}`",
+                f"- Hypothesized only: `{proof_state_counts['hypothesized']}`",
+            ]
+        )
+    if failure is not None:
+        lines.append(f"- Abort reason: {failure.render_summary()}")
+    lines.extend(["", "## Artifacts", ""])
+    lines.append(f"- [Findings]({findings_rel})")
+    lines.append(f"- [All claims]({all_claims_rel})")
+    if case_groups_rel is not None:
+        lines.append(f"- [Case groups]({case_groups_rel})")
+    if prompts_rel is not None:
+        lines.append(f"- [Prompt snapshots]({prompts_rel})")
+    if usage_rel is not None:
+        lines.append(f"- [Usage summary]({usage_rel})")
+    if completed_worker_ids:
+        lines.extend(["", f"## Completed workers ({len(completed_worker_ids)})", ""])
+        for worker_id in completed_worker_ids:
+            lines.append(f"- `{worker_id}`")
+    if skipped_worker_ids:
+        lines.extend(["", f"## Skipped workers ({len(skipped_worker_ids)})", ""])
+        for worker_id in skipped_worker_ids:
+            lines.append(f"- `{worker_id}`")
+    lines.extend(["", "---", "", REPORT_GLOSSARY])
+    return lines
+
+
+def write_summary(
+    path: Path,
+    claim_results: list[SwarmClaim],
+    cases: tuple[SwarmCase, ...],
+    verifications: tuple[SwarmVerification, ...],
+    *,
+    findings_rel: str,
+    all_claims_rel: str,
+    case_groups_rel: str | None,
+    prompts_rel: str | None,
+    usage_rel: str | None,
+) -> None:
+    lines = _summary_lines(
+        claim_results=claim_results,
+        cases=cases,
+        verifications=verifications,
+        findings_rel=findings_rel,
+        all_claims_rel=all_claims_rel,
+        case_groups_rel=case_groups_rel,
+        prompts_rel=prompts_rel,
+        usage_rel=usage_rel,
+    )
     path.write_text("\n".join(lines).strip() + "\n", encoding="utf-8")
 
 
@@ -2424,117 +2619,226 @@ def write_partial_summary(
     failure: SwarmWorkerFailureDiagnostic | None,
     completed_worker_ids: tuple[str, ...],
     skipped_worker_ids: tuple[str, ...],
-    seed_results: tuple[SwarmSeedResult, ...],
-    issue_candidates: tuple[SwarmIssueCandidate, ...],
-    proof_results: tuple[SwarmProofResult, ...],
-    usage_summary: Path | None = None,
-    seed_ledger: Path | None = None,
+    claim_results: tuple[SwarmClaim, ...],
+    cases: tuple[SwarmCase, ...],
+    verifications: tuple[SwarmVerification, ...],
+    findings_rel: str,
+    all_claims_rel: str,
+    case_groups_rel: str | None,
+    prompts_rel: str | None,
+    usage_rel: str | None,
 ) -> None:
-    lines = [
-        "# Partial summary",
-        "",
-        f"- Stage aborted: `{stage_name}`",
-        f"- Completed workers: `{len(completed_worker_ids)}`",
-        f"- Skipped workers: `{len(skipped_worker_ids)}`",
-        f"- Completed seed artifacts: `{len(seed_results)}`",
-        f"- Promoted issue candidates: `{len(issue_candidates)}`",
-        f"- Completed proof artifacts: `{len(proof_results)}`",
-    ]
-    if failure is not None:
-        lines.append(f"- Abort reason: {failure.render_summary()}")
-    if usage_summary is not None:
-        lines.append(f"- Usage summary: `{usage_summary}`")
-    if seed_ledger is not None:
-        lines.append(f"- Seed ledger: `{seed_ledger}`")
-    if completed_worker_ids:
-        lines.extend(["", "## Completed workers"])
-        for worker_id in completed_worker_ids:
-            lines.append(f"- `{worker_id}`")
-    if skipped_worker_ids:
-        lines.extend(["", "## Skipped workers"])
-        for worker_id in skipped_worker_ids:
-            lines.append(f"- `{worker_id}`")
+    lines = _summary_lines(
+        claim_results=claim_results,
+        cases=cases,
+        verifications=verifications,
+        findings_rel=findings_rel,
+        all_claims_rel=all_claims_rel,
+        case_groups_rel=case_groups_rel,
+        prompts_rel=prompts_rel,
+        usage_rel=usage_rel,
+        stage_banner=stage_name,
+        failure=failure,
+        completed_worker_ids=completed_worker_ids,
+        skipped_worker_ids=skipped_worker_ids,
+    )
     path.write_text("\n".join(lines).strip() + "\n", encoding="utf-8")
 
 
-def _write_seed_artifacts(seeds_dir: Path, seed_result: SwarmSeedResult) -> None:
-    seed_prefix = seed_result.seed_id.lower().replace("-", "_")
-    json_path = seeds_dir / f"{seed_prefix}.json"
-    md_path = seeds_dir / f"{seed_prefix}.md"
-    json_path.write_text(json.dumps(seed_result.to_dict(), indent=2) + "\n", encoding="utf-8")
-    md_path.write_text(render_seed_markdown(seed_result), encoding="utf-8")
+def _slug_for_target_file(target_file: str) -> str:
+    """Filesystem-safe slug derived from a target file's stem.
+
+    Example: ``src/data/bridgeAbi.json`` -> ``bridgeAbi``.
+    """
+    stem = Path(target_file).stem or "unknown"
+    slug = re.sub(r"[^A-Za-z0-9]", "", stem)
+    return slug or "unknown"
 
 
-def render_seed_markdown(seed_result: SwarmSeedResult) -> str:
+def _id_ordinal(worker_id: str) -> str:
+    """Return the numeric suffix of an ID like ``CLAIM-002`` -> ``002``.
+
+    Falls back to a sanitized version of the id if no ``-NNN`` tail is found.
+    """
+    _, _, remainder = worker_id.partition("-")
+    remainder = remainder.strip()
+    if remainder and remainder.isdigit():
+        return remainder
+    return re.sub(r"[^A-Za-z0-9]", "_", worker_id) or "000"
+
+
+def _artifact_stem(worker_id: str, target_file: str) -> str:
+    """Compose the filename stem used for claim/verification artifacts.
+
+    Example: ``CLAIM-002`` + ``src/data/bridgeAbi.json`` -> ``bridgeAbi-002``.
+    """
+    return f"{_slug_for_target_file(target_file)}-{_id_ordinal(worker_id)}"
+
+
+def claim_artifact_stem(claim_result: SwarmClaim) -> str:
+    return _artifact_stem(claim_result.claim_id, claim_result.target_file)
+
+
+def verification_artifact_stem(verification: SwarmVerification) -> str:
+    return _artifact_stem(verification.case_id, verification.primary_target_file)
+
+
+def _filter_bucket(verification: SwarmVerification) -> str:
+    """Classify a filtered verification's ``filter_reason`` into a short bucket.
+
+    Keeps FINDINGS.md compact — operators see a small controlled vocabulary
+    instead of every worker's free-form rationale. The raw ``filter_reason``
+    text is preserved in the per-verification artifact under ``validated/``.
+    """
+    text = (verification.filter_reason or "").lower()
+    if not text:
+        if verification.proof_state == "hypothesized":
+            return "insufficient_evidence"
+        if verification.proof_state == "path_grounded":
+            return "insufficient_evidence"
+        return "other"
+    if any(keyword in text for keyword in ("duplicate", "dup of", "same as", "same issue")):
+        return "duplicate"
+    if any(keyword in text for keyword in ("intended", "by design", "expected behav", "working as")):
+        return "intended_behavior"
+    if any(keyword in text for keyword in ("out of scope", "out-of-scope", "outside scope", "not in scope")):
+        return "out_of_scope"
+    if any(keyword in text for keyword in ("not exploit", "unexploit", "no exploit", "cannot exploit")):
+        return "not_exploitable"
+    if any(
+        keyword in text
+        for keyword in ("not reproduc", "no repro", "cannot reproduce", "unable to reproduce")
+    ):
+        return "not_reproducible"
+    if any(
+        keyword in text
+        for keyword in (
+            "no evidence",
+            "insufficient",
+            "lacks evidence",
+            "not supported",
+            "hypothesized",
+            "theoretical",
+            "speculative",
+        )
+    ):
+        return "insufficient_evidence"
+    return "other"
+
+
+def _run_relative_path(path: Path, run_dir: Path) -> str:
+    """Return ``path`` relative to ``run_dir`` as a forward-slash string.
+
+    Falls back to the original string form if the path is not inside
+    ``run_dir`` (this should not happen in practice but keeps reports robust).
+    """
+    try:
+        rel = path.resolve().relative_to(run_dir.resolve())
+    except ValueError:
+        return str(path)
+    return rel.as_posix()
+
+
+def _write_claim_artifacts(claims_dir: Path, claim_result: SwarmClaim) -> None:
+    """Persist the per-claim JSON + Markdown pair.
+
+    Every claim produces a JSON artifact for traceability. Markdown is
+    suppressed for ``no_finding`` outcomes — those claims are already summed
+    up in ``debug/all_claims.md`` and a per-file Markdown stub just adds
+    noise. Operators who want the full detail still have the JSON.
+    """
+    stem = claim_artifact_stem(claim_result)
+    json_path = claims_dir / f"{stem}.json"
+    json_path.write_text(json.dumps(claim_result.to_dict(), indent=2) + "\n", encoding="utf-8")
+    if claim_result.outcome == "finding":
+        md_path = claims_dir / f"{stem}.md"
+        md_path.write_text(render_claim_markdown(claim_result), encoding="utf-8")
+
+
+def render_claim_markdown(claim_result: SwarmClaim) -> str:
+    tldr = claim_result.claim or "(no claim body provided)"
     lines = [
-        f"# {seed_result.seed_id}",
+        f"# Claim: {claim_result.target_file}",
         "",
-        f"- Target file: `{seed_result.target_file}`",
-        f"- Outcome: `{seed_result.outcome}`",
-        f"- Severity: `{seed_result.severity_bucket}`",
+        "**TL;DR.** " + tldr,
+        "",
+        f"- Target file: `{claim_result.target_file}`",
+        f"- Outcome: `{claim_result.outcome}`",
+        f"- Severity: `{claim_result.severity_bucket}`",
     ]
-    if seed_result.claim:
-        lines.extend(["", "## Claim", seed_result.claim])
-    if seed_result.evidence:
+    if claim_result.claim:
+        lines.extend(["", "## Claim", claim_result.claim])
+    if claim_result.evidence:
         lines.extend(["", "## Evidence"])
-        for item in seed_result.evidence:
+        for item in claim_result.evidence:
             lines.append(f"- {item}")
-    if seed_result.related_files:
+    if claim_result.related_files:
         lines.extend(["", "## Related files"])
-        for item in seed_result.related_files:
+        for item in claim_result.related_files:
             lines.append(f"- `{item}`")
-    if seed_result.notes:
+    if claim_result.notes:
         lines.extend(["", "## Notes"])
-        for item in seed_result.notes:
+        for item in claim_result.notes:
             lines.append(f"- {item}")
+    lines.extend(["", "---", "", f"<sub>Claim ID: `{claim_result.claim_id}`</sub>"])
     return "\n".join(lines).strip() + "\n"
 
 
-def _write_proof_artifacts(proofs_dir: Path, proof_result: SwarmProofResult) -> None:
-    proof_prefix = proof_result.case_id.lower().replace("-", "_")
-    json_path = proofs_dir / f"{proof_prefix}.json"
-    md_path = proofs_dir / f"{proof_prefix}.md"
-    json_path.write_text(json.dumps(proof_result.to_dict(), indent=2) + "\n", encoding="utf-8")
-    md_path.write_text(render_proof_markdown(proof_result), encoding="utf-8")
+def _write_verification_artifacts(validated_dir: Path, verification: SwarmVerification) -> None:
+    stem = verification_artifact_stem(verification)
+    json_path = validated_dir / f"{stem}.json"
+    md_path = validated_dir / f"{stem}.md"
+    json_path.write_text(json.dumps(verification.to_dict(), indent=2) + "\n", encoding="utf-8")
+    md_path.write_text(render_verification_markdown(verification), encoding="utf-8")
 
 
-def render_proof_markdown(proof_result: SwarmProofResult) -> str:
+def render_verification_markdown(verification: SwarmVerification) -> str:
+    tldr = verification.summary or verification.claim or "(no proof summary provided)"
+    verdict = "Verified finding" if verification.meets_report_bar else "Filtered"
     lines = [
-        f"# {proof_result.case_id}",
+        f"# {verdict}: {verification.primary_target_file}",
         "",
-        f"- Primary seed: `{proof_result.primary_seed_id}`",
-        f"- Primary file: `{proof_result.primary_target_file}`",
-        f"- Severity: `{proof_result.severity_bucket}`",
-        f"- Outcome: `{proof_result.outcome}`",
-        f"- Proof state: `{proof_result.proof_state}`",
+        "**TL;DR.** " + tldr,
+        "",
+        f"- Primary file: `{verification.primary_target_file}`",
+        f"- Severity: `{verification.severity_bucket}`",
+        f"- Outcome: `{verification.outcome}`",
+        f"- Proof state: `{verification.proof_state}`",
     ]
-    if proof_result.duplicate_seed_ids:
+    if not verification.meets_report_bar:
+        lines.append(f"- Filter bucket: `{_filter_bucket(verification)}`")
+    if verification.duplicate_claim_ids:
         lines.append(
-            "- Duplicate seeds: "
-            + ", ".join(f"`{seed_id}`" for seed_id in proof_result.duplicate_seed_ids)
+            "- Related claims: "
+            + ", ".join(f"`{claim_id}`" for claim_id in verification.duplicate_claim_ids)
         )
-    if proof_result.claim:
-        lines.extend(["", "## Claim", proof_result.claim])
-    if proof_result.summary:
-        lines.extend(["", "## Proof summary", proof_result.summary])
-    if proof_result.preconditions:
+    if verification.claim:
+        lines.extend(["", "## Claim", verification.claim])
+    if verification.summary:
+        lines.extend(["", "## Proof summary", verification.summary])
+    if verification.preconditions:
         lines.extend(["", "## Preconditions"])
-        for item in proof_result.preconditions:
+        for item in verification.preconditions:
             lines.append(f"- {item}")
-    if proof_result.repro_steps:
+    if verification.repro_steps:
         lines.extend(["", "## Repro steps"])
-        for item in proof_result.repro_steps:
+        for item in verification.repro_steps:
             lines.append(f"- {item}")
-    if proof_result.citations:
+    if verification.citations:
         lines.extend(["", "## Citations"])
-        for item in proof_result.citations:
+        for item in verification.citations:
             lines.append(f"- {item}")
-    if proof_result.notes:
+    if verification.notes:
         lines.extend(["", "## Notes"])
-        for item in proof_result.notes:
+        for item in verification.notes:
             lines.append(f"- {item}")
-    if proof_result.filter_reason:
-        lines.extend(["", "## Filter reason", proof_result.filter_reason])
+    if verification.filter_reason:
+        lines.extend(["", "## Filter reason", verification.filter_reason])
+    footer = (
+        f"<sub>Case ID: `{verification.case_id}` \u2022 "
+        f"Primary claim: `{verification.primary_claim_id}`</sub>"
+    )
+    lines.extend(["", "---", "", footer])
     return "\n".join(lines).strip() + "\n"
 
 
@@ -2555,7 +2859,7 @@ def _require_payload_keys(payload: dict[str, Any], keys: tuple[str, ...]) -> Non
         raise RuntimeError("Structured swarm response missing keys: " + ", ".join(missing))
 
 
-def _issue_grouping_keys(left: SwarmSeedResult, right: SwarmSeedResult) -> tuple[str, ...]:
+def _case_grouping_keys(left: SwarmClaim, right: SwarmClaim) -> tuple[str, ...]:
     left_supporting = _supporting_context_files(left)
     right_supporting = _supporting_context_files(right)
     keys: set[str] = set()
@@ -2570,8 +2874,8 @@ def _issue_grouping_keys(left: SwarmSeedResult, right: SwarmSeedResult) -> tuple
     return tuple(sorted(keys))
 
 
-def _supporting_context_files(seed_result: SwarmSeedResult) -> set[str]:
-    return set(seed_result.related_files) | set(_evidence_file_refs(seed_result.evidence))
+def _supporting_context_files(claim_result: SwarmClaim) -> set[str]:
+    return set(claim_result.related_files) | set(_evidence_file_refs(claim_result.evidence))
 
 
 def _evidence_file_refs(evidence: tuple[str, ...]) -> tuple[str, ...]:
@@ -2652,14 +2956,14 @@ def run_swarm_sweep(
         raise RuntimeError("Swarm config is not available.")
 
     swarm_root = run_dir / "swarm"
-    seeds_dir = swarm_root / "seeds"
-    proofs_dir = swarm_root / "proofs"
-    reports_dir = swarm_root / "reports"
-    usage_summary = swarm_root / "usage_summary.json"
-    tool_trace_log = swarm_root / "tool_trace.jsonl"
-    seeds_dir.mkdir(parents=True, exist_ok=True)
-    proofs_dir.mkdir(parents=True, exist_ok=True)
-    reports_dir.mkdir(parents=True, exist_ok=True)
+    claims_dir = swarm_root / "claims"
+    validated_dir = swarm_root / "validated"
+    debug_dir = swarm_root / "debug"
+    usage_summary = debug_dir / "usage_summary.json"
+    tool_trace_log = debug_dir / "tool_trace.jsonl"
+    claims_dir.mkdir(parents=True, exist_ok=True)
+    validated_dir.mkdir(parents=True, exist_ok=True)
+    debug_dir.mkdir(parents=True, exist_ok=True)
 
     swarm_digest_text = swarm_digest_path.read_text(encoding="utf-8")
     shared_manifest_text = shared_manifest_path.read_text(encoding="utf-8")
@@ -2675,37 +2979,66 @@ def run_swarm_sweep(
     metrics = SwarmRunMetrics(path=usage_summary)
     metrics.write()
     prompt_asset = prompt_bundle.seed
-    seed_output_path = _managed_runtime_display_path(seeds_dir, data_root=data_root)
-    jobs, ordered_seed_metadata = _build_seed_worker_jobs(
+    claim_output_path = _managed_runtime_display_path(claims_dir, data_root=data_root)
+    jobs, ordered_claim_metadata = _build_claim_worker_jobs(
         cwd=cwd,
         loaded=loaded,
         prompt_asset=prompt_asset,
         eligible_files=eligible_files,
         swarm_digest_text=swarm_digest_text,
         shared_manifest_text=shared_manifest_text,
-        seed_output_path=seed_output_path,
+        claim_output_path=claim_output_path,
         tool_schemas=tuple(tools.schemas()),
     )
-    seed_results_by_id: dict[str, SwarmSeedResult] = {}
-    target_files_by_seed_id = dict(ordered_seed_metadata)
-    current_stage = "seed"
-    seed_ledger = reports_dir / "seed_ledger.md"
-    case_groups = reports_dir / "case_groups.md"
-    final_ranked_findings = reports_dir / "final_ranked_findings.md"
-    final_summary = reports_dir / "final_summary.md"
-    partial_summary = reports_dir / "partial_summary.md"
-    seed_results: tuple[SwarmSeedResult, ...] = ()
-    issue_candidates: tuple[SwarmIssueCandidate, ...] = ()
-    proof_results: tuple[SwarmProofResult, ...] = ()
+    claim_results_by_id: dict[str, SwarmClaim] = {}
+    target_files_by_claim_id = dict(ordered_claim_metadata)
+    current_stage = "claim"
+    # Primary operator-facing reports live at swarm/ root. Everything else
+    # (raw ledger, case grouping, partial summary, tool trace, usage) lives
+    # under debug/ so the root is quiet by default.
+    findings_path = swarm_root / "FINDINGS.md"
+    summary_path = swarm_root / "SUMMARY.md"
+    all_claims_path = debug_dir / "all_claims.md"
+    case_groups_path = debug_dir / "case_groups.md"
+    partial_summary_path = debug_dir / "partial_summary.md"
+    prompts_path = run_dir / "prompts"
+    findings_rel = _run_relative_path(findings_path, run_dir)
+    summary_rel = _run_relative_path(summary_path, run_dir)
+    all_claims_rel = _run_relative_path(all_claims_path, run_dir)
+    case_groups_rel_path = _run_relative_path(case_groups_path, run_dir)
+    prompts_rel = (
+        _run_relative_path(prompts_path, run_dir) if prompts_path.exists() else None
+    )
+    usage_rel = _run_relative_path(usage_summary, run_dir)
+    claims_rel = _run_relative_path(claims_dir, run_dir)
+    validated_rel = _run_relative_path(validated_dir, run_dir)
+    # Relative references resolved from SUMMARY.md / FINDINGS.md (both live
+    # at swarm/ root), so strip the leading ``swarm/`` for the link targets.
+    def _swarm_relative(rel: str) -> str:
+        prefix = "swarm/"
+        return rel[len(prefix):] if rel.startswith(prefix) else rel
 
-    def _persist_seed_result(job: SwarmWorkerJob, result: ProviderTurnResult) -> None:
-        seed_result = parse_seed_payload(
+    findings_swarm_rel = _swarm_relative(findings_rel)
+    all_claims_swarm_rel = _swarm_relative(all_claims_rel)
+    case_groups_swarm_rel = _swarm_relative(case_groups_rel_path)
+    usage_swarm_rel = _swarm_relative(usage_rel)
+    prompts_swarm_rel = (
+        _swarm_relative(prompts_rel) if prompts_rel is not None else None
+    )
+    claims_dir_swarm_rel = _swarm_relative(claims_rel)
+    validated_dir_swarm_rel = _swarm_relative(validated_rel)
+    claim_results: tuple[SwarmClaim, ...] = ()
+    cases: tuple[SwarmCase, ...] = ()
+    verifications: tuple[SwarmVerification, ...] = ()
+
+    def _persist_claim_result(job: SwarmWorkerJob, result: ProviderTurnResult) -> None:
+        claim_result = parse_claim_payload(
             payload=_parse_json_object(result.final_text),
-            seed_id=job.worker_id,
-            target_file=target_files_by_seed_id[job.worker_id],
+            claim_id=job.worker_id,
+            target_file=target_files_by_claim_id[job.worker_id],
         )
-        _write_seed_artifacts(seeds_dir, seed_result)
-        seed_results_by_id[job.worker_id] = seed_result
+        _write_claim_artifacts(claims_dir, claim_result)
+        claim_results_by_id[job.worker_id] = claim_result
 
     try:
         try:
@@ -2721,8 +3054,8 @@ def run_swarm_sweep(
                     if loaded.effective.swarm.budget_mode == "advisory"
                     else loaded.effective.swarm.token_budget
                 ),
-                on_worker_completed=_persist_seed_result,
-                stage_name="seed",
+                on_worker_completed=_persist_claim_result,
+                stage_name="claim",
                 metrics_tracker=metrics,
                 progress_callback=progress_callback,
                 cwd=cwd,
@@ -2731,90 +3064,93 @@ def run_swarm_sweep(
                 tool_trace_path=tool_trace_log,
                 data_root=data_root,
             )
-            resolved_seed_results: list[SwarmSeedResult] = []
-            for seed_id, target_file in ordered_seed_metadata:
-                seed_result = seed_results_by_id.get(seed_id)
-                if seed_result is None:
-                    result = provider_results[seed_id]
+            resolved_claim_results: list[SwarmClaim] = []
+            for claim_id, target_file in ordered_claim_metadata:
+                claim_result = claim_results_by_id.get(claim_id)
+                if claim_result is None:
+                    result = provider_results[claim_id]
                     payload = _parse_json_object(result.final_text)
-                    seed_result = parse_seed_payload(
+                    claim_result = parse_claim_payload(
                         payload=payload,
-                        seed_id=seed_id,
+                        claim_id=claim_id,
                         target_file=target_file,
                     )
-                    _write_seed_artifacts(seeds_dir, seed_result)
-                resolved_seed_results.append(seed_result)
-            seed_results = tuple(resolved_seed_results)
+                    _write_claim_artifacts(claims_dir, claim_result)
+                resolved_claim_results.append(claim_result)
+            claim_results = tuple(resolved_claim_results)
         except SwarmStageAbort as exc:
-            seed_results = tuple(
-                seed_results_by_id[seed_id]
-                for seed_id, _ in ordered_seed_metadata
-                if seed_id in seed_results_by_id
+            claim_results = tuple(
+                claim_results_by_id[claim_id]
+                for claim_id, _ in ordered_claim_metadata
+                if claim_id in claim_results_by_id
             )
-            write_seed_ledger(seed_ledger, list(seed_results))
+            write_all_claims(all_claims_path, list(claim_results))
             write_partial_summary(
-                partial_summary,
-                stage_name="seed",
+                partial_summary_path,
+                stage_name="claim",
                 failure=exc.primary_diagnostic,
-                completed_worker_ids=tuple(result.seed_id for result in seed_results),
+                completed_worker_ids=tuple(result.claim_id for result in claim_results),
                 skipped_worker_ids=exc.skipped_worker_ids,
-                seed_results=seed_results,
-                issue_candidates=(),
-                proof_results=(),
-                usage_summary=usage_summary,
-                seed_ledger=seed_ledger,
+                claim_results=claim_results,
+                cases=(),
+                verifications=(),
+                findings_rel=findings_rel,
+                all_claims_rel=all_claims_rel,
+                case_groups_rel=None,
+                prompts_rel=prompts_rel,
+                usage_rel=usage_rel,
             )
             raise
 
-        write_seed_ledger(seed_ledger, list(seed_results))
-        issue_candidates = promote_issue_candidates(list(seed_results))
-        proof_results_list: list[SwarmProofResult] = []
-        current_stage = "proof"
-        if issue_candidates:
+        write_all_claims(all_claims_path, list(claim_results))
+        cases = promote_cases(list(claim_results))
+        verifications_list: list[SwarmVerification] = []
+        current_stage = "verify"
+        if cases:
             proof_prompt_asset = prompt_bundle.proof
-            seed_lookup = {result.seed_id: result for result in seed_results}
-            proof_jobs: list[SwarmWorkerJob] = []
-            issue_candidates_by_case_id: dict[str, SwarmIssueCandidate] = {}
-            for issue_candidate in issue_candidates:
-                issue_candidates_by_case_id[issue_candidate.case_id] = issue_candidate
-                issue_seed_results = tuple(seed_lookup[seed_id] for seed_id in issue_candidate.seed_ids)
-                proof_jobs.append(
+            claim_lookup = {result.claim_id: result for result in claim_results}
+            verify_jobs: list[SwarmWorkerJob] = []
+            cases_by_case_id: dict[str, SwarmCase] = {}
+            for case in cases:
+                cases_by_case_id[case.case_id] = case
+                case_claim_results = tuple(claim_lookup[claim_id] for claim_id in case.claim_ids)
+                verify_jobs.append(
                     SwarmWorkerJob(
-                        worker_id=issue_candidate.case_id,
-                        worker_type="proof_issue",
-                        lease_key=f"issue:{issue_candidate.case_id}",
+                        worker_id=case.case_id,
+                        worker_type="verify_case",
+                        lease_key=f"case:{case.case_id}",
                         model=loaded.effective.swarm.proof_model,
                         reasoning_effort=loaded.effective.swarm.reasoning.proof,
                         instructions=proof_prompt_asset.read_text(),
-                        input_text=build_proof_input(
-                            issue_candidate=issue_candidate,
-                            issue_seed_results=issue_seed_results,
+                        input_text=build_verification_input(
+                            case=case,
+                            case_claim_results=case_claim_results,
                             swarm_digest_text=swarm_digest_text,
                             shared_manifest_text=shared_manifest_text,
                         ),
                         prompt_cache_key=proof_prompt_asset.prompt_cache_key,
-                        text_format=PROOF_RESPONSE_FORMAT,
+                        text_format=VERIFICATION_RESPONSE_FORMAT,
                         tools=tuple(tools.schemas()),
-                        progress_label=issue_candidate.primary_target_file,
+                        progress_label=case.primary_target_file,
                         progress_action=(
-                            f"validate promoted finding for {issue_candidate.primary_target_file}"
+                            f"verify promoted case for {case.primary_target_file}"
                         ),
                     )
                 )
-            proof_results_by_case_id: dict[str, SwarmProofResult] = {}
+            verifications_by_case_id: dict[str, SwarmVerification] = {}
 
-            def _persist_proof_result(job: SwarmWorkerJob, result: ProviderTurnResult) -> None:
-                proof_result = parse_proof_payload(
+            def _persist_verification(job: SwarmWorkerJob, result: ProviderTurnResult) -> None:
+                verification = parse_verification_payload(
                     payload=_parse_json_object(result.final_text),
-                    issue_candidate=issue_candidates_by_case_id[job.worker_id],
+                    case=cases_by_case_id[job.worker_id],
                 )
-                _write_proof_artifacts(proofs_dir, proof_result)
-                proof_results_by_case_id[job.worker_id] = proof_result
+                _write_verification_artifacts(validated_dir, verification)
+                verifications_by_case_id[job.worker_id] = verification
 
             try:
-                proof_provider_results = run_background_swarm_workers(
+                verify_provider_results = run_background_swarm_workers(
                     provider=provider,
-                    jobs=proof_jobs,
+                    jobs=verify_jobs,
                     tool_executor=tools.run,
                     max_parallel=loaded.effective.swarm.proof_max_parallel,
                     max_retries=DEFAULT_SWARM_MAX_RETRIES,
@@ -2824,60 +3160,71 @@ def run_swarm_sweep(
                         if loaded.effective.swarm.budget_mode == "advisory"
                         else loaded.effective.swarm.token_budget
                     ),
-                    on_worker_completed=_persist_proof_result,
-                    stage_name="proof",
+                    on_worker_completed=_persist_verification,
+                    stage_name="verify",
                     metrics_tracker=metrics,
                     progress_callback=progress_callback,
                     cwd=cwd,
                     provider_name=loaded.effective.active_provider,
                     scheduler_preset=loaded.effective.swarm.preset,
                     tool_trace_path=tool_trace_log,
-                data_root=data_root,
+                    data_root=data_root,
                 )
-                for issue_candidate in issue_candidates:
-                    proof_result = proof_results_by_case_id.get(issue_candidate.case_id)
-                    if proof_result is None:
-                        result = proof_provider_results[issue_candidate.case_id]
+                for case in cases:
+                    verification = verifications_by_case_id.get(case.case_id)
+                    if verification is None:
+                        result = verify_provider_results[case.case_id]
                         payload = _parse_json_object(result.final_text)
-                        proof_result = parse_proof_payload(
+                        verification = parse_verification_payload(
                             payload=payload,
-                            issue_candidate=issue_candidate,
+                            case=case,
                         )
-                        _write_proof_artifacts(proofs_dir, proof_result)
-                    proof_results_list.append(proof_result)
+                        _write_verification_artifacts(validated_dir, verification)
+                    verifications_list.append(verification)
             except SwarmStageAbort as exc:
-                proof_results = tuple(
-                    proof_results_by_case_id[issue_candidate.case_id]
-                    for issue_candidate in issue_candidates
-                    if issue_candidate.case_id in proof_results_by_case_id
+                verifications = tuple(
+                    verifications_by_case_id[case.case_id]
+                    for case in cases
+                    if case.case_id in verifications_by_case_id
                 )
                 write_partial_summary(
-                    partial_summary,
-                    stage_name="proof",
+                    partial_summary_path,
+                    stage_name="verify",
                     failure=exc.primary_diagnostic,
-                    completed_worker_ids=tuple(result.case_id for result in proof_results),
+                    completed_worker_ids=tuple(result.case_id for result in verifications),
                     skipped_worker_ids=exc.skipped_worker_ids,
-                    seed_results=seed_results,
-                    issue_candidates=issue_candidates,
-                    proof_results=proof_results,
-                    usage_summary=usage_summary,
-                    seed_ledger=seed_ledger,
+                    claim_results=claim_results,
+                    cases=cases,
+                    verifications=verifications,
+                    findings_rel=findings_rel,
+                    all_claims_rel=all_claims_rel,
+                    case_groups_rel=None,
+                    prompts_rel=prompts_rel,
+                    usage_rel=usage_rel,
                 )
                 raise
-        proof_results = tuple(proof_results_list)
+        verifications = tuple(verifications_list)
 
         current_stage = "report"
-        write_case_groups(case_groups, issue_candidates, list(seed_results), proof_results)
-        write_final_ranked_findings(final_ranked_findings, proof_results)
-        write_final_summary(
-            final_summary,
-            list(seed_results),
-            issue_candidates,
-            proof_results,
-            seed_ledger,
-            case_groups,
-            final_ranked_findings,
-            usage_summary,
+        wrote_case_groups = write_case_groups(
+            case_groups_path, cases, list(claim_results), verifications
+        )
+        write_findings(
+            findings_path,
+            verifications,
+            claims_rel=claims_dir_swarm_rel,
+            validated_rel=validated_dir_swarm_rel,
+        )
+        write_summary(
+            summary_path,
+            list(claim_results),
+            cases,
+            verifications,
+            findings_rel=findings_swarm_rel,
+            all_claims_rel=all_claims_swarm_rel,
+            case_groups_rel=case_groups_swarm_rel if wrote_case_groups else None,
+            prompts_rel=prompts_swarm_rel,
+            usage_rel=usage_swarm_rel,
         )
     except Exception as exc:
         metrics.mark_failed(stage_name=current_stage, reason=str(exc))
@@ -2885,17 +3232,18 @@ def run_swarm_sweep(
 
     metrics.mark_completed()
     return SwarmSweepResult(
-        seeds_dir=seeds_dir,
-        proofs_dir=proofs_dir,
-        reports_dir=reports_dir,
+        swarm_root=swarm_root,
+        claims_dir=claims_dir,
+        validated_dir=validated_dir,
+        debug_dir=debug_dir,
         tool_trace_log=tool_trace_log,
-        seed_results=seed_results,
-        issue_candidates=issue_candidates,
-        proof_results=proof_results,
-        seed_ledger=seed_ledger,
-        case_groups=case_groups,
-        final_ranked_findings=final_ranked_findings,
-        final_summary=final_summary,
+        claim_results=claim_results,
+        cases=cases,
+        verifications=verifications,
+        findings=findings_path,
+        summary=summary_path,
+        all_claims=all_claims_path,
+        case_groups=case_groups_path,
         usage_summary=usage_summary,
     )
 

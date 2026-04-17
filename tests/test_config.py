@@ -967,10 +967,10 @@ class ConfigTests(unittest.TestCase):
             record_run_failure(
                 cwd=repo_dir,
                 run_id="2026-04-06_120000",
-                failure_stage="seed",
-                failure_worker_id="SEED-014",
+                failure_stage="claim",
+                failure_worker_id="CLAIM-014",
                 failure_message="Structured swarm response missing keys: notes",
-                failure_artifact=runs_root(repo_dir) / "2026-04-06_120000" / "swarm" / "failure_diagnostic.json",
+                failure_artifact=runs_root(repo_dir) / "2026-04-06_120000" / "swarm" / "debug" / "failure_diagnostic.json",
             )
 
             self.assertEqual(state_root(repo_dir) / "awdit.db", db_path)
@@ -984,8 +984,8 @@ class ConfigTests(unittest.TestCase):
                     ("2026-04-06_120000",),
                 ).fetchone()
 
-            self.assertEqual("seed", row[0])
-            self.assertEqual("SEED-014", row[1])
+            self.assertEqual("claim", row[0])
+            self.assertEqual("CLAIM-014", row[1])
             self.assertIn("missing keys: notes", row[2])
             self.assertTrue(row[3].endswith("failure_diagnostic.json"))
 
@@ -1000,7 +1000,7 @@ class ConfigTests(unittest.TestCase):
                 model="gpt-5.4-mini",
                 learned_tpm_limit=200000,
                 headroom_fraction=0.85,
-                observed_peak_input_tokens={"seed_file": 40, "proof_issue": 25},
+                observed_peak_input_tokens={"claim_file": 40, "verify_case": 25},
             )
 
             record = load_learned_model_limit(
@@ -1012,7 +1012,7 @@ class ConfigTests(unittest.TestCase):
             self.assertIsNotNone(record)
             self.assertEqual(200000, record.learned_tpm_limit)
             self.assertEqual(0.85, record.headroom_fraction)
-            self.assertEqual({"seed_file": 40, "proof_issue": 25}, record.observed_peak_input_tokens)
+            self.assertEqual({"claim_file": 40, "verify_case": 25}, record.observed_peak_input_tokens)
 
 
 if __name__ == "__main__":

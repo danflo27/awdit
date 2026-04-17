@@ -22,14 +22,14 @@ from state_db import load_learned_model_limit, save_learned_model_limit
 from swarm import (
     RepoReadOnlyTools,
     SwarmRunMetrics,
-    SwarmSeedResult,
+    SwarmClaim,
     SwarmStageAbort,
     SwarmWorkerFailure,
     SwarmWorkerJob,
     freeze_swarm_prompt_bundle,
     generate_danger_map,
     list_eligible_swarm_files,
-    promote_issue_candidates,
+    promote_cases,
     run_background_swarm_workers,
     run_swarm_sweep,
 )
@@ -474,7 +474,7 @@ class RunningThenFailureProvider:
         return None
 
 
-class PartialSeedFailureProvider:
+class PartialClaimFailureProvider:
     def __init__(self) -> None:
         self.start_calls: list[dict[str, object]] = []
 
@@ -731,7 +731,7 @@ class DrainAfterAbortProvider:
         return None
 
 
-class SeedStageAbortProvider(DrainAfterAbortProvider):
+class ClaimStageAbortProvider(DrainAfterAbortProvider):
     def __init__(self, *, failure_message: str) -> None:
         super().__init__(
             failure_message=failure_message,
@@ -822,12 +822,12 @@ class SwarmTests(unittest.TestCase):
                 eligible_files=[(repo_dir / "app" / "service.py").resolve()],
             )
 
-            self.assertEqual(1, len(result.seed_results))
-            self.assertEqual(1, len(result.issue_candidates))
-            self.assertEqual(1, len(result.proof_results))
+            self.assertEqual(1, len(result.claim_results))
+            self.assertEqual(1, len(result.cases))
+            self.assertEqual(1, len(result.verifications))
             self.assertIn("# frozen seed prompt", provider.start_calls[0]["instructions"])
             self.assertIn("Hint: app/service.py", provider.start_calls[0]["instructions"])
-            self.assertIn("Write to runs/run_1/swarm/seeds", provider.start_calls[0]["instructions"])
+            self.assertIn("Write to runs/run_1/swarm/claims", provider.start_calls[0]["instructions"])
             self.assertEqual("# frozen proof prompt\n", provider.start_calls[1]["instructions"])
             self.assertEqual("low", provider.start_calls[0]["reasoning_effort"])
             self.assertEqual("medium", provider.start_calls[1]["reasoning_effort"])
@@ -1013,7 +1013,7 @@ class SwarmTests(unittest.TestCase):
                     eligible_files=[(repo_dir / "app" / "service.py").resolve()],
                 )
 
-            self.assertEqual(1, len(result.proof_results))
+            self.assertEqual(1, len(result.verifications))
             self.assertEqual(2, wrapped.call_count)
             self.assertEqual(3, wrapped.call_args_list[0].kwargs["max_parallel"])
             self.assertEqual(2, wrapped.call_args_list[1].kwargs["max_parallel"])
@@ -1081,29 +1081,31 @@ class SwarmTests(unittest.TestCase):
                 ],
             )
 
-            self.assertEqual(2, len(result.seed_results))
-            self.assertEqual(1, len(result.issue_candidates))
-            self.assertEqual({"SEED-001", "SEED-002"}, set(result.issue_candidates[0].seed_ids))
-            self.assertEqual(1, len(result.issue_candidates[0].duplicate_seed_ids))
-            duplicate_seed_id = result.issue_candidates[0].duplicate_seed_ids[0]
-            proof_input = json.loads(provider.start_calls[2]["input_text"])
-            self.assertEqual("proof_issue", proof_input["task_type"])
-            self.assertEqual("issue:SWM-001", proof_input["lease_key"])
-            self.assertTrue((result.proofs_dir / "swm_001.json").exists())
-            self.assertTrue((result.proofs_dir / "swm_001.md").exists())
+            self.assertEqual(2, len(result.claim_results))
+            self.assertEqual(1, len(result.cases))
+            self.assertEqual({"CLAIM-001", "CLAIM-002"}, set(result.cases[0].claim_ids))
+            self.assertEqual(1, len(result.cases[0].duplicate_claim_ids))
+            duplicate_claim_id = result.cases[0].duplicate_claim_ids[0]
+            verify_input = json.loads(provider.start_calls[2]["input_text"])
+            self.assertEqual("verify_case", verify_input["task_type"])
+            self.assertEqual("case:CASE-001", verify_input["lease_key"])
+            verify_files = sorted(p.name for p in result.validated_dir.iterdir())
+            self.assertEqual(2, len(verify_files))
+            self.assertTrue(any(name.endswith("-001.json") for name in verify_files))
+            self.assertTrue(any(name.endswith("-001.md") for name in verify_files))
 
             case_groups = result.case_groups.read_text(encoding="utf-8")
-            ranked = result.final_ranked_findings.read_text(encoding="utf-8")
-            self.assertIn(f"Duplicate seeds: `{duplicate_seed_id}`", case_groups)
+            findings_text = result.findings.read_text(encoding="utf-8")
+            self.assertIn(f"Duplicate claims: `{duplicate_claim_id}`", case_groups)
             self.assertIn("Proof state: `executed_proof`", case_groups)
-            self.assertIn(f"Related duplicate seeds: `{duplicate_seed_id}`", ranked)
-            self.assertIn("Case: `SWM-001`", ranked)
+            self.assertIn(f"Related claims: `{duplicate_claim_id}`", findings_text)
+            self.assertIn("CASE-001", findings_text)
 
     def test_swarm_does_not_group_seeds_without_bidirectional_target_links(self) -> None:
-        issue_candidates = promote_issue_candidates(
+        cases = promote_cases(
             [
-                SwarmSeedResult(
-                    seed_id="SEED-001",
+                SwarmClaim(
+                    claim_id="CLAIM-001",
                     target_file="app/routes.py",
                     outcome="finding",
                     severity_bucket="high",
@@ -1112,8 +1114,8 @@ class SwarmTests(unittest.TestCase):
                     related_files=("app/db.py",),
                     notes=(),
                 ),
-                SwarmSeedResult(
-                    seed_id="SEED-002",
+                SwarmClaim(
+                    claim_id="CLAIM-002",
                     target_file="app/admin.py",
                     outcome="finding",
                     severity_bucket="medium",
@@ -1125,9 +1127,9 @@ class SwarmTests(unittest.TestCase):
             ]
         )
 
-        self.assertEqual(2, len(issue_candidates))
-        self.assertEqual(("SEED-001",), issue_candidates[0].seed_ids)
-        self.assertEqual(("SEED-002",), issue_candidates[1].seed_ids)
+        self.assertEqual(2, len(cases))
+        self.assertEqual(("CLAIM-001",), cases[0].claim_ids)
+        self.assertEqual(("CLAIM-002",), cases[1].claim_ids)
 
     def test_swarm_filters_non_reportable_proof_from_ranked_report(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -1178,13 +1180,12 @@ class SwarmTests(unittest.TestCase):
                 eligible_files=[(repo_dir / "app" / "service.py").resolve()],
             )
 
-            ranked = result.final_ranked_findings.read_text(encoding="utf-8")
-            summary = result.final_summary.read_text(encoding="utf-8")
-            self.assertIn("No findings cleared the proof-stage report bar.", ranked)
-            self.assertIn("## Filtered out", ranked)
-            self.assertIn("debug-only branch", ranked)
-            self.assertIn("- Path-grounded only: `1`", summary)
-            self.assertIn("- Findings kept after proof: `0`", summary)
+            findings_text = result.findings.read_text(encoding="utf-8")
+            summary_text = result.summary.read_text(encoding="utf-8")
+            self.assertIn("No findings cleared the proof-stage report bar.", findings_text)
+            self.assertIn("## Filtered", findings_text)
+            self.assertIn("- Path-grounded only: `1`", summary_text)
+            self.assertIn("- Verified findings: `0`", summary_text)
 
     def test_swarm_respects_explicit_not_reportable_written_proof(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -1235,16 +1236,22 @@ class SwarmTests(unittest.TestCase):
                 eligible_files=[(repo_dir / "app" / "service.py").resolve()],
             )
 
-            proof_result = result.proof_results[0]
-            ranked = result.final_ranked_findings.read_text(encoding="utf-8")
-            summary = result.final_summary.read_text(encoding="utf-8")
-            self.assertEqual("not_reportable", proof_result.outcome)
-            self.assertEqual("debug-only branch", proof_result.filter_reason)
-            self.assertFalse(proof_result.meets_report_bar)
-            self.assertIn("No findings cleared the proof-stage report bar.", ranked)
-            self.assertIn("debug-only branch", ranked)
-            self.assertIn("- Written proofs: `1`", summary)
-            self.assertIn("- Findings kept after proof: `0`", summary)
+            verification = result.verifications[0]
+            findings_text = result.findings.read_text(encoding="utf-8")
+            summary_text = result.summary.read_text(encoding="utf-8")
+            self.assertEqual("not_reportable", verification.outcome)
+            self.assertEqual("debug-only branch", verification.filter_reason)
+            self.assertFalse(verification.meets_report_bar)
+            self.assertIn("No findings cleared the proof-stage report bar.", findings_text)
+            self.assertIn("## Filtered", findings_text)
+            # Raw filter_reason now lives in the per-case validated/ artifact,
+            # not FINDINGS.md.
+            self.assertTrue(
+                any("debug-only branch" in path.read_text(encoding="utf-8")
+                    for path in result.validated_dir.glob("*.md"))
+            )
+            self.assertIn("- Written proofs: `1`", summary_text)
+            self.assertIn("- Verified findings: `0`", summary_text)
 
     def test_swarm_filters_contradictory_reportable_written_proof(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -1295,15 +1302,17 @@ class SwarmTests(unittest.TestCase):
                 eligible_files=[(repo_dir / "app" / "service.py").resolve()],
             )
 
-            proof_result = result.proof_results[0]
-            ranked = result.final_ranked_findings.read_text(encoding="utf-8")
-            summary = result.final_summary.read_text(encoding="utf-8")
-            self.assertEqual("not_reportable", proof_result.outcome)
-            self.assertEqual("path_grounded", proof_result.proof_state)
-            self.assertIn("proof summary contradicts reportable outcome", proof_result.filter_reason)
-            self.assertIn("No findings cleared the proof-stage report bar.", ranked)
-            self.assertIn("contradicts reportable outcome", ranked)
-            self.assertIn("- Proof stage mode: `read-only validation`", summary)
+            verification = result.verifications[0]
+            findings_text = result.findings.read_text(encoding="utf-8")
+            summary_text = result.summary.read_text(encoding="utf-8")
+            self.assertEqual("not_reportable", verification.outcome)
+            self.assertEqual("path_grounded", verification.proof_state)
+            self.assertIn("proof summary contradicts reportable outcome", verification.filter_reason)
+            self.assertIn("No findings cleared the proof-stage report bar.", findings_text)
+            self.assertIn("## Filtered", findings_text)
+            # Verdict-first summary surfaces the filtered count; the raw
+            # filter_reason lives in the per-case validated/ artifact.
+            self.assertIn("- Filtered: `1`", summary_text)
 
     def test_repo_tools_reject_tracked_symlink_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -1497,7 +1506,7 @@ class SwarmTests(unittest.TestCase):
             progress_events: list[tuple[str, dict[str, object]]] = []
             job = SwarmWorkerJob(
                 worker_id="job_tools",
-                worker_type="seed_file",
+                worker_type="claim_file",
                 lease_key="file:app/service.py",
                 model="gpt-5.4-mini",
                 reasoning_effort="low",
@@ -1514,7 +1523,7 @@ class SwarmTests(unittest.TestCase):
                 tool_executor=lambda name, arguments: "",
                 max_parallel=1,
                 poll_interval_seconds=0.0,
-                stage_name="seed",
+                stage_name="claim",
                 cwd=repo_dir,
                 provider_name="openai",
                 tool_trace_path=trace_path,
@@ -1553,7 +1562,7 @@ class SwarmTests(unittest.TestCase):
         jobs = [
             SwarmWorkerJob(
                 worker_id="job_a1",
-                worker_type="seed_file",
+                worker_type="claim_file",
                 lease_key="file:app/a.py",
                 model="gpt-5.4-mini",
                 reasoning_effort="low",
@@ -1565,7 +1574,7 @@ class SwarmTests(unittest.TestCase):
             ),
             SwarmWorkerJob(
                 worker_id="job_a2",
-                worker_type="seed_file",
+                worker_type="claim_file",
                 lease_key="file:app/a.py",
                 model="gpt-5.4-mini",
                 reasoning_effort="low",
@@ -1577,7 +1586,7 @@ class SwarmTests(unittest.TestCase):
             ),
             SwarmWorkerJob(
                 worker_id="job_b1",
-                worker_type="seed_file",
+                worker_type="claim_file",
                 lease_key="file:app/b.py",
                 model="gpt-5.4-mini",
                 reasoning_effort="low",
@@ -1607,7 +1616,7 @@ class SwarmTests(unittest.TestCase):
         jobs = [
             SwarmWorkerJob(
                 worker_id="job_a",
-                worker_type="seed_file",
+                worker_type="claim_file",
                 lease_key="file:app/a.py",
                 model="gpt-5.4-mini",
                 reasoning_effort="low",
@@ -1619,7 +1628,7 @@ class SwarmTests(unittest.TestCase):
             ),
             SwarmWorkerJob(
                 worker_id="job_b",
-                worker_type="seed_file",
+                worker_type="claim_file",
                 lease_key="file:app/b.py",
                 model="gpt-5.4-mini",
                 reasoning_effort="low",
@@ -1631,7 +1640,7 @@ class SwarmTests(unittest.TestCase):
             ),
             SwarmWorkerJob(
                 worker_id="job_c",
-                worker_type="seed_file",
+                worker_type="claim_file",
                 lease_key="file:app/c.py",
                 model="gpt-5.4-mini",
                 reasoning_effort="low",
@@ -1659,7 +1668,7 @@ class SwarmTests(unittest.TestCase):
         jobs = [
             SwarmWorkerJob(
                 worker_id="job_a",
-                worker_type="seed_file",
+                worker_type="claim_file",
                 lease_key="file:app/a.py",
                 model="gpt-5.4-mini",
                 reasoning_effort="low",
@@ -1676,7 +1685,7 @@ class SwarmTests(unittest.TestCase):
             provider=provider,
             jobs=jobs,
             tool_executor=lambda name, arguments: "",
-            stage_name="seed",
+            stage_name="claim",
             max_parallel=1,
             poll_interval_seconds=0.0,
             progress_callback=lambda event_type, data: progress_events.append((event_type, dict(data))),
@@ -1687,7 +1696,7 @@ class SwarmTests(unittest.TestCase):
             ["stage_started", "worker_started", "worker_completed", "stage_completed"],
             [event_type for event_type, _ in progress_events],
         )
-        self.assertEqual("seed", progress_events[0][1]["stage_name"])
+        self.assertEqual("claim", progress_events[0][1]["stage_name"])
         self.assertEqual("app/a.py", progress_events[1][1]["label"])
         self.assertEqual("inspect app/a.py", progress_events[1][1]["action"])
         self.assertGreaterEqual(float(progress_events[2][1]["elapsed_seconds"]), 0.0)
@@ -1698,7 +1707,7 @@ class SwarmTests(unittest.TestCase):
         jobs = [
             SwarmWorkerJob(
                 worker_id="job_retry",
-                worker_type="seed_file",
+                worker_type="claim_file",
                 lease_key="file:app/a.py",
                 model="gpt-5.4-mini",
                 reasoning_effort="low",
@@ -1727,7 +1736,7 @@ class SwarmTests(unittest.TestCase):
         jobs = [
             SwarmWorkerJob(
                 worker_id="job_retry",
-                worker_type="seed_file",
+                worker_type="claim_file",
                 lease_key="file:app/a.py",
                 model="gpt-5.4-mini",
                 reasoning_effort="low",
@@ -1773,7 +1782,7 @@ class SwarmTests(unittest.TestCase):
         jobs = [
             SwarmWorkerJob(
                 worker_id="job_retry",
-                worker_type="seed_file",
+                worker_type="claim_file",
                 lease_key="file:app/a.py",
                 model="gpt-5.4-mini",
                 reasoning_effort="low",
@@ -1824,13 +1833,13 @@ class SwarmTests(unittest.TestCase):
                 model="gpt-5.4-mini",
                 learned_tpm_limit=200,
                 headroom_fraction=0.85,
-                observed_peak_input_tokens={"seed_file": 30},
+                observed_peak_input_tokens={"claim_file": 30},
             )
             provider = MaxInFlightUsageProvider(usage_tokens=20)
             jobs = [
                 SwarmWorkerJob(
                     worker_id="job_a",
-                    worker_type="seed_file",
+                    worker_type="claim_file",
                     lease_key="file:app/a.py",
                     model="gpt-5.4-mini",
                     reasoning_effort="low",
@@ -1842,7 +1851,7 @@ class SwarmTests(unittest.TestCase):
                 ),
                 SwarmWorkerJob(
                     worker_id="job_b",
-                    worker_type="seed_file",
+                    worker_type="claim_file",
                     lease_key="file:app/b.py",
                     model="gpt-5.4-mini",
                     reasoning_effort="low",
@@ -1854,7 +1863,7 @@ class SwarmTests(unittest.TestCase):
                 ),
                 SwarmWorkerJob(
                     worker_id="job_c",
-                    worker_type="seed_file",
+                    worker_type="claim_file",
                     lease_key="file:app/c.py",
                     model="gpt-5.4-mini",
                     reasoning_effort="low",
@@ -1890,13 +1899,13 @@ class SwarmTests(unittest.TestCase):
                 model="gpt-5.4-mini",
                 learned_tpm_limit=100,
                 headroom_fraction=0.85,
-                observed_peak_input_tokens={"seed_file": 60},
+                observed_peak_input_tokens={"claim_file": 60},
             )
             provider = MaxInFlightUsageProvider(usage_tokens=60)
             jobs = [
                 SwarmWorkerJob(
                     worker_id="job_a",
-                    worker_type="seed_file",
+                    worker_type="claim_file",
                     lease_key="file:app/a.py",
                     model="gpt-5.4-mini",
                     reasoning_effort="low",
@@ -1908,7 +1917,7 @@ class SwarmTests(unittest.TestCase):
                 ),
                 SwarmWorkerJob(
                     worker_id="job_b",
-                    worker_type="seed_file",
+                    worker_type="claim_file",
                     lease_key="file:app/b.py",
                     model="gpt-5.4-mini",
                     reasoning_effort="low",
@@ -1920,7 +1929,7 @@ class SwarmTests(unittest.TestCase):
                 ),
                 SwarmWorkerJob(
                     worker_id="job_c",
-                    worker_type="seed_file",
+                    worker_type="claim_file",
                     lease_key="file:app/c.py",
                     model="gpt-5.4-mini",
                     reasoning_effort="low",
@@ -1974,7 +1983,7 @@ class SwarmTests(unittest.TestCase):
             )
             first_job = SwarmWorkerJob(
                 worker_id="job_a",
-                worker_type="seed_file",
+                worker_type="claim_file",
                 lease_key="file:app/a.py",
                 model="gpt-5.4-mini",
                 reasoning_effort="low",
@@ -2004,13 +2013,13 @@ class SwarmTests(unittest.TestCase):
             )
             self.assertIsNotNone(learned)
             self.assertEqual(200000, learned.learned_tpm_limit)
-            self.assertEqual(30, learned.observed_peak_input_tokens["seed_file"])
+            self.assertEqual(30, learned.observed_peak_input_tokens["claim_file"])
 
             second_provider = MaxInFlightUsageProvider(usage_tokens=30)
             second_jobs = [
                 SwarmWorkerJob(
                     worker_id="job_b",
-                    worker_type="seed_file",
+                    worker_type="claim_file",
                     lease_key="file:app/b.py",
                     model="gpt-5.4-mini",
                     reasoning_effort="low",
@@ -2022,7 +2031,7 @@ class SwarmTests(unittest.TestCase):
                 ),
                 SwarmWorkerJob(
                     worker_id="job_c",
-                    worker_type="seed_file",
+                    worker_type="claim_file",
                     lease_key="file:app/c.py",
                     model="gpt-5.4-mini",
                     reasoning_effort="low",
@@ -2034,7 +2043,7 @@ class SwarmTests(unittest.TestCase):
                 ),
                 SwarmWorkerJob(
                     worker_id="job_d",
-                    worker_type="seed_file",
+                    worker_type="claim_file",
                     lease_key="file:app/d.py",
                     model="gpt-5.4-mini",
                     reasoning_effort="low",
@@ -2070,7 +2079,7 @@ class SwarmTests(unittest.TestCase):
                 model="gpt-5.4-mini",
                 learned_tpm_limit=200,
                 headroom_fraction=0.85,
-                observed_peak_input_tokens={"seed_file": 20},
+                observed_peak_input_tokens={"claim_file": 20},
             )
             provider = DrainAfterAbortProvider(
                 failure_message=(
@@ -2085,7 +2094,7 @@ class SwarmTests(unittest.TestCase):
             jobs = [
                 SwarmWorkerJob(
                     worker_id="job_a",
-                    worker_type="seed_file",
+                    worker_type="claim_file",
                     lease_key="file:app/a.py",
                     model="gpt-5.4-mini",
                     reasoning_effort="low",
@@ -2097,7 +2106,7 @@ class SwarmTests(unittest.TestCase):
                 ),
                 SwarmWorkerJob(
                     worker_id="job_b",
-                    worker_type="seed_file",
+                    worker_type="claim_file",
                     lease_key="file:app/b.py",
                     model="gpt-5.4-mini",
                     reasoning_effort="low",
@@ -2109,7 +2118,7 @@ class SwarmTests(unittest.TestCase):
                 ),
                 SwarmWorkerJob(
                     worker_id="job_c",
-                    worker_type="seed_file",
+                    worker_type="claim_file",
                     lease_key="file:app/c.py",
                     model="gpt-5.4-mini",
                     reasoning_effort="low",
@@ -2131,7 +2140,7 @@ class SwarmTests(unittest.TestCase):
                     rate_limit_max_retries=0,
                     on_worker_completed=lambda job, result: completed_workers.append(job.worker_id),
                     metrics_tracker=metrics,
-                    stage_name="seed",
+                    stage_name="claim",
                     cwd=repo_dir,
                     provider_name="openai",
                 )
@@ -2141,8 +2150,8 @@ class SwarmTests(unittest.TestCase):
             self.assertEqual(["a", "b"], [call["input_text"] for call in provider.start_calls])
             self.assertEqual([], provider.cancelled)
             summary = json.loads(metrics.path.read_text(encoding="utf-8"))
-            self.assertEqual(1, summary["stages"]["seed"]["skipped_workers"])
-            self.assertTrue(summary["stages"]["seed"]["aborted"])
+            self.assertEqual(1, summary["stages"]["claim"]["skipped_workers"])
+            self.assertTrue(summary["stages"]["claim"]["aborted"])
             self.assertTrue(summary["limiter"]["stage_degraded_after_rate_limit"])
             self.assertEqual(1, summary["limiter"]["current_stage_parallel_ceiling"])
 
@@ -2151,7 +2160,7 @@ class SwarmTests(unittest.TestCase):
         jobs = [
             SwarmWorkerJob(
                 worker_id="job_running",
-                worker_type="seed_file",
+                worker_type="claim_file",
                 lease_key="file:app/a.py",
                 model="gpt-5.4-mini",
                 reasoning_effort="low",
@@ -2163,7 +2172,7 @@ class SwarmTests(unittest.TestCase):
             ),
             SwarmWorkerJob(
                 worker_id="job_fail",
-                worker_type="seed_file",
+                worker_type="claim_file",
                 lease_key="file:app/b.py",
                 model="gpt-5.4-mini",
                 reasoning_effort="low",
@@ -2187,7 +2196,7 @@ class SwarmTests(unittest.TestCase):
 
         self.assertEqual(["bg_1"], provider.cancelled)
 
-    def test_swarm_persists_completed_seed_artifacts_before_later_failure(self) -> None:
+    def test_swarm_persists_completed_claim_artifacts_before_later_failure(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             repo_dir = Path(tmp_dir) / "repo"
             _write(repo_dir / "app" / "a.py", "print('a')\n")
@@ -2202,7 +2211,7 @@ class SwarmTests(unittest.TestCase):
             _write(swarm_digest, "# digest\n")
             _write(shared_manifest, "# shared\n")
 
-            provider = PartialSeedFailureProvider()
+            provider = PartialClaimFailureProvider()
 
             with (
                 self.assertRaisesRegex(RuntimeError, "Swarm worker failure"),
@@ -2222,13 +2231,21 @@ class SwarmTests(unittest.TestCase):
                     ],
                 )
 
-            self.assertTrue((run_dir / "swarm" / "seeds" / "seed_001.json").exists())
-            self.assertTrue((run_dir / "swarm" / "seeds" / "seed_001.md").exists())
-            usage_summary = json.loads((run_dir / "swarm" / "usage_summary.json").read_text(encoding="utf-8"))
+            claim_jsons = sorted((run_dir / "swarm" / "claims").glob("*.json"))
+            claim_mds = sorted((run_dir / "swarm" / "claims").glob("*.md"))
+            # The first claim worker produced `outcome=no_finding`, so only the
+            # structured JSON is persisted — no per-claim markdown is emitted
+            # for non-findings.
+            self.assertEqual(1, len(claim_jsons))
+            self.assertEqual(0, len(claim_mds))
+            self.assertTrue(claim_jsons[0].name.endswith("-001.json"))
+            usage_summary = json.loads(
+                (run_dir / "swarm" / "debug" / "usage_summary.json").read_text(encoding="utf-8")
+            )
             self.assertEqual("failed", usage_summary["status"])
-            self.assertEqual("seed", usage_summary["failure_stage"])
+            self.assertEqual("claim", usage_summary["failure_stage"])
 
-    def test_swarm_seed_stage_abort_writes_partial_summary_and_skips_proof(self) -> None:
+    def test_swarm_claim_stage_abort_writes_partial_summary_and_skips_verify(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             repo_dir = Path(tmp_dir) / "repo"
             _write(repo_dir / "app" / "a.py", "print('a')\n")
@@ -2241,7 +2258,7 @@ class SwarmTests(unittest.TestCase):
                 model="gpt-5.4-mini",
                 learned_tpm_limit=200,
                 headroom_fraction=0.85,
-                observed_peak_input_tokens={"seed_file": 20},
+                observed_peak_input_tokens={"claim_file": 20},
             )
             run_dir = self._run_dir(repo_dir)
             run_dir.mkdir(parents=True, exist_ok=True)
@@ -2252,7 +2269,7 @@ class SwarmTests(unittest.TestCase):
             _write(swarm_digest, "# digest\n")
             _write(shared_manifest, "# shared\n")
 
-            provider = SeedStageAbortProvider(
+            provider = ClaimStageAbortProvider(
                 failure_message=(
                     "ResponseError(code='rate_limit_exceeded', message='Rate limit reached for "
                     "gpt-5.4-mini on tokens per min (TPM): Limit 200000, Used 184418, Requested "
@@ -2276,15 +2293,15 @@ class SwarmTests(unittest.TestCase):
                     ],
                 )
 
-            partial_summary = run_dir / "swarm" / "reports" / "partial_summary.md"
+            partial_summary = run_dir / "swarm" / "debug" / "partial_summary.md"
             self.assertTrue(partial_summary.exists())
             partial_text = partial_summary.read_text(encoding="utf-8")
-            self.assertIn("Stage aborted: `seed`", partial_text)
-            self.assertIn("Completed workers: `1`", partial_text)
-            self.assertIn("Skipped workers: `1`", partial_text)
-            self.assertTrue((run_dir / "swarm" / "reports" / "seed_ledger.md").exists())
-            self.assertFalse((run_dir / "swarm" / "reports" / "final_summary.md").exists())
-            self.assertFalse((run_dir / "swarm" / "proofs" / "swm_001.json").exists())
+            self.assertIn("Aborted during `claim` stage", partial_text)
+            self.assertIn("Completed workers (1)", partial_text)
+            self.assertIn("Skipped workers (1)", partial_text)
+            self.assertTrue((run_dir / "swarm" / "debug" / "all_claims.md").exists())
+            self.assertFalse((run_dir / "swarm" / "SUMMARY.md").exists())
+            self.assertFalse(any((run_dir / "swarm" / "validated").glob("*.json")))
 
     def test_swarm_persists_usage_summary_with_worker_timings(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -2353,30 +2370,30 @@ class SwarmTests(unittest.TestCase):
                 eligible_files=[(repo_dir / "app" / "service.py").resolve()],
             )
 
-            self.assertEqual(run_dir / "swarm" / "usage_summary.json", result.usage_summary)
+            self.assertEqual(run_dir / "swarm" / "debug" / "usage_summary.json", result.usage_summary)
             summary = json.loads(result.usage_summary.read_text(encoding="utf-8"))
             self.assertEqual("completed", summary["status"])
             self.assertEqual(2, summary["totals"]["responses"])
             self.assertEqual(450, summary["totals"]["total_tokens"])
             self.assertIn("limiter", summary)
-            self.assertIn("seed", summary["stages"])
-            self.assertIn("proof", summary["stages"])
-            self.assertEqual(1, summary["stages"]["seed"]["completed_workers"])
-            self.assertEqual(1, summary["stages"]["proof"]["completed_workers"])
+            self.assertIn("claim", summary["stages"])
+            self.assertIn("verify", summary["stages"])
+            self.assertEqual(1, summary["stages"]["claim"]["completed_workers"])
+            self.assertEqual(1, summary["stages"]["verify"]["completed_workers"])
             self.assertIn("avg_input_tpm", summary["limiter"])
             self.assertIn("top_token_workers", summary["limiter"])
             self.assertIn("current_stage_parallel_ceiling", summary["limiter"])
             self.assertGreater(summary["wall_clock_seconds"], 0.0)
-            self.assertGreater(summary["stages"]["seed"]["elapsed_seconds"], 0.0)
+            self.assertGreater(summary["stages"]["claim"]["elapsed_seconds"], 0.0)
 
-            seed_worker = next(worker for worker in summary["workers"] if worker["worker_id"] == "SEED-001")
-            proof_worker = next(worker for worker in summary["workers"] if worker["worker_id"] == "SWM-001")
-            self.assertEqual("completed", seed_worker["status"])
-            self.assertEqual(150, seed_worker["totals"]["total_tokens"])
-            self.assertGreater(seed_worker["elapsed_seconds"], 0.0)
-            self.assertEqual("completed", proof_worker["status"])
-            self.assertEqual(300, proof_worker["totals"]["total_tokens"])
-            self.assertGreater(proof_worker["elapsed_seconds"], 0.0)
+            claim_worker = next(worker for worker in summary["workers"] if worker["worker_id"] == "CLAIM-001")
+            verify_worker = next(worker for worker in summary["workers"] if worker["worker_id"] == "CASE-001")
+            self.assertEqual("completed", claim_worker["status"])
+            self.assertEqual(150, claim_worker["totals"]["total_tokens"])
+            self.assertGreater(claim_worker["elapsed_seconds"], 0.0)
+            self.assertEqual("completed", verify_worker["status"])
+            self.assertEqual(300, verify_worker["totals"]["total_tokens"])
+            self.assertGreater(verify_worker["elapsed_seconds"], 0.0)
 
     def test_swarm_worker_failure_captures_invalid_payload_text(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -2420,8 +2437,8 @@ class SwarmTests(unittest.TestCase):
 
             failure = ctx.exception.primary_diagnostic
             self.assertIsNotNone(failure)
-            self.assertEqual("seed", failure.stage)
-            self.assertEqual("SEED-001", failure.worker_id)
+            self.assertEqual("claim", failure.stage)
+            self.assertEqual("CLAIM-001", failure.worker_id)
             self.assertIn("missing keys: notes", failure.failure_message)
             self.assertIn('"claim": "seed claim"', failure.raw_final_text)
 

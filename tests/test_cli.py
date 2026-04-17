@@ -818,7 +818,7 @@ class SwarmCliTests(unittest.TestCase):
             self.assertIn("Swarm preflight", output)
             self.assertIn("Swarm startup preflight is ready.", output)
             self.assertIn("Swarm complete.", output)
-            self.assertIn("Duplicate and case groups:", output)
+            self.assertIn("Case groups:", output)
 
             repo_dir_root = repos_root(repo_dir) / "repo_deadbeef"
             self.assertTrue((repo_dir_root / "danger_map.md").exists())
@@ -1337,20 +1337,21 @@ class SwarmCliTests(unittest.TestCase):
             )
 
             self.assertEqual(0, result)
-            self.assertIn("[* seed worker SEED-001 started: inspect app/service.py *]", output)
-            self.assertIn("[* seed worker SEED-001 completed: app/service.py (", output)
-            self.assertIn("Launching swarm batch...\n\nSweep stage started: 1 file workers queued.", output)
-            self.assertIn("Proof stage started: 1 issue worker queued.", output)
+            self.assertIn("[* claim worker CLAIM-001 started: inspect app/service.py *]", output)
+            self.assertIn("[* claim worker CLAIM-001 completed: app/service.py (", output)
+            self.assertIn("Launching swarm batch...\n\nSweep stage started: 1 file worker queued.", output)
+            self.assertIn("Verify stage started: 1 case worker queued.", output)
             self.assertIn(
-                "Proof stage started: 1 issue worker queued.\n[* proof worker SWM-001 started: validate promoted finding for app/service.py *]",
+                "Verify stage started: 1 case worker queued.\n[* verify worker CASE-001 started: verify promoted case for app/service.py *]",
                 output,
             )
             self.assertIn(
-                "[* proof worker SWM-001 started: validate promoted finding for app/service.py *]",
+                "[* verify worker CASE-001 started: verify promoted case for app/service.py *]",
                 output,
             )
-            self.assertIn("[* proof worker SWM-001 completed: app/service.py (", output)
-            self.assertIn("Swarm complete.\n\nFinal artifacts", output)
+            self.assertIn("[* verify worker CASE-001 completed: app/service.py (", output)
+            self.assertIn("Swarm complete. 1 verified finding, 0 filtered.", output)
+            self.assertIn("Open this:", output)
             _assert_no_triple_newlines(self, output)
 
     def test_swarm_edit_regenerates_danger_map_and_appends_guidance(self) -> None:
@@ -1488,11 +1489,11 @@ class SwarmCliTests(unittest.TestCase):
             self.assertIn("Launching swarm batch...", output)
             self.assertIn("Preset: safe", output)
             self.assertIn("Budget mode: enforced", output)
-            self.assertIn("Seed parallelism: 2", output)
-            self.assertIn("Proof parallelism: 1", output)
+            self.assertIn("Claim parallelism: 2", output)
+            self.assertIn("Verify parallelism: 1", output)
             self.assertIn("Rate-limit retries: 3", output)
-            self.assertIn("Proof stage: read-only validation", output)
-            self.assertIn("proof-filtered findings, grouped duplicates", output)
+            self.assertIn("Verify stage: read-only validation", output)
+            self.assertIn("verified findings, grouped duplicates", output)
             self.assertIn("Tool trace log:", output)
             self.assertIn("Usage summary:", output)
 
@@ -1503,9 +1504,12 @@ class SwarmCliTests(unittest.TestCase):
             self.assertTrue((run_dir / "prompts" / "swarm_prompt_bundle.json").exists())
             self.assertTrue((run_dir / "resources" / "shared" / "manifest.md").exists())
             self.assertTrue((run_dir / "derived_context" / "swarm_digest.md").exists())
-            self.assertTrue((run_dir / "swarm" / "usage_summary.json").exists())
-            self.assertTrue((run_dir / "swarm" / "reports" / "case_groups.md").exists())
-            self.assertTrue((run_dir / "swarm" / "reports" / "final_summary.md").exists())
+            self.assertTrue((run_dir / "swarm" / "debug" / "usage_summary.json").exists())
+            # case_groups.md is only written when at least one case exists; this
+            # scenario has zero eligible files, so it is intentionally absent.
+            self.assertFalse((run_dir / "swarm" / "debug" / "case_groups.md").exists())
+            self.assertTrue((run_dir / "swarm" / "SUMMARY.md").exists())
+            self.assertTrue((run_dir / "swarm" / "FINDINGS.md").exists())
 
             shared_manifest = (run_dir / "resources" / "shared" / "manifest.md").read_text(
                 encoding="utf-8"
@@ -1519,8 +1523,8 @@ class SwarmCliTests(unittest.TestCase):
             self.assertIn("shared-reference", shared_manifest)
             self.assertIn("Eligible file count", swarm_digest)
             self.assertIn("Danger-map reasoning: `high`", swarm_digest)
-            self.assertIn("Seed reasoning: `low`", swarm_digest)
-            self.assertIn("Proof reasoning: `medium`", swarm_digest)
+            self.assertIn("Claim reasoning: `low`", swarm_digest)
+            self.assertIn("Verify reasoning: `medium`", swarm_digest)
             self.assertEqual("swarm", run_json["mode"])
             self.assertIn("prompt_bundle", run_json["swarm"])
             self.assertEqual("safe", run_json["swarm"]["mode"]["preset"])
@@ -1528,11 +1532,11 @@ class SwarmCliTests(unittest.TestCase):
             self.assertEqual(1, run_json["swarm"]["parallelism"]["proof"])
             self.assertEqual(3, run_json["swarm"]["retries"]["rate_limits"])
             self.assertEqual(
-                str(run_dir / "swarm" / "usage_summary.json"),
+                str(run_dir / "swarm" / "debug" / "usage_summary.json"),
                 run_json["swarm"]["usage_summary"],
             )
             self.assertEqual(
-                str(run_dir / "swarm" / "tool_trace.jsonl"),
+                str(run_dir / "swarm" / "debug" / "tool_trace.jsonl"),
                 run_json["swarm"]["tool_trace_log"],
             )
             self.assertEqual(
@@ -1544,7 +1548,7 @@ class SwarmCliTests(unittest.TestCase):
                 run_json["swarm"]["reasoning"],
             )
 
-    def test_swarm_preflight_warns_when_peak_seed_estimate_exceeds_budget_in_no_limit_mode(self) -> None:
+    def test_swarm_preflight_warns_when_peak_claim_estimate_exceeds_budget_in_no_limit_mode(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             repo_dir = Path(tmp_dir) / "repo"
             _write(
@@ -1585,10 +1589,10 @@ class SwarmCliTests(unittest.TestCase):
 
             self.assertEqual(0, result)
             self.assertIn(
-                "Warning: peak seed estimate exceeds the configured advisory budget.",
+                "Warning: peak claim estimate exceeds the configured advisory budget.",
                 output,
             )
-            self.assertIn("Largest seed request: app/large.py", output)
+            self.assertIn("Largest claim request: app/large.py", output)
 
     def test_swarm_blocks_missing_local_shared_resources_before_preflight(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -1795,7 +1799,7 @@ class SwarmCliTests(unittest.TestCase):
                 output,
             )
             self.assertIn("Failure diagnostics:", output)
-            diagnostic_path = runs_root(repo_dir) / "2026-04-06_121500" / "swarm" / "failure_diagnostic.json"
+            diagnostic_path = runs_root(repo_dir) / "2026-04-06_121500" / "swarm" / "debug" / "failure_diagnostic.json"
             self.assertTrue(diagnostic_path.exists())
             diagnostic = json.loads(diagnostic_path.read_text(encoding="utf-8"))
             self.assertEqual(1, diagnostic["failure_count"])
