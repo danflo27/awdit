@@ -45,25 +45,33 @@ def resolve_repo_identity(cwd: Path) -> RepoIdentity:
     )
 
 
-def repo_memory_dir(cwd: Path, repo_key: str) -> Path:
-    return repos_root(cwd.resolve()) / repo_key
+def repo_memory_dir(cwd: Path, repo_key: str, *, data_root: Path | None = None) -> Path:
+    return repos_root(cwd.resolve(), data_root=data_root) / repo_key
 
 
 def legacy_repo_key(identity: RepoIdentity) -> str:
     return _repo_key_for_source(identity.repo_name, identity.source_value, digest_length=8)
 
 
-def migrate_legacy_repo_memory_dir(cwd: Path, identity: RepoIdentity) -> None:
-    current_dir = repo_memory_dir(cwd, identity.repo_key)
-    legacy_dir = repo_memory_dir(cwd, legacy_repo_key(identity))
-    if current_dir.exists() or not legacy_dir.exists():
+def migrate_legacy_repo_memory_dir(cwd: Path, identity: RepoIdentity, *, data_root: Path | None = None) -> None:
+    repo_dir = cwd.resolve()
+    current_dir = repo_memory_dir(repo_dir, identity.repo_key, data_root=data_root)
+    legacy_dirs = [repo_memory_dir(repo_dir, legacy_repo_key(identity), data_root=data_root)]
+    repo_local_legacy_dir = repo_memory_dir(repo_dir, legacy_repo_key(identity), data_root=repo_dir)
+    if repo_local_legacy_dir not in legacy_dirs:
+        legacy_dirs.append(repo_local_legacy_dir)
+    if current_dir.exists():
         return
-    current_dir.parent.mkdir(parents=True, exist_ok=True)
-    shutil.move(str(legacy_dir), str(current_dir))
+    for legacy_dir in legacy_dirs:
+        if not legacy_dir.exists():
+            continue
+        current_dir.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(legacy_dir), str(current_dir))
+        return
 
 
-def danger_map_paths(cwd: Path, repo_key: str) -> dict[str, Path]:
-    base_dir = repo_memory_dir(cwd, repo_key)
+def danger_map_paths(cwd: Path, repo_key: str, *, data_root: Path | None = None) -> dict[str, Path]:
+    base_dir = repo_memory_dir(cwd, repo_key, data_root=data_root)
     return {
         "repo_dir": base_dir,
         "danger_map_md": base_dir / "danger_map.md",

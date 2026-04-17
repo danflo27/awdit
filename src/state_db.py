@@ -19,8 +19,8 @@ class LearnedModelLimit:
     updated_at: str
 
 
-def default_state_db_path(cwd: Path) -> Path:
-    return state_root(cwd.resolve()) / "awdit.db"
+def default_state_db_path(cwd: Path, *, data_root: Path | None = None) -> Path:
+    return state_root(cwd.resolve(), data_root=data_root) / "awdit.db"
 
 
 def _ensure_runs_columns(connection: sqlite3.Connection) -> None:
@@ -56,8 +56,8 @@ def _ensure_learned_model_limits_table(connection: sqlite3.Connection) -> None:
     )
 
 
-def ensure_state_db(cwd: Path) -> Path:
-    db_path = default_state_db_path(cwd)
+def ensure_state_db(cwd: Path, *, data_root: Path | None = None) -> Path:
+    db_path = default_state_db_path(cwd, data_root=data_root)
     db_path.parent.mkdir(parents=True, exist_ok=True)
     with sqlite3.connect(db_path) as connection:
         connection.execute(
@@ -91,8 +91,9 @@ def insert_run(
     mode: str,
     status: str,
     run_dir: Path,
+    data_root: Path | None = None,
 ) -> Path:
-    db_path = ensure_state_db(cwd)
+    db_path = ensure_state_db(cwd, data_root=data_root)
     with sqlite3.connect(db_path) as connection:
         connection.execute(
             """
@@ -118,8 +119,9 @@ def update_run_status(
     run_id: str,
     status: str,
     completed: bool,
+    data_root: Path | None = None,
 ) -> Path:
-    db_path = ensure_state_db(cwd)
+    db_path = ensure_state_db(cwd, data_root=data_root)
     completed_at = datetime.now().isoformat(timespec="seconds") if completed else None
     with sqlite3.connect(db_path) as connection:
         connection.execute(
@@ -142,8 +144,9 @@ def record_run_failure(
     failure_worker_id: str | None,
     failure_message: str,
     failure_artifact: Path | None,
+    data_root: Path | None = None,
 ) -> Path:
-    db_path = ensure_state_db(cwd)
+    db_path = ensure_state_db(cwd, data_root=data_root)
     with sqlite3.connect(db_path) as connection:
         connection.execute(
             """
@@ -168,8 +171,9 @@ def load_learned_model_limit(
     cwd: Path,
     provider: str,
     model: str,
+    data_root: Path | None = None,
 ) -> LearnedModelLimit | None:
-    db_path = ensure_state_db(cwd)
+    db_path = ensure_state_db(cwd, data_root=data_root)
     with sqlite3.connect(db_path) as connection:
         row = connection.execute(
             """
@@ -212,8 +216,9 @@ def save_learned_model_limit(
     learned_tpm_limit: int | None,
     headroom_fraction: float,
     observed_peak_input_tokens: dict[str, int],
+    data_root: Path | None = None,
 ) -> Path:
-    db_path = ensure_state_db(cwd)
+    db_path = ensure_state_db(cwd, data_root=data_root)
     normalized_peaks: dict[str, int] = {}
     for worker_type, peak_value in observed_peak_input_tokens.items():
         try:

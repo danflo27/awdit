@@ -34,7 +34,7 @@ from config import (
     render_config_scaffold,
     summarize_config,
 )
-from paths import migrate_legacy_runtime_layout, runs_root
+from paths import migrate_legacy_runtime_layout, resolve_data_root, runs_root
 from provider_openai import OpenAIResponsesProvider
 from repo_memory import migrate_legacy_repo_memory_dir, resolve_repo_identity
 from runtime import OneSlotRuntime
@@ -168,7 +168,8 @@ def main(argv: list[str] | None = None) -> int:
 
 def _handle_review(_: argparse.Namespace) -> int:
     cwd = Path.cwd()
-    migrate_legacy_runtime_layout(cwd)
+    data_root = resolve_data_root()
+    migrate_legacy_runtime_layout(cwd, data_root=data_root)
     try:
         loaded = load_effective_config(cwd=cwd)
     except ConfigError as exc:
@@ -199,7 +200,7 @@ def _handle_review(_: argparse.Namespace) -> int:
         slot_resources = reviewed_slots
 
     final_resources = RuntimeResources(shared=shared_resources, slots=slot_resources)
-    snapshot = _persist_run_resource_snapshot(cwd, current, final_resources)
+    snapshot = _persist_run_resource_snapshot(cwd, current, final_resources, data_root=data_root)
 
     _print_section_heading("Final effective config")
     _print_summary(current)
@@ -224,7 +225,7 @@ def _handle_review(_: argparse.Namespace) -> int:
         )
 
     if _confirm("Enter one-slot runtime prototype mode?", default=False, separated=True):
-        return _run_one_slot_runtime(cwd, current, snapshot)
+        return _run_one_slot_runtime(cwd, current, snapshot, data_root=data_root)
 
     _print_section_heading("Startup resource review complete.")
     _print_line("Full audit pipeline beyond startup resource staging is not implemented yet.")
@@ -250,9 +251,10 @@ def _handle_init_config(args: argparse.Namespace) -> int:
 
 def _handle_swarm(args: argparse.Namespace) -> int:
     cwd = Path.cwd()
+    data_root = resolve_data_root()
     config_path = args.config.expanduser().resolve() if args.config is not None else None
     env_file_path = args.env_file.expanduser().resolve() if args.env_file is not None else None
-    migrate_legacy_runtime_layout(cwd)
+    migrate_legacy_runtime_layout(cwd, data_root=data_root)
     try:
         loaded = load_effective_config(cwd=cwd, config_path=config_path, env_file_path=env_file_path)
     except ConfigError as exc:
@@ -269,7 +271,7 @@ def _handle_swarm(args: argparse.Namespace) -> int:
     base_ref = args.base_ref or (DEFAULT_SWARM_BASE_REF if file_mode == "pr_changed_files" else None)
 
     _print_section_heading("Starting new swarm run...")
-    run_id, run_dir = _allocate_run_dir(cwd)
+    run_id, run_dir = _allocate_run_dir(cwd, data_root=data_root)
     provider = OpenAIResponsesProvider.from_loaded_config(loaded)
     identity = resolve_repo_identity(cwd)
     insert_run(
@@ -279,6 +281,7 @@ def _handle_swarm(args: argparse.Namespace) -> int:
         mode="swarm",
         status="starting",
         run_dir=run_dir,
+        data_root=data_root,
     )
 
     current = loaded
@@ -293,6 +296,7 @@ def _handle_swarm(args: argparse.Namespace) -> int:
             provider=provider,
             prompt_bundle=prompt_bundle,
             repo_key=identity.repo_key,
+            data_root=data_root,
         )
         effective_resources = _build_effective_resource_defaults(current, cwd)
         shared_resources = _review_swarm_shared_resources(effective_resources.shared, cwd)
@@ -302,6 +306,7 @@ def _handle_swarm(args: argparse.Namespace) -> int:
                 run_id=run_id,
                 status="canceled",
                 completed=True,
+                data_root=data_root,
             )
             _print_section_heading("Swarm canceled before launch.")
             return 0
@@ -320,13 +325,23 @@ def _handle_swarm(args: argparse.Namespace) -> int:
             base_ref=base_ref,
             prompt_bundle=prompt_bundle,
         )
-        _print_swarm_preflight(cwd, current, snapshot, result, prompt_bundle, eligible_files, base_ref=base_ref)
+        _print_swarm_preflight(
+            cwd,
+            current,
+            snapshot,
+            result,
+            prompt_bundle,
+            eligible_files,
+            base_ref=base_ref,
+            data_root=data_root,
+        )
 
         update_run_status(
             cwd=cwd,
             run_id=run_id,
             status="preflight_ready",
             completed=False,
+            data_root=data_root,
         )
     except Exception as exc:
         diagnostic_path = _persist_swarm_failure_diagnostic(run_id=run_id, run_dir=run_dir, exc=exc)
@@ -335,8 +350,15 @@ def _handle_swarm(args: argparse.Namespace) -> int:
             run_id=run_id,
             status="failed",
             completed=True,
+            data_root=data_root,
         )
-        _record_swarm_failure_state(cwd=cwd, run_id=run_id, diagnostic_path=diagnostic_path, exc=exc)
+        _record_swarm_failure_state(
+            cwd=cwd,
+            run_id=run_id,
+            diagnostic_path=diagnostic_path,
+            exc=exc,
+            data_root=data_root,
+        )
         _print_section_heading(f"Swarm startup failed: {exc}")
         _print_line(f"Failure diagnostics: {diagnostic_path}")
         return 1
@@ -347,6 +369,7 @@ def _handle_swarm(args: argparse.Namespace) -> int:
             run_id=run_id,
             status="completed",
             completed=True,
+            data_root=data_root,
         )
         _print_section_heading("No processable changed files remain for swarm.")
         if base_ref is not None:
@@ -364,6 +387,7 @@ def _handle_swarm(args: argparse.Namespace) -> int:
                 run_id=run_id,
                 status="canceled",
                 completed=True,
+                data_root=data_root,
             )
             _print_section_heading("Swarm canceled before launch.")
             return 0
@@ -375,6 +399,7 @@ def _handle_swarm(args: argparse.Namespace) -> int:
             run_id=run_id,
             status="canceled",
             completed=True,
+            data_root=data_root,
         )
         _print_section_heading("Swarm canceled before launch.")
         return 0
@@ -392,12 +417,14 @@ def _handle_swarm(args: argparse.Namespace) -> int:
             shared_manifest_path=snapshot.shared_manifest,
             eligible_files=eligible_files,
             progress_callback=_print_swarm_progress,
+            data_root=data_root,
         )
         update_run_status(
             cwd=cwd,
             run_id=run_id,
             status="completed",
             completed=True,
+            data_root=data_root,
         )
     except Exception as exc:
         diagnostic_path = _persist_swarm_failure_diagnostic(run_id=run_id, run_dir=run_dir, exc=exc)
@@ -406,8 +433,15 @@ def _handle_swarm(args: argparse.Namespace) -> int:
             run_id=run_id,
             status="failed",
             completed=True,
+            data_root=data_root,
         )
-        _record_swarm_failure_state(cwd=cwd, run_id=run_id, diagnostic_path=diagnostic_path, exc=exc)
+        _record_swarm_failure_state(
+            cwd=cwd,
+            run_id=run_id,
+            diagnostic_path=diagnostic_path,
+            exc=exc,
+            data_root=data_root,
+        )
         _print_section_heading(f"Swarm execution failed: {exc}")
         _print_line(f"Failure diagnostics: {diagnostic_path}")
         return 1
@@ -466,6 +500,7 @@ def _record_swarm_failure_state(
     run_id: str,
     diagnostic_path: Path,
     exc: Exception,
+    data_root: Path | None = None,
 ) -> None:
     if isinstance(exc, SwarmWorkerFailure) and exc.primary_diagnostic is not None:
         primary = exc.primary_diagnostic
@@ -476,6 +511,7 @@ def _record_swarm_failure_state(
             failure_worker_id=primary.worker_id,
             failure_message=primary.failure_message,
             failure_artifact=diagnostic_path,
+            data_root=data_root,
         )
         return
     record_run_failure(
@@ -485,6 +521,7 @@ def _record_swarm_failure_state(
         failure_worker_id=None,
         failure_message=str(exc),
         failure_artifact=diagnostic_path,
+        data_root=data_root,
     )
 
 
@@ -495,12 +532,13 @@ def _prepare_swarm_danger_map(
     provider: OpenAIResponsesProvider,
     prompt_bundle,
     repo_key: str,
+    data_root: Path | None = None,
 ):
     identity = resolve_repo_identity(cwd)
-    migrate_legacy_repo_memory_dir(cwd, identity)
+    migrate_legacy_repo_memory_dir(cwd, identity, data_root=data_root)
     _print_line(f"Repository detected: `{identity.repo_name}`")
 
-    result = load_danger_map_result(cwd, repo_key)
+    result = load_danger_map_result(cwd, repo_key, data_root=data_root)
     if result is None:
         _print_line("No repo danger map exists for this repository yet.")
         _print_line("Swarm mode requires a repo danger map before launch.")
@@ -509,6 +547,7 @@ def _prepare_swarm_danger_map(
             loaded=loaded,
             provider=provider,
             prompt_bundle=prompt_bundle,
+            data_root=data_root,
         )
         _print_section_heading("Repo danger map ready:")
         _print_line(f"  {result.danger_map_md}")
@@ -524,6 +563,7 @@ def _prepare_swarm_danger_map(
                 loaded=loaded,
                 provider=provider,
                 prompt_bundle=prompt_bundle,
+                data_root=data_root,
             )
             _print_section_heading("Updated repo danger map ready:")
             _print_line(f"  {result.danger_map_md}")
@@ -553,6 +593,7 @@ def _prepare_swarm_danger_map(
                 provider=provider,
                 prompt_bundle=prompt_bundle,
                 guidance_notes=guidance_notes,
+                data_root=data_root,
             )
             _print_section_heading("Updated repo danger map ready:")
             _print_line(f"  {result.danger_map_md}")
@@ -563,6 +604,7 @@ def _prepare_swarm_danger_map(
                 loaded=loaded,
                 provider=provider,
                 prompt_bundle=prompt_bundle,
+                data_root=data_root,
             )
             _print_section_heading("Updated repo danger map ready:")
             _print_line(f"  {result.danger_map_md}")
@@ -577,6 +619,7 @@ def _generate_swarm_danger_map(
     provider: OpenAIResponsesProvider,
     prompt_bundle,
     guidance_notes: tuple[str, ...] = (),
+    data_root: Path | None = None,
 ):
     _print_section_heading("Generating repo danger map...")
     return generate_danger_map(
@@ -585,6 +628,7 @@ def _generate_swarm_danger_map(
         provider=provider,
         prompt_bundle=prompt_bundle,
         guidance_notes=guidance_notes,
+        data_root=data_root,
     )
 
 
@@ -847,6 +891,7 @@ def _print_swarm_preflight(
     eligible_files: list[Path],
     *,
     base_ref: str | None,
+    data_root: Path | None = None,
 ) -> None:
     seed_volume = summarize_seed_request_volume(
         cwd=cwd,
@@ -856,6 +901,7 @@ def _print_swarm_preflight(
         swarm_digest_path=snapshot.swarm_digest,
         shared_manifest_path=snapshot.shared_manifest,
         eligible_files=eligible_files,
+        data_root=data_root,
     )
     _print_section_heading("Swarm preflight")
     _print_line("  Execution")
@@ -1056,7 +1102,13 @@ def _handle_list_models(_: argparse.Namespace) -> int:
     return 0
 
 
-def _run_one_slot_runtime(cwd: Path, loaded, snapshot: RunResourceSnapshot) -> int:
+def _run_one_slot_runtime(
+    cwd: Path,
+    loaded,
+    snapshot: RunResourceSnapshot,
+    *,
+    data_root: Path | None = None,
+) -> int:
     transcript_path = _prototype_transcript_path(snapshot)
     with _prototype_transcript_capture(transcript_path):
         _print_section_heading("Prototype runtime setup")
@@ -1066,6 +1118,7 @@ def _run_one_slot_runtime(cwd: Path, loaded, snapshot: RunResourceSnapshot) -> i
             loaded=loaded,
             run_dir=snapshot.run_dir,
             default_mode="foreground",
+            data_root=data_root,
         )
         return runtime.interactive_loop()
 
@@ -1379,8 +1432,10 @@ def _persist_run_resource_snapshot(
     cwd: Path,
     loaded,
     resources: RuntimeResources,
+    *,
+    data_root: Path | None = None,
 ) -> RunResourceSnapshot:
-    migrate_legacy_runtime_layout(cwd)
+    migrate_legacy_runtime_layout(cwd, data_root=data_root)
     _ensure_local_resources_present(resources.shared, cwd=cwd, label="shared resources")
     for slot_name, items in resources.slots.items():
         _ensure_local_resources_present(
@@ -1388,7 +1443,7 @@ def _persist_run_resource_snapshot(
             cwd=cwd,
             label=f"{slot_name.replace('_', ' ')} resources",
         )
-    run_id, run_dir = _allocate_run_dir(cwd)
+    run_id, run_dir = _allocate_run_dir(cwd, data_root=data_root)
     prompts_dir = run_dir / "prompts"
     resources_dir = run_dir / "resources"
     shared_dir = resources_dir / "shared"
@@ -1631,8 +1686,13 @@ def _make_run_id() -> str:
     return datetime.now().strftime("%Y-%m-%d_%H%M%S_%f") + f"_{secrets.token_hex(4)}"
 
 
-def _allocate_run_dir(cwd: Path, *, max_attempts: int = 20) -> tuple[str, Path]:
-    root = runs_root(cwd)
+def _allocate_run_dir(
+    cwd: Path,
+    *,
+    data_root: Path | None = None,
+    max_attempts: int = 20,
+) -> tuple[str, Path]:
+    root = runs_root(cwd, data_root=data_root)
     root.mkdir(parents=True, exist_ok=True)
     for _ in range(max_attempts):
         run_id = _make_run_id()

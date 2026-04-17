@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import textwrap
 import threading
@@ -278,6 +279,15 @@ class DuplicateBackgroundUsageProvider(ImmediateProvider):
 
 
 class RuntimeTests(unittest.TestCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self._data_root_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._data_root_dir.cleanup)
+        self.data_root = Path(self._data_root_dir.name) / "awdit-data"
+        env_patcher = mock.patch.dict(os.environ, {"AWDIT_DATA_ROOT": str(self.data_root)})
+        env_patcher.start()
+        self.addCleanup(env_patcher.stop)
+
     def _loaded_config(self, repo_dir: Path):
         config_dir = repo_dir / "config"
         config_path = config_dir / "config.toml"

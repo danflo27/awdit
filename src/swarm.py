@@ -12,7 +12,7 @@ from datetime import datetime
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable
 
-from paths import managed_runtime_root_names
+from paths import infer_managed_data_root, managed_runtime_root_names
 from provider_openai import (
     OpenAIResponsesProvider,
     ProviderBackgroundHandle,
@@ -473,8 +473,13 @@ PROOF_RESPONSE_FORMAT = {
 }
 
 
-def load_danger_map_result(cwd: Path, repo_key: str) -> DangerMapResult | None:
-    artifact_paths = danger_map_paths(cwd, repo_key)
+def load_danger_map_result(
+    cwd: Path,
+    repo_key: str,
+    *,
+    data_root: Path | None = None,
+) -> DangerMapResult | None:
+    artifact_paths = danger_map_paths(cwd, repo_key, data_root=data_root)
     if not artifact_paths["danger_map_md"].exists() or not artifact_paths["danger_map_json"].exists():
         return None
 
@@ -541,16 +546,19 @@ def freeze_swarm_prompt_bundle(*, run_dir: Path, loaded) -> SwarmPromptBundle:
     )
 
 
-def display_repo_path(cwd: Path, path: Path) -> str:
+def display_repo_path(cwd: Path, path: Path, *, data_root: Path | None = None) -> str:
     repo_dir = cwd.resolve()
-    candidate = path if path.is_absolute() else repo_dir / path
+    candidate = path.resolve() if path.is_absolute() else (repo_dir / path).resolve()
     try:
         return candidate.relative_to(repo_dir).as_posix()
     except ValueError:
+        managed_relative = _managed_runtime_relative_path(candidate, data_root=data_root)
+        if managed_relative is not None:
+            return managed_relative
         for entry in list_repo_file_entries(repo_dir):
             if entry.path == candidate:
                 return entry.relative_path
-        raise RuntimeError("Path is not tracked within the repo scope.")
+        raise RuntimeError("Path is not tracked within the repo scope or managed runtime storage.")
 
 
 class RepoReadOnlyTools:
@@ -562,12 +570,14 @@ class RepoReadOnlyTools:
         scope_exclude: tuple[str, ...],
         use_scope_filters: bool = True,
         extra_allowed_paths: tuple[Path, ...] = (),
+        data_root: Path | None = None,
     ) -> None:
         self.cwd = cwd.resolve()
         self.scope_include = scope_include
         self.scope_exclude = scope_exclude
         self.use_scope_filters = use_scope_filters
         self.extra_allowed_paths = tuple(path.resolve() for path in extra_allowed_paths)
+        self.data_root = data_root.resolve() if data_root is not None else None
 
     def schemas(self) -> list[dict[str, Any]]:
         return [
@@ -690,7 +700,7 @@ class RepoReadOnlyTools:
         return path
 
     def _display_path(self, path: Path) -> str:
-        return display_repo_path(self.cwd, path)
+        return display_repo_path(self.cwd, path, data_root=self.data_root)
 
 
 def generate_danger_map(
@@ -700,14 +710,15 @@ def generate_danger_map(
     provider: OpenAIResponsesProvider,
     prompt_bundle: SwarmPromptBundle,
     guidance_notes: tuple[str, ...] = (),
+    data_root: Path | None = None,
 ) -> DangerMapResult:
     swarm_config = loaded.effective.swarm
     if swarm_config is None:
         raise RuntimeError("Swarm config is not available.")
 
     identity = resolve_repo_identity(cwd)
-    migrate_legacy_repo_memory_dir(cwd, identity)
-    artifact_paths = danger_map_paths(cwd, identity.repo_key)
+    migrate_legacy_repo_memory_dir(cwd, identity, data_root=data_root)
+    artifact_paths = danger_map_paths(cwd, identity.repo_key, data_root=data_root)
     artifact_paths["memory_dir"].mkdir(parents=True, exist_ok=True)
     _ensure_repo_comments_file(artifact_paths["repo_comments_md"])
     effective_guidance = _merge_guidance(
@@ -719,6 +730,7 @@ def generate_danger_map(
         cwd=cwd,
         scope_include=loaded.effective.scope.include,
         scope_exclude=loaded.effective.scope.exclude,
+        data_root=data_root,
     )
     input_text = build_danger_map_input(
         cwd=cwd,
@@ -1665,6 +1677,7 @@ class SwarmStageTokenLimiter:
         self,
         *,
         cwd: Path,
+        data_root: Path | None,
         provider_name: str,
         stage_name: str,
         jobs: list[SwarmWorkerJob],
@@ -1673,6 +1686,7 @@ class SwarmStageTokenLimiter:
         headroom_fraction: float = DEFAULT_SWARM_TPM_HEADROOM_FRACTION,
     ) -> None:
         self._cwd = cwd.resolve()
+        self._data_root = data_root.resolve() if data_root is not None else None
         self._provider_name = provider_name
         self._stage_name = stage_name
         self._preset = preset
@@ -1701,7 +1715,12 @@ class SwarmStageTokenLimiter:
                 ordered_models.append(job.model)
         self._primary_model = ordered_models[0] if ordered_models else ""
         for model in ordered_models:
-            record = load_learned_model_limit(cwd=self._cwd, provider=provider_name, model=model)
+            record = load_learned_model_limit(
+                cwd=self._cwd,
+                provider=provider_name,
+                model=model,
+                data_root=self._data_root,
+            )
             self._model_states[model] = {
                 "learned_tpm_limit": record.learned_tpm_limit if record is not None else None,
                 "observed_peak_input_tokens": (
@@ -1860,6 +1879,7 @@ class SwarmStageTokenLimiter:
                 learned_tpm_limit=state["learned_tpm_limit"],
                 headroom_fraction=self._headroom_fraction,
                 observed_peak_input_tokens=state["observed_peak_input_tokens"],
+                data_root=self._data_root,
             )
             state["dirty"] = False
 
@@ -1981,10 +2001,11 @@ def summarize_seed_request_volume(
     swarm_digest_path: Path,
     shared_manifest_path: Path,
     eligible_files: list[Path],
+    data_root: Path | None = None,
 ) -> SwarmSeedRequestVolume:
     swarm_digest_text = swarm_digest_path.read_text(encoding="utf-8")
     shared_manifest_text = shared_manifest_path.read_text(encoding="utf-8")
-    seed_output_path = (run_dir / "swarm" / "seeds").relative_to(cwd).as_posix()
+    seed_output_path = _managed_runtime_display_path(run_dir / "swarm" / "seeds", data_root=data_root)
     jobs, ordered_seed_metadata = _build_seed_worker_jobs(
         cwd=cwd,
         loaded=loaded,
@@ -2625,6 +2646,7 @@ def run_swarm_sweep(
     shared_manifest_path: Path,
     eligible_files: list[Path],
     progress_callback: SwarmProgressCallback | None = None,
+    data_root: Path | None = None,
 ) -> SwarmSweepResult:
     if loaded.effective.swarm is None:
         raise RuntimeError("Swarm config is not available.")
@@ -2648,11 +2670,12 @@ def run_swarm_sweep(
         scope_exclude=loaded.effective.scope.exclude,
         use_scope_filters=use_scope_filters,
         extra_allowed_paths=_staged_shared_resource_files(shared_manifest_path),
+        data_root=data_root,
     )
     metrics = SwarmRunMetrics(path=usage_summary)
     metrics.write()
     prompt_asset = prompt_bundle.seed
-    seed_output_path = seeds_dir.relative_to(cwd).as_posix()
+    seed_output_path = _managed_runtime_display_path(seeds_dir, data_root=data_root)
     jobs, ordered_seed_metadata = _build_seed_worker_jobs(
         cwd=cwd,
         loaded=loaded,
@@ -2706,6 +2729,7 @@ def run_swarm_sweep(
                 provider_name=loaded.effective.active_provider,
                 scheduler_preset=loaded.effective.swarm.preset,
                 tool_trace_path=tool_trace_log,
+                data_root=data_root,
             )
             resolved_seed_results: list[SwarmSeedResult] = []
             for seed_id, target_file in ordered_seed_metadata:
@@ -2808,6 +2832,7 @@ def run_swarm_sweep(
                     provider_name=loaded.effective.active_provider,
                     scheduler_preset=loaded.effective.swarm.preset,
                     tool_trace_path=tool_trace_log,
+                data_root=data_root,
                 )
                 for issue_candidate in issue_candidates:
                     proof_result = proof_results_by_case_id.get(issue_candidate.case_id)
@@ -2893,6 +2918,7 @@ def run_background_swarm_workers(
     provider_name: str | None = None,
     scheduler_preset: str = "safe",
     tool_trace_path: Path | None = None,
+    data_root: Path | None = None,
 ) -> dict[str, ProviderTurnResult]:
     if not jobs:
         return {}
@@ -2905,6 +2931,7 @@ def run_background_swarm_workers(
     if cwd is not None and provider_name:
         limiter = SwarmStageTokenLimiter(
             cwd=cwd,
+            data_root=data_root,
             provider_name=provider_name,
             stage_name=stage_name,
             jobs=jobs,
@@ -3909,6 +3936,31 @@ def _normalize_repo_relative_path(raw_path: str) -> str:
     if not normalized:
         raise RuntimeError("Path is empty.")
     return normalized
+
+
+def _managed_runtime_relative_path(path: Path, *, data_root: Path | None = None) -> str | None:
+    resolved = path.resolve()
+    roots_to_try: list[Path] = []
+    if data_root is not None:
+        roots_to_try.append(data_root.resolve())
+    inferred_root = infer_managed_data_root(resolved, include_legacy=True)
+    if inferred_root is not None and inferred_root not in roots_to_try:
+        roots_to_try.append(inferred_root)
+    for root in roots_to_try:
+        try:
+            relative = resolved.relative_to(root).as_posix()
+        except ValueError:
+            continue
+        if _is_runtime_managed_relative(relative):
+            return relative
+    return None
+
+
+def _managed_runtime_display_path(path: Path, *, data_root: Path | None = None) -> str:
+    managed_relative = _managed_runtime_relative_path(path, data_root=data_root)
+    if managed_relative is not None:
+        return managed_relative
+    return str(path.resolve().as_posix())
 
 
 def _is_runtime_managed_relative(relative_path: str) -> bool:

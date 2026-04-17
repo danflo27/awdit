@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import sqlite3
 import tempfile
 import textwrap
@@ -20,6 +21,7 @@ from config import (
     save_repo_overrides,
 )
 from repo_memory import legacy_repo_key, migrate_legacy_repo_memory_dir, resolve_repo_identity
+from paths import repos_root, runs_root, state_root
 from state_db import (
     ensure_state_db,
     insert_run,
@@ -131,6 +133,15 @@ def _user_config_text() -> str:
 
 
 class ConfigTests(unittest.TestCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self._data_root_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._data_root_dir.cleanup)
+        self.data_root = Path(self._data_root_dir.name) / "awdit-data"
+        env_patcher = mock.patch.dict(os.environ, {"AWDIT_DATA_ROOT": str(self.data_root)})
+        env_patcher.start()
+        self.addCleanup(env_patcher.stop)
+
     def test_checked_in_repo_config_is_generic_and_loadable(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]
         config_path = repo_root / "config" / "config.toml"
@@ -897,13 +908,13 @@ class ConfigTests(unittest.TestCase):
             with mock.patch("repo_memory.subprocess.run", return_value=result):
                 identity = resolve_repo_identity(repo_dir)
 
-            legacy_dir = repo_dir / "repos" / legacy_repo_key(identity)
+            legacy_dir = repos_root(repo_dir) / legacy_repo_key(identity)
             _write(legacy_dir / "danger_map.md", "legacy map")
             _write(legacy_dir / "memory" / "repo_comments.md", "legacy comments")
 
             migrate_legacy_repo_memory_dir(repo_dir, identity)
 
-            current_dir = repo_dir / "repos" / identity.repo_key
+            current_dir = repos_root(repo_dir) / identity.repo_key
             self.assertTrue((current_dir / "danger_map.md").exists())
             self.assertTrue((current_dir / "memory" / "repo_comments.md").exists())
             self.assertFalse(legacy_dir.exists())
@@ -920,7 +931,7 @@ class ConfigTests(unittest.TestCase):
                 repo_key="repo_deadbeef",
                 mode="swarm",
                 status="starting",
-                run_dir=repo_dir / "runs" / "2026-04-06_120000",
+                run_dir=runs_root(repo_dir) / "2026-04-06_120000",
             )
             update_run_status(
                 cwd=repo_dir,
@@ -929,6 +940,7 @@ class ConfigTests(unittest.TestCase):
                 completed=True,
             )
 
+            self.assertEqual(state_root(repo_dir) / "awdit.db", db_path)
             with sqlite3.connect(db_path) as connection:
                 row = connection.execute(
                     "SELECT repo_key, mode, status, completed_at FROM runs WHERE run_id = ?",
@@ -950,7 +962,7 @@ class ConfigTests(unittest.TestCase):
                 repo_key="repo_deadbeef",
                 mode="swarm",
                 status="starting",
-                run_dir=repo_dir / "runs" / "2026-04-06_120000",
+                run_dir=runs_root(repo_dir) / "2026-04-06_120000",
             )
             record_run_failure(
                 cwd=repo_dir,
@@ -958,9 +970,10 @@ class ConfigTests(unittest.TestCase):
                 failure_stage="seed",
                 failure_worker_id="SEED-014",
                 failure_message="Structured swarm response missing keys: notes",
-                failure_artifact=repo_dir / "runs" / "2026-04-06_120000" / "swarm" / "failure_diagnostic.json",
+                failure_artifact=runs_root(repo_dir) / "2026-04-06_120000" / "swarm" / "failure_diagnostic.json",
             )
 
+            self.assertEqual(state_root(repo_dir) / "awdit.db", db_path)
             with sqlite3.connect(db_path) as connection:
                 row = connection.execute(
                     """

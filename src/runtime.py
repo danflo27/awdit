@@ -9,7 +9,7 @@ from datetime import datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from paths import managed_runtime_root_names
+from paths import infer_managed_data_root, managed_runtime_root_names
 from provider_openai import (
     BackgroundPollResult,
     OpenAIResponsesProvider,
@@ -151,12 +151,18 @@ class OneSlotRuntime:
         loaded,
         run_dir: Path,
         default_mode: str,
+        data_root: Path | None = None,
         provider: OpenAIResponsesProvider | None = None,
         poll_interval_seconds: float = DEFAULT_POLL_INTERVAL_SECONDS,
     ) -> None:
         self.cwd = cwd.resolve()
         self.loaded = loaded
         self.run_dir = run_dir.resolve()
+        self.data_root = (
+            data_root.resolve()
+            if data_root is not None
+            else infer_managed_data_root(self.run_dir, include_legacy=True)
+        )
         self.default_mode = default_mode
         self.model_name = loaded.effective.slots[self.SLOT_NAME].default_model
         self.reasoning_effort = loaded.effective.slots[self.SLOT_NAME].reasoning_effort
@@ -1230,11 +1236,17 @@ class OneSlotRuntime:
     def _resolve_allowed_path(self, raw_path: str) -> Path:
         path = Path(raw_path).expanduser()
         if not path.is_absolute():
-            path = (self.cwd / path).resolve()
+            managed_path = self._resolve_managed_relative_path(raw_path)
+            if managed_path is not None:
+                path = managed_path
+            else:
+                path = (self.cwd / path).resolve()
         else:
             path = path.resolve()
         allowed_prefixes = (self.cwd, self.run_dir / "resources")
         if not any(self._is_relative_to(path, root) for root in allowed_prefixes):
+            if self._managed_relative_path(path) is not None:
+                raise RuntimeError("Only staged run resources may be read under runtime-managed roots.")
             raise RuntimeError("Path is outside the live repo and staged run resources.")
         if self._is_relative_to(path, self.run_dir / "resources"):
             if not path.exists() or not path.is_file():
@@ -1255,7 +1267,34 @@ class OneSlotRuntime:
         try:
             return str(path.resolve().relative_to(self.cwd))
         except ValueError:
+            managed_relative = self._managed_relative_path(path)
+            if managed_relative is not None:
+                return managed_relative
             return str(path.resolve())
+
+    def _resolve_managed_relative_path(self, raw_path: str) -> Path | None:
+        if self.data_root is None:
+            return None
+        normalized = PurePosixPath(raw_path).as_posix().strip()
+        if not normalized or not self._is_runtime_managed_relative(normalized):
+            return None
+        return (self.data_root / Path(normalized)).resolve()
+
+    def _managed_relative_path(self, path: Path) -> str | None:
+        roots_to_try: list[Path] = []
+        if self.data_root is not None:
+            roots_to_try.append(self.data_root)
+        inferred_root = infer_managed_data_root(path, include_legacy=True)
+        if inferred_root is not None and inferred_root not in roots_to_try:
+            roots_to_try.append(inferred_root)
+        for root in roots_to_try:
+            try:
+                relative = path.resolve().relative_to(root.resolve()).as_posix()
+            except ValueError:
+                continue
+            if self._is_runtime_managed_relative(relative):
+                return relative
+        return None
 
     def _matches_any(self, relative_path: str, globs: tuple[str, ...]) -> bool:
         posix = PurePosixPath(relative_path)

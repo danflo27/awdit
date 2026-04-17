@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import textwrap
 import time
@@ -9,6 +10,7 @@ from pathlib import Path
 from unittest import mock
 
 from config import load_effective_config
+from paths import runs_root
 from provider_openai import (
     BackgroundPollResult,
     ProviderBackgroundHandle,
@@ -745,6 +747,18 @@ class SeedStageAbortProvider(DrainAfterAbortProvider):
 
 
 class SwarmTests(unittest.TestCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self._data_root_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._data_root_dir.cleanup)
+        self.data_root = Path(self._data_root_dir.name) / "awdit-data"
+        env_patcher = mock.patch.dict(os.environ, {"AWDIT_DATA_ROOT": str(self.data_root)})
+        env_patcher.start()
+        self.addCleanup(env_patcher.stop)
+
+    def _run_dir(self, repo_dir: Path, run_id: str = "run_1") -> Path:
+        return runs_root(repo_dir) / run_id
+
     def _loaded_config(self, repo_dir: Path):
         return self._loaded_config_from_text(repo_dir, _config_text())
 
@@ -763,7 +777,7 @@ class SwarmTests(unittest.TestCase):
             repo_dir = Path(tmp_dir) / "repo"
             _write(repo_dir / "app" / "service.py", "print('hello')\n")
             loaded = self._loaded_config(repo_dir)
-            run_dir = repo_dir / "runs" / "run_1"
+            run_dir = self._run_dir(repo_dir)
             run_dir.mkdir(parents=True, exist_ok=True)
             prompt_bundle = freeze_swarm_prompt_bundle(run_dir=run_dir, loaded=loaded)
             loaded.effective.swarm.prompts.seed.write_text("changed later\n", encoding="utf-8")
@@ -834,7 +848,7 @@ class SwarmTests(unittest.TestCase):
                     1,
                 ),
             )
-            run_dir = repo_dir / "runs" / "run_1"
+            run_dir = self._run_dir(repo_dir)
             run_dir.mkdir(parents=True, exist_ok=True)
             prompt_bundle = freeze_swarm_prompt_bundle(run_dir=run_dir, loaded=loaded)
 
@@ -911,7 +925,7 @@ class SwarmTests(unittest.TestCase):
                     1,
                 ),
             )
-            run_dir = repo_dir / "runs" / "run_1"
+            run_dir = self._run_dir(repo_dir)
             run_dir.mkdir(parents=True, exist_ok=True)
             prompt_bundle = freeze_swarm_prompt_bundle(run_dir=run_dir, loaded=loaded)
 
@@ -954,7 +968,7 @@ class SwarmTests(unittest.TestCase):
                     1,
                 ),
             )
-            run_dir = repo_dir / "runs" / "run_1"
+            run_dir = self._run_dir(repo_dir)
             run_dir.mkdir(parents=True, exist_ok=True)
             prompt_bundle = freeze_swarm_prompt_bundle(run_dir=run_dir, loaded=loaded)
 
@@ -1012,7 +1026,7 @@ class SwarmTests(unittest.TestCase):
             _write(repo_dir / "app" / "routes.py", "def routes():\n    return 'ok'\n")
             _write(repo_dir / "app" / "db.py", "def load_note():\n    return 'note'\n")
             loaded = self._loaded_config(repo_dir)
-            run_dir = repo_dir / "runs" / "run_1"
+            run_dir = self._run_dir(repo_dir)
             run_dir.mkdir(parents=True, exist_ok=True)
             prompt_bundle = freeze_swarm_prompt_bundle(run_dir=run_dir, loaded=loaded)
 
@@ -1120,7 +1134,7 @@ class SwarmTests(unittest.TestCase):
             repo_dir = Path(tmp_dir) / "repo"
             _write(repo_dir / "app" / "service.py", "print('hello')\n")
             loaded = self._loaded_config(repo_dir)
-            run_dir = repo_dir / "runs" / "run_1"
+            run_dir = self._run_dir(repo_dir)
             run_dir.mkdir(parents=True, exist_ok=True)
             prompt_bundle = freeze_swarm_prompt_bundle(run_dir=run_dir, loaded=loaded)
 
@@ -1177,7 +1191,7 @@ class SwarmTests(unittest.TestCase):
             repo_dir = Path(tmp_dir) / "repo"
             _write(repo_dir / "app" / "service.py", "print('hello')\n")
             loaded = self._loaded_config(repo_dir)
-            run_dir = repo_dir / "runs" / "run_1"
+            run_dir = self._run_dir(repo_dir)
             run_dir.mkdir(parents=True, exist_ok=True)
             prompt_bundle = freeze_swarm_prompt_bundle(run_dir=run_dir, loaded=loaded)
 
@@ -1237,7 +1251,7 @@ class SwarmTests(unittest.TestCase):
             repo_dir = Path(tmp_dir) / "repo"
             _write(repo_dir / "app" / "service.py", "print('hello')\n")
             loaded = self._loaded_config(repo_dir)
-            run_dir = repo_dir / "runs" / "run_1"
+            run_dir = self._run_dir(repo_dir)
             run_dir.mkdir(parents=True, exist_ok=True)
             prompt_bundle = freeze_swarm_prompt_bundle(run_dir=run_dir, loaded=loaded)
 
@@ -1414,7 +1428,7 @@ class SwarmTests(unittest.TestCase):
     def test_repo_tools_allow_only_current_run_staged_shared_resources(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             repo_dir = Path(tmp_dir) / "repo"
-            run_dir = repo_dir / "runs" / "run_1"
+            run_dir = self._run_dir(repo_dir)
             staged_file = run_dir / "resources" / "shared" / "staged" / "01_architecture.md"
             unrelated_run_file = repo_dir / "runs" / "other_run" / "secret.txt"
             _write(repo_dir / "app" / "service.py", "print('hello')\n")
@@ -1479,7 +1493,7 @@ class SwarmTests(unittest.TestCase):
             repo_dir = Path(tmp_dir) / "repo"
             repo_dir.mkdir(parents=True)
             provider = ContinuationToolProvider()
-            trace_path = repo_dir / "runs" / "run_1" / "swarm" / "tool_trace.jsonl"
+            trace_path = self._run_dir(repo_dir) / "swarm" / "tool_trace.jsonl"
             progress_events: list[tuple[str, dict[str, object]]] = []
             job = SwarmWorkerJob(
                 worker_id="job_tools",
@@ -2065,7 +2079,7 @@ class SwarmTests(unittest.TestCase):
                     "43593. Please try again in 8.403s.')"
                 ),
             )
-            metrics = SwarmRunMetrics(path=repo_dir / "runs" / "run_1" / "swarm" / "usage_summary.json")
+            metrics = SwarmRunMetrics(path=self._run_dir(repo_dir) / "swarm" / "usage_summary.json")
             metrics.write()
             completed_workers: list[str] = []
             jobs = [
@@ -2179,7 +2193,7 @@ class SwarmTests(unittest.TestCase):
             _write(repo_dir / "app" / "a.py", "print('a')\n")
             _write(repo_dir / "app" / "b.py", "print('b')\n")
             loaded = self._loaded_config(repo_dir)
-            run_dir = repo_dir / "runs" / "run_1"
+            run_dir = self._run_dir(repo_dir)
             run_dir.mkdir(parents=True, exist_ok=True)
             prompt_bundle = freeze_swarm_prompt_bundle(run_dir=run_dir, loaded=loaded)
 
@@ -2229,7 +2243,7 @@ class SwarmTests(unittest.TestCase):
                 headroom_fraction=0.85,
                 observed_peak_input_tokens={"seed_file": 20},
             )
-            run_dir = repo_dir / "runs" / "run_1"
+            run_dir = self._run_dir(repo_dir)
             run_dir.mkdir(parents=True, exist_ok=True)
             prompt_bundle = freeze_swarm_prompt_bundle(run_dir=run_dir, loaded=loaded)
 
@@ -2277,7 +2291,7 @@ class SwarmTests(unittest.TestCase):
             repo_dir = Path(tmp_dir) / "repo"
             _write(repo_dir / "app" / "service.py", "print('hello')\n")
             loaded = self._loaded_config(repo_dir)
-            run_dir = repo_dir / "runs" / "run_1"
+            run_dir = self._run_dir(repo_dir)
             run_dir.mkdir(parents=True, exist_ok=True)
             prompt_bundle = freeze_swarm_prompt_bundle(run_dir=run_dir, loaded=loaded)
 
@@ -2369,7 +2383,7 @@ class SwarmTests(unittest.TestCase):
             repo_dir = Path(tmp_dir) / "repo"
             _write(repo_dir / "app" / "service.py", "print('hello')\n")
             loaded = self._loaded_config(repo_dir)
-            run_dir = repo_dir / "runs" / "run_1"
+            run_dir = self._run_dir(repo_dir)
             run_dir.mkdir(parents=True, exist_ok=True)
             prompt_bundle = freeze_swarm_prompt_bundle(run_dir=run_dir, loaded=loaded)
 
@@ -2416,7 +2430,7 @@ class SwarmTests(unittest.TestCase):
             repo_dir = Path(tmp_dir) / "repo"
             _write(repo_dir / "app" / "service.py", "print('hello')\n")
             loaded = self._loaded_config(repo_dir)
-            run_dir = repo_dir / "runs" / "run_1"
+            run_dir = self._run_dir(repo_dir)
             run_dir.mkdir(parents=True, exist_ok=True)
             prompt_bundle = freeze_swarm_prompt_bundle(run_dir=run_dir, loaded=loaded)
 

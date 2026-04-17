@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import sqlite3
 import time
 import textwrap
@@ -12,7 +13,7 @@ from unittest import mock
 
 from cli import _allocate_run_dir, main
 from config import SLOT_NAMES, load_effective_config
-from paths import runs_root
+from paths import repos_root, runs_root, state_root
 from provider_openai import BackgroundPollResult, ProviderBackgroundHandle, ProviderTurnResult
 from repo_memory import RepoIdentity
 
@@ -139,6 +140,16 @@ def _assert_no_triple_newlines(testcase: unittest.TestCase, text: str) -> None:
     testcase.assertNotIn("\n\n\n", text)
 
 
+def _set_awdit_data_root(testcase: unittest.TestCase) -> Path:
+    data_root_dir = tempfile.TemporaryDirectory()
+    testcase.addCleanup(data_root_dir.cleanup)
+    data_root = Path(data_root_dir.name) / "awdit-data"
+    env_patcher = mock.patch.dict(os.environ, {"AWDIT_DATA_ROOT": str(data_root)})
+    env_patcher.start()
+    testcase.addCleanup(env_patcher.stop)
+    return data_root
+
+
 class HelpFormattingTests(unittest.TestCase):
     def _capture_help(self, argv: list[str]) -> str:
         stdout = io.StringIO()
@@ -167,6 +178,10 @@ class HelpFormattingTests(unittest.TestCase):
 
 
 class ReviewCliTests(unittest.TestCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.data_root = _set_awdit_data_root(self)
+
     def _input_mock(self, inputs: list[str], stdout: io.StringIO):
         remaining = list(inputs)
 
@@ -246,6 +261,28 @@ class ReviewCliTests(unittest.TestCase):
             self.assertIn("Run-scoped resource snapshot", output)
             self.assertIn("Enter one-slot runtime prototype mode?", output)
             self.assertLess(output.index("Run-scoped resource snapshot"), output.index("Enter one-slot runtime prototype mode?"))
+
+    def test_review_runtime_receives_resolved_data_root(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_dir = Path(tmp_dir) / "repo"
+            _write(repo_dir / "config" / "resources" / "shared" / "refund-boundaries.md", "shared")
+            loaded = self._loaded_config(repo_dir)
+            captured_kwargs: dict[str, object] = {}
+
+            class FakeRuntime:
+                def __init__(self, **kwargs):
+                    captured_kwargs.update(kwargs)
+
+                def interactive_loop(self) -> int:
+                    return 0
+
+            with mock.patch("cli.OneSlotRuntime", FakeRuntime):
+                result, output = self._run_review(repo_dir, loaded, ["n", "y", "n", "y"])
+
+            self.assertEqual(0, result)
+            self.assertIn("Prototype runtime setup", output)
+            self.assertEqual(self.data_root.resolve(), captured_kwargs["data_root"])
+            self.assertEqual(runs_root(repo_dir) / "2026-03-29_101530", captured_kwargs["run_dir"])
 
     def test_review_output_uses_moderate_spacing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -668,6 +705,10 @@ class ReviewCliTests(unittest.TestCase):
 
 
 class SwarmCliTests(unittest.TestCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.data_root = _set_awdit_data_root(self)
+
     def _input_mock(self, inputs: list[str], stdout: io.StringIO):
         remaining = list(inputs)
 
@@ -779,12 +820,12 @@ class SwarmCliTests(unittest.TestCase):
             self.assertIn("Swarm complete.", output)
             self.assertIn("Duplicate and case groups:", output)
 
-            repo_dir_root = repo_dir / "repos" / "repo_deadbeef"
+            repo_dir_root = repos_root(repo_dir) / "repo_deadbeef"
             self.assertTrue((repo_dir_root / "danger_map.md").exists())
             self.assertTrue((repo_dir_root / "danger_map.json").exists())
             self.assertTrue((repo_dir_root / "memory" / "repo_comments.md").exists())
 
-            with sqlite3.connect(repo_dir / "state" / "awdit.db") as connection:
+            with sqlite3.connect(state_root(repo_dir) / "awdit.db") as connection:
                 row = connection.execute(
                     "SELECT mode, status, completed_at FROM runs WHERE run_id = ?",
                     ("2026-04-06_121500",),
@@ -951,7 +992,7 @@ class SwarmCliTests(unittest.TestCase):
             )
             self.assertEqual([], run_json["eligible_files"])
 
-            with sqlite3.connect(repo_dir / "state" / "awdit.db") as connection:
+            with sqlite3.connect(state_root(repo_dir) / "awdit.db") as connection:
                 row = connection.execute(
                     "SELECT status FROM runs WHERE run_id = ?",
                     ("2026-04-06_121500",),
@@ -1066,7 +1107,7 @@ class SwarmCliTests(unittest.TestCase):
                 mock.patch("swarm.resolve_repo_identity", return_value=identity),
                 mock.patch("builtins.input", side_effect=self._input_mock(["n", "y", "y", "n"], stdout)),
                 mock.patch("sys.stdout", stdout),
-                mock.patch.dict("os.environ", {}, clear=True),
+                mock.patch.dict("os.environ", {"AWDIT_DATA_ROOT": str(self.data_root)}, clear=True),
             ):
                 result = main(["swarm", "--config", str(config_path), "--env-file", str(env_file_path)])
 
@@ -1344,7 +1385,7 @@ class SwarmCliTests(unittest.TestCase):
             self.assertEqual(0, result)
             self.assertIn("Updated repo danger map ready:", output)
 
-            repo_dir_root = repo_dir / "repos" / "repo_deadbeef"
+            repo_dir_root = repos_root(repo_dir) / "repo_deadbeef"
             payload = json.loads((repo_dir_root / "danger_map.json").read_text(encoding="utf-8"))
             comments = (repo_dir_root / "memory" / "repo_comments.md").read_text(encoding="utf-8")
 
@@ -1409,7 +1450,7 @@ class SwarmCliTests(unittest.TestCase):
             self.assertIn("Updated repo danger map ready:", output)
 
             payload = json.loads(
-                (repo_dir / "repos" / "repo_deadbeef" / "danger_map.json").read_text(
+                (repos_root(repo_dir) / "repo_deadbeef" / "danger_map.json").read_text(
                     encoding="utf-8"
                 )
             )
@@ -1582,7 +1623,7 @@ class SwarmCliTests(unittest.TestCase):
             self.assertIn("Swarm canceled before launch.", output)
             self.assertNotIn("Swarm preflight", output)
 
-            with sqlite3.connect(repo_dir / "state" / "awdit.db") as connection:
+            with sqlite3.connect(state_root(repo_dir) / "awdit.db") as connection:
                 row = connection.execute(
                     "SELECT status FROM runs WHERE run_id = ?",
                     ("2026-04-06_121500",),
@@ -1679,7 +1720,7 @@ class SwarmCliTests(unittest.TestCase):
 
             self.assertEqual(1, result)
             self.assertIn("Swarm startup failed: snapshot broke", stdout.getvalue())
-            with sqlite3.connect(repo_dir / "state" / "awdit.db") as connection:
+            with sqlite3.connect(state_root(repo_dir) / "awdit.db") as connection:
                 row = connection.execute(
                     "SELECT status, completed_at FROM runs WHERE run_id = ?",
                     ("2026-04-06_121500",),
@@ -1761,7 +1802,7 @@ class SwarmCliTests(unittest.TestCase):
             self.assertEqual("danger_map", diagnostic["failures"][0]["stage"])
             self.assertEqual("danger_map", diagnostic["failures"][0]["worker_id"])
             self.assertIn("synthetic swarm failure", diagnostic["failures"][0]["failure_message"])
-            with sqlite3.connect(repo_dir / "state" / "awdit.db") as connection:
+            with sqlite3.connect(state_root(repo_dir) / "awdit.db") as connection:
                 row = connection.execute(
                     """
                     SELECT status, failure_stage, failure_worker_id, failure_message, failure_artifact
@@ -1778,6 +1819,10 @@ class SwarmCliTests(unittest.TestCase):
 
 
 class InitConfigCliTests(unittest.TestCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.data_root = _set_awdit_data_root(self)
+
     def test_init_config_writes_commented_grouped_scaffold(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             repo_dir = Path(tmp_dir) / "repo"
