@@ -3,7 +3,7 @@
 `awdit` is an AI-assisted security audit CLI. It runs two top-level commands against a target repository:
 
 - **`awdit review`** — the primary audit pipeline. Two competing hunter slots, two skeptics, two referees, and two solvers run in a fixed-order pipeline with bounded debate and a human truth review before any fix work. Designed for robustness. Runs locally or in CI.
-- **`awdit swarm`** — a broader, cheaper repo-wide offensive sweep. One adversarial worker per eligible file, two-stage sweep → proof, one ranked report. Local only.
+- **`awdit swarm`** — a broader, cheaper repo-wide offensive sweep. One adversarial worker per eligible file, two-stage claim → verify, one verdict-first `FINDINGS.md`. Local only.
 
 The project is early and architecture-led. The live design is captured as ADRs under [docs/decisions/](docs/decisions/); in-flight work is tracked under [docs/roadmap/](docs/roadmap/).
 
@@ -12,7 +12,7 @@ The project is early and architecture-led. The live design is captured as ADRs u
 Start with the ADRs — read them in order:
 
 - [0001 — Review pipeline](docs/decisions/0001-review-pipeline.md) — stages, role rules, coordinator responsibilities, slot/session lifecycle, bounded debate
-- [0002 — Swarm](docs/decisions/0002-swarm.md) — one-agent-per-file sweep, proof ladder, configuration surface
+- [0002 — Swarm](docs/decisions/0002-swarm.md) — one-agent-per-file claim → verify, proof ladder, configuration surface
 - [0003 — Command split and workflows](docs/decisions/0003-command-split-and-workflows.md) — review runs locally or in CI; swarm is local-only
 - [0004 — Scope and file selection](docs/decisions/0004-scope-and-file-selection.md) — `git ls-files` minus `scope.exclude` as the shared baseline
 - [0005 — Storage and artifacts](docs/decisions/0005-storage-and-artifacts.md) — data-root layout, run-scoped vs repo-scoped split, forward-facing Markdown rule

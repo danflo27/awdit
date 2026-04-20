@@ -78,14 +78,22 @@ Review runs produce artifacts under the top-level `runs/<run_id>/` directories a
 
 ```
 runs/<run_id>/swarm/
-  seeds/                           # raw per-worker markdown + JSON
-  proofs/                          # proof notes, exploit steps, citations, repro artifacts
-  reports/
-    seed_ledger.md                 # all initial seeds and zero-finding outcomes
-    case_groups.md                 # duplicate and related-seed grouping under SWM-###
-    final_ranked_findings.md       # primary operator-facing ranked report
-    final_summary.md               # short run summary with top-finding links
+  FINDINGS.md                      # primary operator-facing verdict-first report
+  SUMMARY.md                       # short run summary with top-finding links
+  claims/                          # per-claim markdown + JSON (one file per file scanned)
+  validated/                       # verified findings: notes, exploit steps, citations, repro artifacts
+  debug/                           # diagnostic artifacts (not operator-facing)
+    all_claims.md                  # every claim and its outcome
+    case_groups.md                 # duplicate and related-claim grouping under CASE-###
+    partial_summary.md             # interim summary if the run aborted
+    usage_summary.json             # per-model token/tool usage rollup
+    tool_trace.jsonl               # per-call tool trace
+    failure_diagnostic.json        # populated only when a stage fails
 ```
+
+Per-claim markdown under `claims/` is only written when the claim produced an actionable finding. Claims with `outcome=no_finding` persist their structured JSON but omit the `.md` file so the `claims/` directory reads as a short list of real candidates instead of a wall of null entries. The `debug/all_claims.md` ledger still lists every claim and its outcome for auditability.
+
+Files are slug-named after the target path — e.g. `dataBridgeAbi-002.md` — so the directory listing doubles as an index by file.
 
 ### Repo-scoped vs. run-scoped split
 
@@ -121,7 +129,7 @@ runs/<run_id>/swarm/
   - referee fix-review reports
   - merged solver comparison summary
   - final solver selection summary
-  - (swarm) seed ledger, case groups, final ranked findings, final summary
+  - (swarm) `FINDINGS.md`, `SUMMARY.md`, plus the diagnostic artifacts under `swarm/debug/` (`all_claims.md`, `case_groups.md`)
 - These Markdown artifacts should reference the relevant code paths and line spans wherever code is central to the stage.
 
 ### Session-state (control plane)
